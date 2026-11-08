@@ -30,6 +30,12 @@ dependencies {
     implementation("org.springframework.boot:spring-boot-starter-actuator")
     implementation("org.springframework.boot:spring-boot-starter-jdbc")
     implementation("org.springframework.boot:spring-boot-starter-data-redis")
+    // Filter chain, PasswordEncoder (bcrypt).
+    implementation("org.springframework.boot:spring-boot-starter-security")
+    // BearerTokenAuthenticationFilter + Nimbus JOSE: verifies and issues our HS256 access tokens.
+    implementation("org.springframework.boot:spring-boot-starter-oauth2-resource-server")
+    // @Valid request bodies (Jakarta Bean Validation).
+    implementation("org.springframework.boot:spring-boot-starter-validation")
     // Flyway runs db/migration/V*.sql on startup. Since Flyway 10, PostgreSQL support is a separate module.
     implementation("org.flywaydb:flyway-core")
     runtimeOnly("org.flywaydb:flyway-database-postgresql")

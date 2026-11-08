@@ -4,11 +4,14 @@
  * realtime and control.
  * Owns tables: orders, order_items, idempotency_keys.
  * <p>
- * Allowed dependencies are the D-007 table in docs/DECISIONS.md; ModularityTest enforces them.
+ * Allowed dependencies are the D-007 table in docs/DECISIONS.md (plus shared, D-009); ModularityTest
+ * enforces them.
  */
 @ApplicationModule(
         displayName = "Booking",
         allowedDependencies = {
+                "shared :: security",
+                "shared :: error",
                 "inventory :: api",
                 "inventory :: events",
                 "payments :: api",

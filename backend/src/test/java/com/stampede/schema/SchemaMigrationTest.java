@@ -22,7 +22,7 @@ import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
 /**
- * Checks the Flyway V1 schema against a fresh Postgres container.
+ * Checks the Flyway schema (V1, V2) against a fresh Postgres container.
  *
  * <p>{@code @JdbcTest} starts only the JDBC + Flyway slice, and wraps each test in a transaction that
  * is rolled back, so every test builds its own fixture and leaves nothing behind. A failed statement
@@ -57,9 +57,8 @@ class SchemaMigrationTest {
     @Test
     void migrationsApplyCleanlyOnFreshDatabase() {
         MigrationInfo[] applied = flyway.info().applied();
-        assertThat(applied).hasSize(1);
-        assertThat(applied[0].getVersion().getVersion()).isEqualTo("1");
-        assertThat(applied[0].getState()).isEqualTo(MigrationState.SUCCESS);
+        assertThat(applied).extracting(m -> m.getVersion().getVersion()).containsExactly("1", "2");
+        assertThat(applied).allSatisfy(m -> assertThat(m.getState()).isEqualTo(MigrationState.SUCCESS));
 
         List<String> tables = jdbc.sql("""
                 SELECT table_name FROM information_schema.tables
@@ -70,7 +69,7 @@ class SchemaMigrationTest {
                 "users", "devices", "venues", "sections", "seats", "events", "price_tiers",
                 "event_seats", "holds", "orders", "order_items", "payments", "idempotency_keys",
                 "outbox", "processed_events", "tickets", "checkins", "audit_log",
-                "user_event_allowance");
+                "user_event_allowance", "refresh_token_families", "refresh_tokens");
     }
 
     // -------------------------------------------------------------------------------------------
@@ -158,6 +157,82 @@ class SchemaMigrationTest {
     }
 
     // -------------------------------------------------------------------------------------------
+    // V2: users.role and refresh_tokens
+    // -------------------------------------------------------------------------------------------
+
+    @Test
+    void newUsersDefaultToRoleUser() {
+        Fixture f = fixture();
+        assertThat(jdbc.sql("SELECT role FROM users WHERE id = ?").param(f.userId).query(String.class).single())
+                .isEqualTo("USER");
+    }
+
+    @Test
+    void invalidUserRoleIsRejected() {
+        Fixture f = fixture();
+        assertViolates(() -> jdbc.sql("UPDATE users SET role = 'SUPERUSER' WHERE id = ?").param(f.userId).update(),
+                CHECK_VIOLATION, "ck_users_role");
+    }
+
+    @Test
+    void refreshTokenHashMustBeUnique() {
+        UUID family = insertFamily(fixture().userId);
+        insertRefreshToken(family, new byte[32]);
+        assertViolates(() -> insertRefreshToken(family, new byte[32]),
+                UNIQUE_VIOLATION, "uq_refresh_tokens_token_hash");
+    }
+
+    @Test
+    void refreshTokenHashMustBe32Bytes() {
+        UUID family = insertFamily(fixture().userId);
+        assertViolates(() -> insertRefreshToken(family, new byte[16]),
+                CHECK_VIOLATION, "ck_refresh_tokens_hash_length");
+    }
+
+    @Test
+    void refreshTokenMustExpireAfterIssue() {
+        UUID family = insertFamily(fixture().userId);
+        UUID id = insertRefreshToken(family, new byte[32]);
+        assertViolates(() -> jdbc.sql("UPDATE refresh_tokens SET expires_at = issued_at WHERE id = ?").param(id).update(),
+                CHECK_VIOLATION, "ck_refresh_tokens_expiry");
+    }
+
+    @Test
+    void unusedRefreshTokenCannotHaveAChild() {
+        UUID family = insertFamily(fixture().userId);
+        UUID parent = insertRefreshToken(family, new byte[32]);
+        byte[] otherHash = new byte[32];
+        otherHash[0] = 1;
+        UUID child = insertRefreshToken(family, otherHash);
+        assertViolates(() -> jdbc.sql("UPDATE refresh_tokens SET replaced_by = ? WHERE id = ?").params(child, parent).update(),
+                CHECK_VIOLATION, "ck_refresh_tokens_replaced_only_if_used");
+    }
+
+    @Test
+    void refreshTokenFamilyRevokedAtAndReasonGoTogether() {
+        UUID family = insertFamily(fixture().userId);
+        assertViolates(() -> jdbc.sql("UPDATE refresh_token_families SET revoked_at = now() WHERE id = ?")
+                        .param(family).update(),
+                CHECK_VIOLATION, "ck_refresh_token_families_revoked_consistent");
+    }
+
+    @Test
+    void refreshTokenFamilyRevokeReasonIsChecked() {
+        UUID family = insertFamily(fixture().userId);
+        assertViolates(() -> jdbc.sql("UPDATE refresh_token_families SET revoked_at = now(), revoke_reason = 'BORED' WHERE id = ?")
+                        .param(family).update(),
+                CHECK_VIOLATION, "ck_refresh_token_families_revoke_reason");
+    }
+
+    @Test
+    void refreshTokenFamilyMustExpireAfterCreation() {
+        UUID family = insertFamily(fixture().userId);
+        assertViolates(() -> jdbc.sql("UPDATE refresh_token_families SET expires_at = created_at WHERE id = ?")
+                        .param(family).update(),
+                CHECK_VIOLATION, "ck_refresh_token_families_expiry");
+    }
+
+    // -------------------------------------------------------------------------------------------
     // audit_log is append-only
     // -------------------------------------------------------------------------------------------
 
@@ -224,6 +299,20 @@ class SchemaMigrationTest {
                 .params(eventId, seatId, tierId).update();
 
         return new Fixture(userId, eventId, seatId, tierId);
+    }
+
+    private UUID insertFamily(UUID userId) {
+        UUID id = UUID.randomUUID();
+        jdbc.sql("INSERT INTO refresh_token_families (id, user_id, expires_at) VALUES (?, ?, now() + interval '30 days')")
+                .params(id, userId).update();
+        return id;
+    }
+
+    private UUID insertRefreshToken(UUID familyId, byte[] hash) {
+        UUID id = UUID.randomUUID();
+        jdbc.sql("INSERT INTO refresh_tokens (id, family_id, token_hash, expires_at) VALUES (?, ?, ?, now() + interval '7 days')")
+                .params(id, familyId, hash).update();
+        return id;
     }
 
     private UUID insertOrder(Fixture f, String status) {

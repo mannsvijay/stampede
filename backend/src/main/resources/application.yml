@@ -28,3 +28,17 @@ management:
       # Local development only: shows the db and redis components individually.
       # Restrict this before deploying (M7).
       show-details: always
+
+stampede:
+  auth:
+    # Base64 of at least 32 random bytes (HS256). No default: the app refuses to start without it.
+    # Generate one with: openssl rand -base64 32
+    jwt-secret: ${STAMPEDE_JWT_SECRET:}
+    issuer: stampede
+    access-token-ttl: 15m
+    refresh-token-ttl: 7d
+    refresh-family-max-age: 30d
+  # Read only under the bootstrap-admin profile (AdminBootstrapRunner).
+  bootstrap-admin:
+    email: ${STAMPEDE_ADMIN_EMAIL:}
+    password: ${STAMPEDE_ADMIN_PASSWORD:}

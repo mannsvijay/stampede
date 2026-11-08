@@ -2,11 +2,14 @@
  * Control: Admin APIs, the control room (metrics, queue depth, pause), chaos hooks and the invariant checker.
  * Owns tables: audit_log.
  * <p>
- * Allowed dependencies are the D-007 table in docs/DECISIONS.md; ModularityTest enforces them.
+ * Allowed dependencies are the D-007 table in docs/DECISIONS.md (plus shared, D-009); ModularityTest
+ * enforces them.
  */
 @ApplicationModule(
         displayName = "Control",
         allowedDependencies = {
+                "shared :: security",
+                "shared :: error",
                 "waitingroom :: api",
                 "inventory :: api",
                 "booking :: api",

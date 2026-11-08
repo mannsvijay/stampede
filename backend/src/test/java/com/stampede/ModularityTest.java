@@ -42,7 +42,7 @@ class ModularityTest {
 
         assertThat(namedInterfaces).containsOnlyKeys(
                 "identity", "waitingroom", "inventory", "booking",
-                "payments", "ticketing", "realtime", "control");
+                "payments", "ticketing", "realtime", "control", "shared");
 
         assertThat(namedInterfaces).containsEntry("identity", Set.of("api"));
         assertThat(namedInterfaces).containsEntry("waitingroom", Set.of("api", "events"));
@@ -52,6 +52,7 @@ class ModularityTest {
         assertThat(namedInterfaces).containsEntry("ticketing", Set.of("api", "events"));
         assertThat(namedInterfaces).containsEntry("realtime", Set.of());
         assertThat(namedInterfaces).containsEntry("control", Set.of());
+        assertThat(namedInterfaces).containsEntry("shared", Set.of("security", "error"));
     }
 
     private static Set<String> namedInterfaceNames(ApplicationModule module) {
