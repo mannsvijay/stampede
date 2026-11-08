@@ -15,10 +15,11 @@
       "Bash(git commit *)"
     ],
     "deny": [
-      "Read(./.env)",
-      "Read(./.env.*)",
-      "Bash(git push *)",
-      "Bash(rm -rf *)"
+       "Read(./.env)",
+       "Read(./.env.local)",
+       "Read(./.env.*.local)",
+       "Bash(git push *)",
+       "Bash(rm -rf *)"
     ]
   }
 }
