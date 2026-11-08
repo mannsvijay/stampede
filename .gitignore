@@ -1,0 +1,29 @@
+# Local secrets (the committed template is .env.example)
+.env
+
+# Gradle / Java build output
+.gradle/
+build/
+out/
+bin/
+# Keep the wrapper jar: it is what makes ./gradlew work without a Gradle install.
+!gradle/wrapper/gradle-wrapper.jar
+
+# IDEs
+.idea/
+*.iml
+.vscode/
+*.swp
+
+# Frontend
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Logs
+*.log
+
+# OS junk
+.DS_Store
+Thumbs.db
+desktop.ini

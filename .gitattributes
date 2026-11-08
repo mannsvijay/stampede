@@ -1,0 +1,16 @@
+# Let Git normalise text files; store them with LF in the repository.
+* text=auto
+
+# Shell scripts must keep LF on checkout, even on Windows, or they break in Linux containers/CI.
+gradlew   text eol=lf
+*.sh      text eol=lf
+
+# Windows batch files expect CRLF.
+*.bat     text eol=crlf
+*.cmd     text eol=crlf
+
+# Binary files: never touch line endings.
+*.jar     binary
+*.png     binary
+*.jpg     binary
+*.ico     binary
