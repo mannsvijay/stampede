@@ -1,0 +1,100 @@
+# Stampede build plan
+
+This plan overrides the milestones in PRD section 14. Work top to bottom. One task per Claude session.
+Tick a task only when its tests pass and it's committed.
+
+## Changes from PRD v1.0
+1. **Re-tiered MVP.** MVP = M0 to M3. That alone is a complete, shippable project: correct booking
+   under contention, three benchmarked strategies, idempotent checkout with a saga. Everything after
+   M3 is v1; the stretch list is last.
+2. **No Kafka until stretch.** Outbox relay publishes to Redis pub/sub behind an `EventPublisher`
+   interface. Kafka (Redpanda) becomes a drop-in second implementation later.
+3. **Realtime path is Redis pub/sub only**, with a written latency budget (target p95 < 300 ms):
+   hold commit -> publish (<10 ms) -> instance receives (<10 ms) -> 100 ms diff batch -> WebSocket
+   send -> client paint. The outbox is for durable domain events, not the seat-map fast path.
+4. **Offline ticket scanning needs a revocation sync.** Before gates open, scanners download the
+   latest `ticketId -> version` map. Scans of stale versions are rejected; remaining offline-window
+   risk (two offline gates) is documented, and duplicates are flagged on sync.
+5. **Waiting-room fairness.** Everyone who arrives before T-0 is shuffled randomly (lottery); FIFO
+   applies after T-0. "Arrival" = server receipt of the queue-join request. PoW difficulty is kept
+   low enough for a low-end Android phone (measure it). Kendall tau is computed for post-T-0 joins.
+6. **Invariant 5 (Redis vs Postgres)** has a tolerance window (e.g. 2 s) under the Redis-first
+   strategy, since that strategy is eventually consistent by design.
+7. **Bot metric honesty.** The README states the bots were written by the author and what they do.
+
+## M0 - Skeleton (week 1)
+- [ ] M0.1 Monorepo layout, docker-compose (postgres 16, redis 7, mailpit), Gradle backend that boots
+- [ ] M0.2 Flyway V1: full schema from PRD 9 with CHECK constraints and the unique partial index
+- [ ] M0.3 Venue JSON format + generator script + seed loader (one ~2,000-seat venue)
+- [ ] M0.4 Spring Modulith module packages + verification test
+- [ ] M0.5 Auth: register, login, refresh rotation, hashed refresh tokens, JWT filter
+- [ ] M0.6 GET /events, GET /events/{id}; RFC 7807 error handler
+- [ ] M0.7 Frontend shell: Vite + React + TS, router, events list from the API, OpenAPI-generated client
+- [ ] M0.8 GitHub Actions: backend tests (Testcontainers) + frontend typecheck/lint
+- [ ] M0.9 Update CLAUDE.md commands with the real ones
+**Exit:** `docker compose up` runs everything on a clean clone; CI green.
+
+## M1 - Core booking, pessimistic (weeks 2-3)
+- [ ] M1.1 Seat state machine (domain class) + unit tests + property tests (jqwik)
+- [ ] M1.2 `InventoryStrategy` interface; pessimistic strategy (SELECT ... FOR UPDATE, sorted IDs).
+      **Write this one yourself by hand; Claude reviews.**
+- [ ] M1.3 Concurrency test harness: N threads race for the same seats, exactly one wins, x1000
+- [ ] M1.4 Holds: create (all-or-nothing, per-user cap), release, 5-min expiry sweeper
+- [ ] M1.5 Orders from holds (happy path, synchronous fake payment for now)
+- [ ] M1.6 Ticket issuing: Ed25519 signing, QR payload, GET /me/tickets
+- [ ] M1.7 Invariant checker v1 (five checks as SQL) + hard assertion after every integration test
+- [ ] M1.8 Basic seat map page: Canvas2D render of seats, click to hold, checkout, show ticket QR
+**Exit:** a full purchase works end to end in the browser; concurrency test passes 1000/1000.
+
+## M2 - Contention lab (weeks 4-5)  <- the heart of the portfolio
+- [ ] M2.1 Optimistic strategy (version column, bounded retries with jitter)
+- [ ] M2.2 Redis-first strategy (Lua: all-or-nothing hold keys with TTL, per-user cap inside Lua,
+      async persistence + reconciler)
+- [ ] M2.3 Strategy selectable per event (admin endpoint); concurrency test parameterised over all three
+- [ ] M2.4 k6 scenarios: seat-collision, mixed-realistic; `scripts/k6.sh` runs k6 in Docker
+- [ ] M2.5 `scripts/bench.sh`: runs each strategy, collects k6 JSON + Postgres CPU, writes
+      `benchmarks/results/<date>/` and a markdown results table
+- [ ] M2.6 Benchmark report v1 in `benchmarks/README.md` with your own analysis of why the numbers differ
+**Exit:** zero double-sells for all three strategies under collision; results table committed.
+
+## M3 - Correct checkout (week 6-7)
+- [ ] M3.1 Idempotency keys (store hash + response; same key/different body -> 422) + retry-storm test
+- [ ] M3.2 Outbox table + relay to `EventPublisher` (Redis pub/sub impl) + consumer dedupe table
+- [ ] M3.3 Mock payment provider as a separate small service: intents, HMAC-signed webhooks, chaos knobs
+- [ ] M3.4 Persisted saga orchestrator with compensation; resumes after crash
+- [ ] M3.5 Webhook ingestion: signature check, dedupe, out-of-order handling, reconciliation poller
+- [ ] M3.6 Hold extension on payment start; late-success-after-expiry -> automatic refund path
+- [ ] M3.7 Checkout UI shows real saga steps over SSE
+**Exit:** retry storm, duplicate and out-of-order webhooks: no duplicate orders, invariants pass.
+**MVP COMPLETE HERE. Deploy, write the README, record a demo before continuing.**
+
+## M4 - Waiting room (week 8)
+- [ ] M4.1 Queue join (Redis sorted set), pre-T-0 lottery, position/ETA over SSE, heartbeats
+- [ ] M4.2 Admission scheduler + signed admission tokens; inventory endpoints require them
+- [ ] M4.3 Token-bucket rate limits (IP/user/device) in Redis Lua
+- [ ] M4.4 Proof-of-work (hashcash) in a Web Worker; measure solve time on a cheap phone
+- [ ] M4.5 AIMD adaptive admission driven by p95 latency and error rate
+- [ ] M4.6 k6 thundering-herd + bot-swarm scenarios; fairness (Kendall tau) + bot share reported
+
+## M5 - Realtime and frontend (weeks 9-10)
+- [ ] M5.1 WebSocket seat channel: snapshot, 100 ms bitset diffs, sequence numbers, resync
+- [ ] M5.2 Measure hold-to-visible latency against the budget above
+- [ ] M5.3 Seat map v2: pan/zoom, semantic zoom, "Taken N ms ago", keyboard navigation
+- [ ] M5.4 Hold timer bar + tab-title countdown; waiting room screen (simple version first)
+- [ ] M5.5 Control room: queue depth, admission rate, holds/s, p95, errors, invariant lights, pause
+
+## M6 - Resilience and observability (week 11)
+- [ ] M6.1 Three API instances behind Nginx; kill one mid-checkout, saga resumes
+- [ ] M6.2 Chaos scripts: Redis restart, payment outage, delayed webhooks; invariants after each
+- [ ] M6.3 Prometheus metrics + Grafana dashboards committed as JSON
+- [ ] M6.4 Soak test (1 hour)
+
+## M7 - Ship (week 12)
+- [ ] M7.1 Deploy backend (one VM, compose) + frontend (Vercel)
+- [ ] M7.2 README: architecture diagram, decisions and trade-offs, results, how to reproduce
+- [ ] M7.3 Demo video (3 minutes): drop, collision, chaos run, invariants staying green
+
+## Stretch (only when everything above is green)
+Kafka/Redpanda publisher, OpenTelemetry + Jaeger, WebGL particle waiting room, ticket reveal and
+holographic foil, wallet, transfer with version bump, offline scanner PWA with revocation sync,
+presale codes, best-available, resale, venue editor, rotating QR.

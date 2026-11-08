@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(./gradlew *)",
+      "Bash(cd backend && ./gradlew *)",
+      "Bash(docker compose *)",
+      "Bash(docker ps *)",
+      "Bash(docker logs *)",
+      "Bash(npm run *)",
+      "Bash(./scripts/*)",
+      "Bash(git status)",
+      "Bash(git diff *)",
+      "Bash(git log *)",
+      "Bash(git add *)",
+      "Bash(git commit *)"
+    ],
+    "deny": [
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Bash(git push *)",
+      "Bash(rm -rf *)"
+    ]
+  }
+}
