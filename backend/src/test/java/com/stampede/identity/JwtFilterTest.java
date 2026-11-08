@@ -44,9 +44,11 @@ class JwtFilterTest extends ApiTestSupport {
     @Test
     void publicRoutesNeedNoToken() {
         assertThat(get("/actuator/health", null).status()).isEqualTo(200);
-        // No /events controller until M0.6: 404 (not 401) shows security let the request through.
-        assertThat(get("/events", null).status()).isEqualTo(404);
-        assertThat(get("/events/" + UUID.randomUUID(), null).status()).isEqualTo(404);
+        // Public: a real answer (not 401) shows security let the request through without a token.
+        assertThat(get("/events", null).status()).isEqualTo(200);
+        Response unknown = get("/events/" + UUID.randomUUID(), null);
+        assertThat(unknown.status()).isEqualTo(404);
+        assertThat(unknown.code()).isEqualTo("EVENT_NOT_FOUND");
     }
 
     @Test
