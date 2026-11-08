@@ -1,0 +1,67 @@
+/*
+ * Design tokens from PRD section 7 ("departure board meets Swiss poster"). M5's split-flap board
+ * builds on these; components use the variables, never raw colours.
+ */
+:root {
+  --ink: #0b0b0c;
+  --paper: #f2f0eb;
+  --graphite: #8a8a8e;
+  --signal: #ff3b1f; /* liveness, urgency, "yours" only */
+  --confirm: #2f6b4f; /* used once: confirmed order / valid scan */
+
+  /* Dark mode is the default. */
+  --bg: var(--ink);
+  --fg: var(--paper);
+  --hairline: color-mix(in srgb, var(--paper) 12%, transparent);
+
+  /* Geist / Geist Mono arrive with M5; system fallbacks for now. */
+  --font-ui: 'Geist', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono: 'Geist Mono', ui-monospace, 'Cascadia Mono', 'Consolas', monospace;
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 16px;
+  --space-4: 32px;
+  --space-5: 64px;
+  --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: var(--paper);
+    --fg: var(--ink);
+    --hairline: color-mix(in srgb, var(--ink) 12%, transparent);
+  }
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-ui);
+  line-height: 1.4;
+}
+
+a {
+  color: inherit;
+}
+
+/* Every number, timer and price: monospace with tabular figures, so digits never shift. */
+.mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Uppercase micro-labels with wide letter-spacing. */
+.label {
+  font-size: 12px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--graphite);
+}

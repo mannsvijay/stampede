@@ -83,6 +83,20 @@ Tick a task only when its tests pass and it's committed.
       `serverTime`. Errors: branch on `code` in the problem+json body. `RegisterRequest.password` is
       not marked required in the spec (its custom @ValidPassword constraint isn't understood by
       springdoc); fix that in the spec when the register form needs it.
+      Decisions (D-011, draft): npm; openapi-typescript + openapi-fetch with the generated
+      `src/api/schema.d.ts` committed (`npm run gen:api`, `npm run check:api`); React Router;
+      TanStack Query; CSS Modules + `tokens.css` (PRD 7 colours); Vitest + React Testing Library +
+      jsdom + MSW (Playwright from M1.8). Pages at `/` and `/drops/:id`; the Vite proxy forwards only
+      /auth, /events, /actuator and /v3. Access token in memory; on a 401 one shared refresh per tab,
+      serialised across tabs with the Web Locks API; retry once. TypeScript pinned to 5.9.3
+      (typescript-eslint and openapi-typescript don't support 7 yet). Exact versions, each published
+      14+ days before install, installed with `npm install --before=<date>`. No login UI yet.
+      Backend: documentation-only `@Schema` on RegisterRequest.password (required, minLength 12).
+      Open: revisit the TypeScript 5.9.3 pin when typescript-eslint and openapi-typescript support 7.
+      Open: `npm audit` reports 10 moderate findings, all one minimatch advisory (GHSA-g3hv-75wg-m249)
+      in dev-only lint tooling (`npm audit --omit=dev`: 0). The fix (minimatch 11.0.1, published
+      2026-10-27) passes the 14-day rule from 2026-11-10; it needs an npm `overrides` entry because
+      eslint 10.13 asks for minimatch 10. Decide then.
 - [ ] M0.8 GitHub Actions: backend tests (Testcontainers) + frontend typecheck/lint
 - [ ] M0.9 Update CLAUDE.md commands with the real ones
 - [ ] M0.10 Backend Dockerfile + `backend` service in docker-compose (needed for the M0 exit criterion;

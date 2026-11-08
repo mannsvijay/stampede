@@ -325,3 +325,67 @@ Write these yourself, in your own words. Each one is an interview answer you've 
   - `shared.web` starts collecting non-error infrastructure.
   - The 100-event cap is hit.
   - The board needs live counts before M5 exists.
+
+### D-011 Frontend shell: tooling, generated client, and token handling (DRAFT)
+- **Date:** 2026-11-09
+- **Context:** M0.7 starts the frontend. It needs a typed client for the API whose contract is the
+  committed `docs/openapi.json` (D-010), an auth layer that works with strict refresh-token reuse
+  detection (D-008), and tooling that won't fight the custom design planned for M5 (PRD 7).
+- **Options considered:**
+  - Package manager: npm; pnpm.
+  - Client generator: openapi-typescript + openapi-fetch (types only, tiny runtime); orval (generates
+    TanStack Query hooks and mocks); @hey-api/openapi-ts (0.x, frequent breaking changes);
+    openapi-generator (Java, verbose).
+  - Generated client: committed with a regenerate-and-compare check; generated at build time.
+  - Router: React Router; TanStack Router (type-safe params, more concepts); wouter (minimal).
+  - Data fetching: TanStack Query; plain fetch in useEffect.
+  - Styling: CSS Modules + CSS variables; Tailwind; a component library (conflicts with PRD 7).
+  - Tests: Vitest + React Testing Library + jsdom + MSW; the same with hand-stubbed fetch.
+  - URL scheme: app pages separate from API prefixes; the API behind `/api` with a proxy rewrite.
+- **Decision:**
+  - **Tools:** npm; openapi-typescript + openapi-fetch; React Router (library mode); TanStack Query;
+    CSS Modules + `src/styles/tokens.css`; Vitest + React Testing Library + jsdom + MSW, with
+    Playwright from M1.8.
+  - **Generated types:** `src/api/schema.d.ts` is committed. `npm run gen:api` writes it and
+    `npm run check:api` regenerates in memory and fails on a difference (CI in M0.8). Both use one
+    script, so the check compares exactly what generation would write.
+  - **Auth:** the access token lives only in memory. Our own `authFetch` (passed to openapi-fetch)
+    adds the bearer token. On a 401 outside /auth, it refreshes once and retries once. Concurrent
+    401s share one in-flight refresh, and a request whose token was already replaced retries without
+    refreshing. Refreshes are serialised across tabs with the Web Locks API (`navigator.locks`),
+    falling back to per-tab only where it is missing. Refresh and logout send `X-Requested-With`.
+    Errors become `ApiError`, whose `code` is the generated union of codes.
+  - **Clock:** countdowns use `offset = serverTime − midpoint(sent, received)`.
+  - **URLs:** app pages are `/` and `/drops/:id`. The Vite dev proxy forwards only /auth, /events,
+    /actuator and /v3, so the API and refresh cookie are same-origin.
+  - **TypeScript is pinned to 5.9.3**, not 7.0. typescript-eslint 8.72 supports TypeScript
+    `<6.1.0` and openapi-typescript 7.13 only `^5.x`, so npm can't install them alongside 7.
+    **Revisit** when both support TypeScript 7.
+  - **Supply chain:** exact versions only (`save-exact=true` in `.npmrc`). Every version is
+    published at least 14 days before install, and `npm install --before=<date>` applies the same
+    cutoff to transitive dependencies. package-lock.json is committed.
+  - No login UI yet. It comes with the first page that needs a user (M1.8).
+- **Why:**
+  - **openapi-typescript:** generates only types, so the committed diff stays small and readable,
+    and our auth logic is plain code we own rather than generator output.
+  - **TanStack Query:** handles caching, ignoring stale responses, and refetching, which the board
+    needs later anyway.
+  - **CSS Modules + tokens:** no dependency, and M5 builds on the PRD 7 tokens directly.
+  - **MSW:** tests run the real client code against fake responses. Unhandled requests fail the test
+    explicitly; MSW's own 'error' mode only makes the fetch fail, which the UI can swallow.
+  - **Shared and cross-tab refresh:** strict reuse detection (D-008) turns any two concurrent
+    refreshes with the same cookie into a logout, so refreshes must queue both within a tab and
+    across tabs.
+  - **Separate app and API URLs:** a page reload never lands on the API, and the cookie path
+    (`/auth`) needs no rewriting.
+- **Trade-offs:**
+  - Hooks are written by hand (one line each).
+  - Exact pins and the 14-day rule mean security fixes arrive at least 14 days late. On 2026-11-09,
+    `npm audit` reports 10 moderate findings from one advisory (minimatch, GHSA-g3hv-75wg-m249) in
+    lint tooling only. `npm audit --omit=dev` reports 0. The fix (minimatch 11.0.1, published
+    2026-10-27) wasn't 14 days old yet.
+  - Where the Web Locks API is missing (old browsers), only the per-tab protection applies.
+- **How I'd know it was wrong:**
+  - Users get logged out with several tabs open (cross-tab serialisation not working).
+  - `check:api` keeps failing on generator noise rather than real contract changes.
+  - The hand-written query hooks grow into a parallel client.

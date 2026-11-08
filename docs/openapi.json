@@ -509,10 +509,12 @@
             "minLength" : 0
           },
           "password" : {
-            "type" : "string"
+            "type" : "string",
+            "description" : "At least 12 characters and at most 72 UTF-8 bytes",
+            "minLength" : 12
           }
         },
-        "required" : [ "email" ]
+        "required" : [ "email", "password" ]
       },
       "TokenResponse" : {
         "type" : "object",

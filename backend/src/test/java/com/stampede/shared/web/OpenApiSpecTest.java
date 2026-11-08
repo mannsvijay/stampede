@@ -122,6 +122,12 @@ class OpenApiSpecTest {
         }
         // Request schemas keep the required list derived from their validation annotations.
         assertThat(schemas.path("LoginRequest").path("required").toString()).isEqualTo("[\"email\",\"password\"]");
+        // RegisterRequest.password is validated by a custom constraint springdoc can't read, so it is
+        // documented explicitly (M0.7); the frontend's generated type must not make it optional.
+        assertThat(schemas.path("RegisterRequest").path("required").toString())
+                .isEqualTo("[\"email\",\"password\"]");
+        assertThat(schemas.path("RegisterRequest").path("properties").path("password").path("minLength").asInt())
+                .isEqualTo(12);
 
         JsonNode ok = generated.path("paths").path("/events/{id}").path("get").path("responses").path("200");
         assertThat(fieldNames(ok.path("content"))).containsExactly("application/json");

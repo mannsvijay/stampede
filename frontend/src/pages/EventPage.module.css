@@ -1,0 +1,30 @@
+.title {
+  font-size: clamp(32px, 6vw, 64px);
+  line-height: 1.05;
+  margin: var(--space-2) 0 var(--space-4);
+}
+
+.facts {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: var(--space-2) var(--space-4);
+  margin: 0 0 var(--space-5);
+}
+
+.facts dd {
+  margin: 0;
+}
+
+.tiers {
+  border-collapse: collapse;
+  min-width: 320px;
+}
+
+.tiers td {
+  padding: var(--space-2) var(--space-4) var(--space-2) 0;
+  border-bottom: 1px solid var(--hairline);
+}
+
+.price {
+  text-align: right;
+}
