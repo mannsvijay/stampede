@@ -1,0 +1,30 @@
+spring:
+  application:
+    name: stampede
+  config:
+    # Load the repo-root .env (shared with docker-compose) as a properties file.
+    # "optional:" means startup doesn't fail when it's missing (e.g. in tests or CI).
+    import: optional:file:../.env[.properties]
+  datasource:
+    url: jdbc:postgresql://localhost:${POSTGRES_PORT:5432}/${POSTGRES_DB:stampede}
+    username: ${POSTGRES_USER:stampede}
+    password: ${POSTGRES_PASSWORD:}
+  data:
+    redis:
+      host: localhost
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD:}
+      # Fail fast instead of Lettuce's 60 s default, so health turns DOWN quickly when Redis is gone.
+      timeout: 2s
+      connect-timeout: 2s
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+  endpoint:
+    health:
+      # Local development only: shows the db and redis components individually.
+      # Restrict this before deploying (M7).
+      show-details: always
