@@ -38,3 +38,13 @@ dependencies {
 tasks.withType<Test> {
     useJUnitPlatform()
 }
+
+// Regenerates the committed demo venue file. The generator lives in the test source set (a dev tool,
+// not shipped in the app jar); VenueGeneratorTest fails if the committed file is out of date.
+tasks.register<JavaExec>("generateVenue") {
+    group = "stampede"
+    description = "Regenerates src/main/resources/seed/venues/demo-arena.json"
+    classpath = sourceSets["test"].runtimeClasspath
+    mainClass.set("com.stampede.inventory.seed.VenueGenerator")
+    args(file("src/main/resources/seed/venues/demo-arena.json").absolutePath)
+}

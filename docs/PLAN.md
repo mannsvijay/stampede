@@ -33,10 +33,16 @@ Tick a task only when its tests pass and it's committed.
 - [ ] M0.3 Venue JSON format + generator script + seed loader (one ~2,000-seat venue)
       Note (from M0.2): the loader must only create event_seats whose seat belongs to the event's venue
       (seat -> section -> venue = event.venue_id); the schema can't enforce this with a FK.
+      Decisions: venue format in docs/venue-format.md; Java generator (`./gradlew generateVenue`) with a
+      drift test against the committed JSON; loader runs under Spring profile `seed` (ApplicationRunner,
+      app keeps serving); name-based UUID v3 ids for all seed rows + ON CONFLICT DO NOTHING; a changed
+      seed file for already-loaded data fails loudly and rolls back.
 - [ ] M0.4 Spring Modulith module packages + verification test
 - [ ] M0.5 Auth: register, login, refresh rotation, hashed refresh tokens, JWT filter
       (includes Flyway V2: `users.role` with a CHECK constraint; deferred from M0.2)
 - [ ] M0.6 GET /events, GET /events/{id}; RFC 7807 error handler
+      Note (from M0.3): the demo event's drop_at/starts_at are set relative to now() on first load and
+      never move afterwards, so after a while the board shows a past drop. Needs a reset/refresh option.
 - [ ] M0.7 Frontend shell: Vite + React + TS, router, events list from the API, OpenAPI-generated client
 - [ ] M0.8 GitHub Actions: backend tests (Testcontainers) + frontend typecheck/lint
 - [ ] M0.9 Update CLAUDE.md commands with the real ones

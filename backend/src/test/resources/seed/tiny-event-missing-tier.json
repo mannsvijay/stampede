@@ -1,0 +1,17 @@
+{
+  "formatVersion": 1,
+  "slug": "tiny-show",
+  "venueSlug": "tiny-hall",
+  "title": "Tiny Show",
+  "status": "SCHEDULED",
+  "strategy": "PESSIMISTIC",
+  "perUserLimit": 4,
+  "dropInHours": 1,
+  "startsInDays": 2,
+  "tiers": [
+    {
+      "name": "GOLD",
+      "pricePaise": 200000
+    }
+  ]
+}

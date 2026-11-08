@@ -56,3 +56,9 @@ tickets.issued_at; proposed status values; extra uniqueness; trigger-based appen
 - Seat venue must match event venue: M0.3 loader + M1.7 invariant check.
 - POST /checkins idempotency via scanner-generated checkins.id (offline scanner stretch).
 - `./gradlew test` can report UP-TO-DATE without running anything; use `--rerun` for evidence.
+
+## 2026-11-08 — M0.3 commands (for the M0.9 CLAUDE.md update)
+- Seed the demo venue + event, then keep serving: `cd backend && ./gradlew bootRun --args='--spring.profiles.active=seed'`
+- Seed once and exit (no web server): `cd backend && ./gradlew bootRun --args='--spring.profiles.active=seed --spring.main.web-application-type=none'`
+- Regenerate the demo venue file: `cd backend && ./gradlew generateVenue`
+- Reset local data (deletes the Postgres and Redis volumes): `docker compose down -v && docker compose up -d`, then seed again

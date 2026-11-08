@@ -1,0 +1,16 @@
+{
+  "formatVersion": 1,
+  "slug": "demo-drop",
+  "venueSlug": "demo-arena",
+  "title": "Stampede Demo Drop",
+  "status": "SCHEDULED",
+  "strategy": "PESSIMISTIC",
+  "perUserLimit": 4,
+  "dropInHours": 24,
+  "startsInDays": 7,
+  "tiers": [
+    { "name": "PLATINUM", "pricePaise": 450000 },
+    { "name": "GOLD", "pricePaise": 250000 },
+    { "name": "SILVER", "pricePaise": 120000 }
+  ]
+}

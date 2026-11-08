@@ -98,3 +98,25 @@ Write these yourself, in your own words. Each one is an interview answer you've 
 - **How I'd know it was wrong:** The concurrency test shows a user ending up over the cap. Or the
   invariant check finds `used` drifting from the user's real active holds and orders, probably
   because some release path forgot to decrement.
+
+### D-006 Name-based UUIDs for seed data (an exception to D-002)
+- **Date:** 2026-11-08
+- **Context:** The seed loader has to be idempotent: running it twice must not create a second venue.
+  Sections, seats and tiers have natural unique keys, but venues and events don't, so a second run
+  couldn't tell it had already created them. The k6 load tests (M2.4) also need to know seat ids in
+  advance.
+- **Options considered:** name-based UUIDs for seed rows; a V2 migration adding unique `slug`
+  columns to venues and events (ids stay random v4); looking rows up by name before inserting, with no
+  constraint behind it.
+- **Decision:** Every seed row gets a version 3 UUID made from its name, for example
+  `UUID.nameUUIDFromBytes("stampede-seed:seat:demo-arena:FL-L:A:1")`. Inserts use
+  `ON CONFLICT (id) DO NOTHING`, then the loader reads everything back and fails, rolling back, if the
+  database doesn't match the file. Rows the app creates at runtime still use random v4 ids (D-002).
+- **Why:** The same file gives the same ids on every machine, so loading is naturally idempotent with
+  no schema change, and load tests can target known seats. Looking up by name has no constraint behind
+  it, so it can still duplicate rows. The costs: seed ids can be guessed (fine, since seed data is
+  public demo data), v3 uses MD5 (fine for naming rows, never for security), and renaming a slug or
+  section code changes every id under it.
+- **How I'd know it was wrong:** I need to edit loaded venues in place (for example, the venue editor in
+  O5) and keep finding myself fighting fixed ids. Or real, non-seed data starts depending on the
+  `stampede-seed:` naming scheme.
