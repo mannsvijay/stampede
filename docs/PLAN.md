@@ -25,9 +25,15 @@ Tick a task only when its tests pass and it's committed.
 ## M0 - Skeleton (week 1)
 - [x] M0.1 Monorepo layout, docker-compose (postgres 16, redis 7, mailpit), Gradle backend that boots
 - [ ] M0.2 Flyway V1: full schema from PRD 9 with CHECK constraints and the unique partial index
+      Decisions: UUID v4 ids (app `UUID.randomUUID()`, `gen_random_uuid()` default); `holds.seat_ids uuid[]`
+      with `event_seats.hold_id` as the authoritative owner; event_seats status AVAILABLE/HELD/SOLD only
+      (CHECKED_IN lives on tickets; transfer = version bump); transition guard in code only (M1.1), plus a
+      CHECK tying seat status to hold_id/order_id; audit_log append-only via triggers; added
+      `user_event_allowance`, `tickets.issued_at`, composite same-event FKs, extra partial unique indexes.
 - [ ] M0.3 Venue JSON format + generator script + seed loader (one ~2,000-seat venue)
 - [ ] M0.4 Spring Modulith module packages + verification test
 - [ ] M0.5 Auth: register, login, refresh rotation, hashed refresh tokens, JWT filter
+      (includes Flyway V2: `users.role` with a CHECK constraint; deferred from M0.2)
 - [ ] M0.6 GET /events, GET /events/{id}; RFC 7807 error handler
 - [ ] M0.7 Frontend shell: Vite + React + TS, router, events list from the API, OpenAPI-generated client
 - [ ] M0.8 GitHub Actions: backend tests (Testcontainers) + frontend typecheck/lint
@@ -93,7 +99,9 @@ Tick a task only when its tests pass and it's committed.
 
 ## M7 - Ship (week 12)
 - [ ] M7.1 Deploy backend (one VM, compose) + frontend (Vercel). Before deploying, restrict actuator
-      health details (M0.1 set `show-details: always` for local dev)
+      health details (M0.1 set `show-details: always` for local dev). Split DB roles: a migration
+      owner role and an app role; `REVOKE UPDATE, DELETE, TRUNCATE ON audit_log` from the app role
+      (M0.2 made audit_log append-only with triggers only, which a superuser can bypass)
 - [ ] M7.2 README: architecture diagram, decisions and trade-offs, results, how to reproduce
 - [ ] M7.3 Demo video (3 minutes): drop, collision, chaos run, invariants staying green
 
