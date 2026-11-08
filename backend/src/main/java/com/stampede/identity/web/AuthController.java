@@ -22,8 +22,13 @@ import com.stampede.identity.web.AuthDtos.TokenResponse;
 import com.stampede.identity.web.AuthDtos.UserResponse;
 import com.stampede.shared.error.ApiException;
 import com.stampede.shared.error.ErrorCode;
+import com.stampede.shared.error.ErrorResponses;
 import com.stampede.shared.error.Problems;
 
+import io.swagger.v3.oas.annotations.media.Content;
+import io.swagger.v3.oas.annotations.media.Schema;
+import io.swagger.v3.oas.annotations.responses.ApiResponse;
+import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 
 /**
@@ -38,6 +43,7 @@ import jakarta.validation.Valid;
  * fetch that sets one needs a CORS preflight, which this API doesn't allow. SameSite=Strict
  * already stops the cookie being sent cross-site; the header is a second, independent guard.
  */
+@Tag(name = "auth")
 @RestController
 @RequestMapping("/auth")
 class AuthController {
@@ -52,17 +58,26 @@ class AuthController {
     }
 
     @PostMapping("/register")
+    @ApiResponse(responseCode = "201", description = "Registered",
+            content = @Content(schema = @Schema(implementation = UserResponse.class)))
+    @ErrorResponses({ErrorCode.VALIDATION_FAILED, ErrorCode.EMAIL_TAKEN})
     ResponseEntity<UserResponse> register(@Valid @RequestBody RegisterRequest request) {
         return ResponseEntity.status(HttpStatus.CREATED)
                 .body(UserResponse.of(auth.register(request.email(), request.password())));
     }
 
     @PostMapping("/login")
+    @ApiResponse(responseCode = "200", description = "Logged in; the refresh token is set as an httpOnly cookie",
+            content = @Content(schema = @Schema(implementation = TokenResponse.class)))
+    @ErrorResponses({ErrorCode.VALIDATION_FAILED, ErrorCode.INVALID_CREDENTIALS})
     ResponseEntity<TokenResponse> login(@Valid @RequestBody LoginRequest request) {
         return tokens(auth.login(request.email(), request.password()));
     }
 
     @PostMapping("/refresh")
+    @ApiResponse(responseCode = "200", description = "Rotated; the new refresh token is set as an httpOnly cookie",
+            content = @Content(schema = @Schema(implementation = TokenResponse.class)))
+    @ErrorResponses({ErrorCode.INVALID_REFRESH_TOKEN, ErrorCode.FORBIDDEN})
     ResponseEntity<?> refresh(
             @RequestHeader(name = CLIENT_HEADER, required = false) String clientHeader,
             @CookieValue(name = REFRESH_COOKIE, required = false) String refreshToken) {
@@ -78,6 +93,8 @@ class AuthController {
 
     /** Always 204, even without a cookie, so logging out twice is harmless. */
     @PostMapping("/logout")
+    @ApiResponse(responseCode = "204", description = "Logged out; the refresh cookie is cleared")
+    @ErrorResponses(ErrorCode.FORBIDDEN)
     ResponseEntity<Void> logout(
             @RequestHeader(name = CLIENT_HEADER, required = false) String clientHeader,
             @CookieValue(name = REFRESH_COOKIE, required = false) String refreshToken) {

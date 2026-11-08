@@ -42,6 +42,9 @@ dependencies {
     runtimeOnly("org.postgresql:postgresql")
     // Annotations only (@ApplicationModule, @NamedInterface) for the modules' package-info files.
     implementation("org.springframework.modulith:spring-modulith-api")
+    // Generates the OpenAPI spec from the controllers (D-010). The -api artifact has no Swagger UI.
+    // Not managed by Boot's BOM; 2.10.0 is built against Spring Boot 3.5.16 (3.x targets Boot 4).
+    implementation("org.springdoc:springdoc-openapi-starter-webmvc-api:2.10.0")
 
     testImplementation("org.springframework.boot:spring-boot-starter-test")
     testImplementation("org.springframework.boot:spring-boot-testcontainers")

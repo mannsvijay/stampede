@@ -61,6 +61,9 @@ class SecurityConfig {
                                 "/auth/register", "/auth/login", "/auth/refresh", "/auth/logout").permitAll()
                         .requestMatchers(HttpMethod.GET, "/events", "/events/*").permitAll()
                         .requestMatchers("/actuator/health", "/actuator/health/**").permitAll()
+                        // The OpenAPI spec. The endpoint only exists under the `openapi` profile (D-010);
+                        // otherwise this path is a plain 404.
+                        .requestMatchers(HttpMethod.GET, "/v3/api-docs", "/v3/api-docs/**").permitAll()
                         // Spring forwards unhandled errors to /error; without this, they'd turn into 401s.
                         .requestMatchers("/error").permitAll()
                         .requestMatchers("/admin/**").hasRole("ADMIN")
