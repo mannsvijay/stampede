@@ -38,9 +38,18 @@ Tick a task only when its tests pass and it's committed.
       app keeps serving); name-based UUID v3 ids for all seed rows + ON CONFLICT DO NOTHING; a changed
       seed file for already-loaded data fails loudly and rolls back.
 - [ ] M0.4 Spring Modulith module packages + verification test
+      Decisions (D-007): Spring Modulith 1.4.14 (BOM + spring-modulith-api + starter-test); each module
+      exposes `api` (may call) and `events` (may listen) subpackages as named interfaces; the full
+      allowed-dependency table is enforced from day one via `allowedDependencies`; no notifications
+      module; no module diagrams yet; no event publication registry (outbox is M3.2).
 - [ ] M0.5 Auth: register, login, refresh rotation, hashed refresh tokens, JWT filter
       (includes Flyway V2: `users.role` with a CHECK constraint; deferred from M0.2)
+      Note (from M0.4): decide how other modules get the current user: an `identity::api` type (only
+      waitingroom and ticketing may depend on identity today) vs a shared module every module may use.
+      Decide together with the shared-module question in M0.6 (problem+json error codes, money).
 - [ ] M0.6 GET /events, GET /events/{id}; RFC 7807 error handler
+      Note (from M0.4): where shared code lives (error codes, problem+json types) is decided with the
+      current-user question in M0.5.
       Note (from M0.3): the demo event's drop_at/starts_at are set relative to now() on first load and
       never move afterwards, so after a while the board shows a past drop. Needs a reset/refresh option.
 - [ ] M0.7 Frontend shell: Vite + React + TS, router, events list from the API, OpenAPI-generated client
@@ -76,6 +85,9 @@ Tick a task only when its tests pass and it's committed.
 - [ ] M2.5 `scripts/bench.sh`: runs each strategy, collects k6 JSON + Postgres CPU, writes
       `benchmarks/results/<date>/` and a markdown results table
 - [ ] M2.6 Benchmark report v1 in `benchmarks/README.md` with your own analysis of why the numbers differ
+      Note (from M0.4): generate module diagrams now that modules have real edges: run Modulith's
+      `Documenter` from a test (`spring-modulith-docs` is already on the test classpath via
+      `spring-modulith-starter-test`) and write the output into docs/.
 **Exit:** zero double-sells for all three strategies under collision; results table committed.
 
 ## M3 - Correct checkout (week 6-7)

@@ -18,6 +18,13 @@ repositories {
     mavenCentral()
 }
 
+dependencyManagement {
+    imports {
+        // Spring Boot's BOM doesn't manage Spring Modulith. 1.4.x is the line for Boot 3.5 (2.x is Boot 4).
+        mavenBom("org.springframework.modulith:spring-modulith-bom:1.4.14")
+    }
+}
+
 dependencies {
     implementation("org.springframework.boot:spring-boot-starter-web")
     implementation("org.springframework.boot:spring-boot-starter-actuator")
@@ -27,11 +34,15 @@ dependencies {
     implementation("org.flywaydb:flyway-core")
     runtimeOnly("org.flywaydb:flyway-database-postgresql")
     runtimeOnly("org.postgresql:postgresql")
+    // Annotations only (@ApplicationModule, @NamedInterface) for the modules' package-info files.
+    implementation("org.springframework.modulith:spring-modulith-api")
 
     testImplementation("org.springframework.boot:spring-boot-starter-test")
     testImplementation("org.springframework.boot:spring-boot-testcontainers")
     testImplementation("org.testcontainers:junit-jupiter")
     testImplementation("org.testcontainers:postgresql")
+    // ApplicationModules.verify() (module model built on ArchUnit) + @ApplicationModuleTest for later.
+    testImplementation("org.springframework.modulith:spring-modulith-starter-test")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
 

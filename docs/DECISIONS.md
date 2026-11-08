@@ -120,3 +120,45 @@ Write these yourself, in your own words. Each one is an interview answer you've 
 - **How I'd know it was wrong:** I need to edit loaded venues in place (for example, the venue editor in
   O5) and keep finding myself fighting fixed ids. Or real, non-seed data starts depending on the
   `stampede-seed:` naming scheme.
+
+### D-007 Module APIs as named interfaces, with an enforced dependency table
+- **Date:** 2026-11-08
+- **Context:** D-001 says modules talk only through public APIs or events. Spring Modulith can check
+  that, but I have to choose what counts as a module's public API, and which module may depend on
+  which. Some modules should only *react* to another module's events, never call it.
+- **Options considered:** (A) Modulith's default: a module's top-level package is its API and
+  subpackages are internal; (B) explicit `api` and `events` subpackages marked `@NamedInterface`,
+  with nothing public in the top-level package; (C) the top-level package as the API plus one
+  `events` named interface.
+- **Decision:** Option B. `<module>.api` holds what other modules may call, `<module>.events` holds
+  the events it publishes. Everything else (including `inventory.seed`) is internal. Each module's
+  `package-info.java` declares `@ApplicationModule(allowedDependencies = ...)` and `ModularityTest`
+  runs `ApplicationModules.verify()`. The full table is enforced from day one:
+
+  | Module | May call (`::api`) | May listen to (`::events`) |
+  |---|---|---|
+  | identity | none | none |
+  | waitingroom | identity | none |
+  | inventory | waitingroom | none |
+  | payments | none | none |
+  | ticketing | identity | none |
+  | booking | inventory, payments, ticketing | inventory, payments |
+  | realtime | none | inventory, waitingroom, booking |
+  | control | waitingroom, inventory, booking, payments, ticketing | waitingroom, inventory, booking, payments, ticketing |
+
+  The table is a DAG. Booking orchestrates the saga by calling inventory, payments and ticketing and
+  reacting to their events; none of them depend on booking. Payments gets the order id and amount as
+  arguments, and control drives chaos settings through payments' API, so payments depends on nothing.
+  An explicit `allowedDependencies = {}` means "nothing allowed"; leaving the attribute out would mean
+  "anything allowed", so every module declares it.
+- **Why:** With a single public package, a dependency is all-or-nothing, so "realtime may only listen
+  to inventory" would be a comment. Named interfaces let the test tell calling apart from listening.
+  The cost is a bit of ceremony (a `package-info` per interface) and remembering that event classes
+  live in the publisher's `events` package, so a listener depends on the publisher.
+- **Limit: table ownership is a convention.** Modulith analyses Java type references, not SQL. If
+  booking runs `SELECT ... FROM event_seats` through JdbcClient, the test can't see it. Each module's
+  `package-info` lists the tables it owns, and other modules must go through its API instead.
+- **How I'd know it was wrong:** I keep adding allowances just to get features through, or I invent
+  awkward events purely to avoid a "may call" edge. Or a code review finds a module querying another
+  module's tables, which means the convention needs a check of its own (for example, separate DB
+  schemas per module).
