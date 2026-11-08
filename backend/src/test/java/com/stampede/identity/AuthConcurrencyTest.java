@@ -6,13 +6,12 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
-import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.IntFunction;
 
 import org.junit.jupiter.api.RepeatedTest;
 
@@ -39,7 +38,7 @@ class AuthConcurrencyTest extends ApiTestSupport {
         Response login = registerAndLogin(uniqueEmail());
         String token = login.refreshCookie();
 
-        List<Response> responses = race(() -> refresh(token));
+        List<Response> responses = race(THREADS, i -> refresh(token));
 
         List<Response> winners = responses.stream().filter(r -> r.status() == 200).toList();
         assertThat(winners).hasSize(1);
@@ -61,16 +60,41 @@ class AuthConcurrencyTest extends ApiTestSupport {
     }
 
     /**
-     * Refreshes and logouts of the same token racing: no 500s, and the family ends up revoked, so
-     * no token a racing refresh handed out survives the logout.
+     * One refresh against one logout of the same token. Whichever runs first, the logout must end
+     * the session: the family is revoked for LOGOUT (a single refresh can never trigger reuse
+     * detection, so nothing else can revoke it), and if the refresh won, the token it handed out
+     * is already dead. This is the race the per-family lock was added for (D-008).
+     */
+    @RepeatedTest(30)
+    void logoutRacingARefreshAlwaysEndsTheSession() throws Exception {
+        Response login = registerAndLogin(uniqueEmail());
+        String token = login.refreshCookie();
+        List<Response> responses = race(2, i -> i == 0 ? refresh(token) : logout(token));
+
+        Response refresh = responses.get(0);
+        Response logout = responses.get(1);
+        assertThat(logout.status()).isEqualTo(204);
+        assertThat(refresh.status()).isIn(200, 401);
+        UUID userId = UUID.fromString(get("/me/_probe", login.accessToken()).body().path("userId").asText());
+        assertThat(jdbc.sql("SELECT revoke_reason FROM refresh_token_families WHERE user_id = ?")
+                .param(userId).query(String.class).optional()).contains("LOGOUT");
+        if (refresh.status() == 200) {
+            assertThat(refresh(refresh.refreshCookie()).status())
+                    .as("a token minted by a refresh that raced the logout must not survive it")
+                    .isEqualTo(401);
+        }
+    }
+
+    /**
+     * Many refreshes and logouts of the same token at once: a load test for the lock, checking for
+     * 500s (deadlocks) and that nothing survives. Reuse detection alone would revoke the family
+     * here, so this test doesn't prove logout works; the test above does.
      */
     @RepeatedTest(10)
     void concurrentRefreshAndLogoutOfOneTokenNeverFail() throws Exception {
         Response login = registerAndLogin(uniqueEmail());
         String token = login.refreshCookie();
-        AtomicInteger next = new AtomicInteger();
-
-        List<Response> responses = race(() -> next.getAndIncrement() % 2 == 0 ? refresh(token) : logout(token));
+        List<Response> responses = race(THREADS, i -> i % 2 == 0 ? refresh(token) : logout(token));
 
         assertThat(responses).allSatisfy(r -> assertThat(r.status()).isIn(200, 204, 401));
         assertThat(responses).filteredOn(r -> r.status() == 200).hasSizeLessThanOrEqualTo(1);
@@ -85,7 +109,7 @@ class AuthConcurrencyTest extends ApiTestSupport {
     void concurrentRegistrationsOfOneEmailCreateExactlyOneUser() throws Exception {
         String email = uniqueEmail();
 
-        List<Response> responses = race(() -> register(email, PASSWORD));
+        List<Response> responses = race(THREADS, i -> register(email, PASSWORD));
 
         assertThat(responses).filteredOn(r -> r.status() == 201).hasSize(1);
         assertThat(responses).filteredOn(r -> r.status() == 409)
@@ -95,15 +119,17 @@ class AuthConcurrencyTest extends ApiTestSupport {
                 .param(email).query(Integer.class).single()).isEqualTo(1);
     }
 
-    private List<Response> race(Callable<Response> request) throws Exception {
-        ExecutorService pool = Executors.newFixedThreadPool(THREADS);
+    /** Runs {@code threads} requests at once; request(i) is thread i, and results come back in order of i. */
+    private List<Response> race(int threads, IntFunction<Response> request) throws Exception {
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
         try {
             CountDownLatch start = new CountDownLatch(1);
             List<Future<Response>> futures = new ArrayList<>();
-            for (int i = 0; i < THREADS; i++) {
+            for (int i = 0; i < threads; i++) {
+                int index = i;
                 futures.add(pool.submit(() -> {
                     start.await();
-                    return request.call();
+                    return request.apply(index);
                 }));
             }
             start.countDown();

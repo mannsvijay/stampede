@@ -162,3 +162,94 @@ Write these yourself, in your own words. Each one is an interview answer you've 
   awkward events purely to avoid a "may call" edge. Or a code review finds a module querying another
   module's tables, which means the convention needs a check of its own (for example, separate DB
   schemas per module).
+
+### D-008 Auth: short-lived JWTs, rotating refresh tokens, one lock row per session
+- **Date:** 2026-11-08
+- **Context:** PRD 11 asks for short-lived JWTs with rotating refresh tokens and bcrypt or Argon2.
+  Three API instances must verify tokens without sharing sessions, and a stolen refresh token must
+  not give an attacker a session that outlives the user's.
+- **Options considered:** Spring's OAuth2 resource server vs jjwt plus a hand-written filter; HS256
+  vs an asymmetric key pair; bcrypt vs Argon2id; refresh token in an httpOnly cookie vs the response
+  body; strict reuse detection vs a grace window for parallel refreshes.
+- **Decision:**
+  - Access tokens: HS256 JWTs (sub = user id, role, iss, iat, exp, jti), 15 minutes, signed with
+    `STAMPEDE_JWT_SECRET` (at least 32 bytes; the app won't start without it). Verified by Spring's
+    `BearerTokenAuthenticationFilter`, with the algorithm pinned, issuer and exp required, and 30 s
+    of clock skew allowed.
+  - Passwords: bcrypt cost 12, at least 12 characters, at most 72 UTF-8 bytes (bcrypt silently
+    ignores the rest). Login gives the same answer for an unknown email and a wrong password, and
+    compares against a dummy hash so timing doesn't tell them apart.
+  - Refresh tokens: 32 random bytes, stored only as SHA-256, sent only in an httpOnly, Secure,
+    SameSite=Strict cookie on `/auth`, with a required `X-Requested-With` header as a CSRF guard.
+    7 days, renewed on every refresh, never past a 30-day cap per login.
+  - Every refresh consumes its token and issues a child. Presenting a used token again (reuse)
+    revokes the whole login session: we can't tell the real user from the thief, so both must log
+    in again. This is strict: two tabs refreshing at the same moment also log the user out, so the
+    frontend funnels refreshes through one shared call (M0.7).
+  - A `refresh_token_families` table holds one row per login session (its 30-day cap and its
+    revocation), and that row is the session's lock: every refresh and every revocation starts with
+    `SELECT ... FROM refresh_token_families WHERE id = ? FOR UPDATE`.
+  - 401, 403 and auth errors are problem+json with stable codes (PRD 10).
+- **Why the family table exists:** the first version had only `refresh_tokens`, with the revocation
+  on each token row, and the concurrency tests found two bugs in it:
+  1. *Deadlock.* When 20 requests refresh the same token, one wins and 19 detect reuse and revoke
+     the family with `UPDATE refresh_tokens SET revoked_at = now() WHERE family_id = ?`. That
+     statement locks the family's rows in whatever order it scans them, so two revokers could each
+     lock one row and wait for the other's. Postgres broke the cycle by killing one: a 500, in about
+     one run in five.
+  2. *Logout could miss a token.* A refresh consumes token P (locking P) while a logout runs that same
+     UPDATE. The logout's statement only sees P, waits for P's lock, and meanwhile the refresh inserts
+     child C and commits. The logout then revokes P and returns 204, but C was never in its snapshot
+     and stays live. An attacker refreshing at the moment the user logs out would keep a session.
+
+  With one lock row per family, everything that touches a family queues on that one row and runs one
+  at a time. Each holder re-reads the token after getting the lock, so it sees what the previous
+  holder committed. Revoking becomes a single-row update: a racing refresh either commits first (and
+  its child belongs to a family that is then revoked, so it dies with it) or waits and sees the
+  revocation. No transaction locks rows of two families, so there is no lock order to get wrong. The
+  same idea as sorting seat ids before `FOR UPDATE` in the pessimistic strategy: make every
+  competitor queue for the same thing first.
+
+  Two details matter. It relies on READ COMMITTED (Postgres's default): the lock decides who goes
+  next, but seeing the previous holder's writes depends on each statement after the lock taking a
+  fresh snapshot. And under the lock, rotation also checks the family's own 30-day cap (a token
+  never outlives its session) and consumes with `WHERE used_at IS NULL`, checking that exactly one
+  row changed, so a future code path that forgets the lock fails loudly instead of consuming a
+  token twice. A token that is both used and expired still counts as reuse and revokes the session.
+  A correctness review found no bug in this design, but showed the original logout race test could
+  not catch a broken logout (reuse detection revoked the family anyway); it now races exactly one
+  refresh against one logout, and fails all 30 runs if logout is disabled.
+- **Trade-offs:** an access token stays valid for up to 15 minutes after logout or role change (it is
+  checked by signature only). Anyone with the HS256 secret can mint tokens, which is fine while only
+  our own instances hold it. The refresh cookie needs the API and frontend to be same-site (M0.7
+  proxy, M7.1 deployment). bcrypt cost 12 makes login slow on purpose (M2.4 logs in during k6 setup).
+  `refresh_tokens` grows forever until a cleanup job deletes expired families (not built yet).
+  Requests for one session queue on its lock while holding a DB connection; rate limiting (M4.3)
+  is the defence against a flood for one session.
+- **How I'd know it was wrong:** users report being logged out with several tabs open (reuse
+  detection firing on benign races more than expected); the family lock shows up as a hotspot (it
+  shouldn't, since only one user's session queues on it); or I need to revoke access tokens
+  immediately (that would mean a denylist or much shorter access tokens).
+
+### D-009 A small shared module for types every module needs
+- **Date:** 2026-11-08
+- **Context:** Almost every module will need to know who is calling, and every module returns errors
+  with the stable codes from PRD 10. D-007 lets only waitingroom and ticketing depend on identity.
+- **Options considered:** a `CurrentUser` type in `identity::api` (every module would need an
+  identity allowance, rewriting much of D-007's table); a `shared` module; controllers reading the
+  raw JWT themselves (no shared type, but claim parsing copied everywhere and tied to JWTs).
+- **Decision:** A `shared` module with two named interfaces: `shared.security` (`CurrentUser`,
+  `Role`) and `shared.error` (`ErrorCode`, `Problems`, `ApiException`). Identity's token converter
+  puts a `CurrentUser` into the security context, so controllers in any module take
+  `@AuthenticationPrincipal CurrentUser` without depending on identity. `shared` itself has
+  `allowedDependencies = {}`, and every module lists `"shared :: security", "shared :: error"`
+  explicitly. Rule: only types that every module needs go in shared.
+- **Why:** It keeps the D-007 graph unchanged and gives M0.6 a home for error handling. Probes showed
+  how Modulith 1.4 treats it: types in shared's subpackages are internal unless marked as named
+  interfaces; allowing just `"shared"` only covers its top-level package; `"shared :: *"` or naming
+  each interface works. I chose explicit names because they are easy to search for and match how
+  D-007 is written. `@ApplicationModule(type = OPEN)` also worked, but exposes every type in shared,
+  which would let it quietly become a junk drawer.
+- **How I'd know it was wrong:** shared starts collecting module-specific types (anything only one or
+  two modules use belongs in that module's api), or a change to shared keeps forcing changes in many
+  modules at once.

@@ -427,6 +427,17 @@ The OpenAPI spec is the source of truth, and the TypeScript client is generated 
 
 **Errors** follow RFC 7807 (`application/problem+json`) with stable codes: `SEAT_TAKEN` (including `takenAgoMs`), `HOLD_EXPIRED`, `LIMIT_EXCEEDED`, `NOT_ADMITTED`, `RATE_LIMITED`, `IDEMPOTENCY_CONFLICT`.
 
+Auth and request errors (added in M0.5, D-008). Every problem body carries the code in a `code` property:
+
+| Code | Status | When |
+|---|---|---|
+| `VALIDATION_FAILED` | 400 | Request body is invalid or not JSON; field errors listed in `errors` |
+| `UNAUTHENTICATED` | 401 | Missing, invalid, tampered or expired access token |
+| `INVALID_CREDENTIALS` | 401 | Login failed; the same response for an unknown email and a wrong password |
+| `INVALID_REFRESH_TOKEN` | 401 | Refresh token missing, unknown, expired, already used (reuse) or revoked; the reason is not exposed |
+| `FORBIDDEN` | 403 | Authenticated but not allowed (e.g. a non-admin on `/admin/**`), or the `X-Requested-With` header is missing on refresh/logout |
+| `EMAIL_TAKEN` | 409 | Registration with an email that already exists (case-insensitive) |
+
 ---
 
 ## 11. Non-functional requirements

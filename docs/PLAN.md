@@ -30,19 +30,19 @@ Tick a task only when its tests pass and it's committed.
       (CHECKED_IN lives on tickets; transfer = version bump); transition guard in code only (M1.1), plus a
       CHECK tying seat status to hold_id/order_id; audit_log append-only via triggers; added
       `user_event_allowance`, `tickets.issued_at`, composite same-event FKs, extra partial unique indexes.
-- [ ] M0.3 Venue JSON format + generator script + seed loader (one ~2,000-seat venue)
+- [x] M0.3 Venue JSON format + generator script + seed loader (one ~2,000-seat venue)
       Note (from M0.2): the loader must only create event_seats whose seat belongs to the event's venue
       (seat -> section -> venue = event.venue_id); the schema can't enforce this with a FK.
       Decisions: venue format in docs/venue-format.md; Java generator (`./gradlew generateVenue`) with a
       drift test against the committed JSON; loader runs under Spring profile `seed` (ApplicationRunner,
       app keeps serving); name-based UUID v3 ids for all seed rows + ON CONFLICT DO NOTHING; a changed
       seed file for already-loaded data fails loudly and rolls back.
-- [ ] M0.4 Spring Modulith module packages + verification test
+- [x] M0.4 Spring Modulith module packages + verification test
       Decisions (D-007): Spring Modulith 1.4.14 (BOM + spring-modulith-api + starter-test); each module
       exposes `api` (may call) and `events` (may listen) subpackages as named interfaces; the full
       allowed-dependency table is enforced from day one via `allowedDependencies`; no notifications
       module; no module diagrams yet; no event publication registry (outbox is M3.2).
-- [ ] M0.5 Auth: register, login, refresh rotation, hashed refresh tokens, JWT filter
+- [x] M0.5 Auth: register, login, refresh rotation, hashed refresh tokens, JWT filter
       (includes Flyway V2: `users.role` with a CHECK constraint; deferred from M0.2)
       Note (from M0.4): decide how other modules get the current user: an `identity::api` type (only
       waitingroom and ticketing may depend on identity today) vs a shared module every module may use.
@@ -51,7 +51,15 @@ Tick a task only when its tests pass and it's committed.
       bcrypt cost 12 (72-byte cap); refresh token in an httpOnly SameSite=Strict cookie on /auth with a
       required custom header; 15 min access / 7 day refresh / 30 day family cap; strict reuse
       detection; `shared` module (CurrentUser, error codes); 401/403/auth errors as problem+json;
-      first ADMIN via the `bootstrap-admin` profile.
+      first ADMIN via the `bootstrap-admin` profile. V2 adds `refresh_token_families` (one lock row
+      per login session; fixes a revocation deadlock and a logout race found by the concurrency tests).
+      Open: nothing deletes expired refresh token families yet; add a cleanup job (e.g. with the M1.4
+      sweeper) before the table matters.
+      Correctness review (RefreshTokenStore): no bug in the code; fixed three test/edge findings
+      (a one-refresh-vs-one-logout race test, proven to fail with logout disabled; a tighter
+      family-cap assertion; rotate now checks the family's own expiry) plus hardening (guarded
+      consume with a row-count check; READ COMMITTED requirement documented). lock_timeout deferred
+      to M4.3.
 - [ ] M0.6 GET /events, GET /events/{id}; RFC 7807 error handler
       Note (from M0.4): where shared code lives (error codes, problem+json types) is decided with the
       current-user question in M0.5.
@@ -115,6 +123,10 @@ Tick a task only when its tests pass and it's committed.
 - [ ] M4.1 Queue join (Redis sorted set), pre-T-0 lottery, position/ETA over SSE, heartbeats
 - [ ] M4.2 Admission scheduler + signed admission tokens; inventory endpoints require them
 - [ ] M4.3 Token-bucket rate limits (IP/user/device) in Redis Lua
+      Note (from M0.5): rate-limit /auth/refresh and /auth/logout per user/session too. Every
+      request for one refresh-token family queues on that family's row lock while holding a DB
+      connection, so a flood for one session could tie up the Hikari pool (default 10). Rate
+      limiting is the real defence; a `lock_timeout` on the family lock is the fallback if needed.
 - [ ] M4.4 Proof-of-work (hashcash) in a Web Worker; measure solve time on a cheap phone
 - [ ] M4.5 AIMD adaptive admission driven by p95 latency and error rate
 - [ ] M4.6 k6 thundering-herd + bot-swarm scenarios; fairness (Kendall tau) + bot share reported

@@ -228,6 +228,26 @@ class AuthFlowTest extends ApiTestSupport {
                 .param(userIdOf(login)).update();
 
         assertThat(refresh(login.refreshCookie()).status()).isEqualTo(401);
+        // Rejected without side effects: not consumed, and the session isn't revoked as a reuse.
+        assertNotConsumedAndNotRevoked(userIdOf(login));
+    }
+
+    @Test
+    void tokenIsRejectedOnceItsFamilyIsPastTheCapEvenIfTheTokenItselfIsNot() {
+        Response login = registerAndLogin(uniqueEmail());
+        // The token still has ~7 days, but the session's 30-day cap passed a minute ago.
+        jdbc.sql("""
+                        UPDATE refresh_token_families
+                        SET created_at = now() - interval '30 days', expires_at = now() - interval '1 minute'
+                        WHERE user_id = ?
+                        """)
+                .param(userIdOf(login)).update();
+
+        Response response = refresh(login.refreshCookie());
+
+        assertThat(response.status()).as("401, not a 500 from the expiry CHECK").isEqualTo(401);
+        assertThat(response.code()).isEqualTo("INVALID_REFRESH_TOKEN");
+        assertNotConsumedAndNotRevoked(userIdOf(login));
     }
 
     @Test
@@ -245,8 +265,16 @@ class AuthFlowTest extends ApiTestSupport {
         Response refreshed = refresh(login.refreshCookie());
 
         assertThat(refreshed.status()).isEqualTo(200);
+        // getMaxAge() is -1 for a cookie without Max-Age, so assert a range, not just an upper bound.
         long maxAge = HttpCookie.parse(refreshed.setCookieHeader()).get(0).getMaxAge();
-        assertThat(maxAge).as("capped at the family's remaining hour, not 7 days").isLessThanOrEqualTo(3600);
+        assertThat(maxAge).as("capped at the family's remaining hour, not 7 days").isBetween(3540L, 3600L);
+        // And the server-side expiry, which is what actually counts: exactly the family's cap.
+        assertThat(jdbc.sql("""
+                        SELECT t.expires_at = f.expires_at
+                        FROM refresh_tokens t JOIN refresh_token_families f ON f.id = t.family_id
+                        WHERE f.user_id = ? AND t.used_at IS NULL
+                        """)
+                .param(userId).query(Boolean.class).single()).isTrue();
     }
 
     @Test
@@ -303,6 +331,17 @@ class AuthFlowTest extends ApiTestSupport {
         assertThat(logout(login.refreshCookie()).status()).isEqualTo(204);
         assertThat(logout(login.refreshCookie()).status()).isEqualTo(204);
         assertThat(logout(null).status()).isEqualTo(204);
+    }
+
+    private void assertNotConsumedAndNotRevoked(UUID userId) {
+        Map<String, Object> state = jdbc.sql("""
+                        SELECT count(*) FILTER (WHERE t.used_at IS NOT NULL) AS consumed,
+                               bool_or(f.revoked_at IS NOT NULL) AS revoked
+                        FROM refresh_tokens t JOIN refresh_token_families f ON f.id = t.family_id
+                        WHERE f.user_id = ?
+                        """)
+                .param(userId).query().singleRow();
+        assertThat(state).containsEntry("consumed", 0L).containsEntry("revoked", false);
     }
 
     private UUID userIdOf(Response login) {

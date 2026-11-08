@@ -30,6 +30,11 @@ import com.stampede.shared.security.Role;
  * of the same family run one at a time, and each sees everything the previous one committed. No
  * transaction ever locks rows of two families, so there is no lock order to get wrong.
  *
+ * <p>This relies on READ COMMITTED, Postgres's default isolation level: every statement after the
+ * lock takes a fresh snapshot, so it sees what the previous lock holder committed. Under REPEATABLE
+ * READ the re-read in step 3 of {@link #rotate} would still see the snapshot taken before the lock,
+ * and concurrent refreshes would fail with serialization errors instead of queueing.
+ *
  * <p>All times use the database clock ({@code now()}), so every API instance agrees on expiry.
  */
 @Component
@@ -73,8 +78,8 @@ public class RefreshTokenStore {
 
     /**
      * Consumes {@code raw} and issues its child. Returns empty if the token is unknown, expired,
-     * already used, or its family is revoked. An already-used token is a reuse: the family is
-     * revoked.
+     * already used, or its family is revoked or past its 30-day cap. An already-used token is a
+     * reuse: the family is revoked.
      *
      * <p>A rejection returns empty instead of throwing, so the revocation commits.
      */
@@ -97,7 +102,9 @@ public class RefreshTokenStore {
         // 2. Lock the family. Concurrent refreshes and logouts of this family queue here. Also
         //    reads the user's current role, so a role change takes effect at the next refresh.
         Family family = lockFamily(familyId.get());
-        if (family.revoked()) {
+        if (family.revoked() || family.expired()) {
+            // An expired family is checked here, not left to the token's own expiry: a token must
+            // never outlive its family, and inserting a child past the cap would break a CHECK.
             return Optional.empty();
         }
 
@@ -123,10 +130,16 @@ public class RefreshTokenStore {
             return Optional.empty();
         }
 
-        // 4. Consume the token and issue its child.
-        jdbc.sql("UPDATE refresh_tokens SET used_at = now() WHERE id = :id")
+        // 4. Consume the token and issue its child. The family lock already guarantees we are the
+        //    only one here; the used_at guard and row count make a future path that forgets the
+        //    lock fail loudly instead of consuming a token twice.
+        int consumed = jdbc.sql("UPDATE refresh_tokens SET used_at = now() WHERE id = :id AND used_at IS NULL")
                 .param("id", token.id())
                 .update();
+        if (consumed != 1) {
+            throw new IllegalStateException("Refresh token " + token.id()
+                    + " was consumed concurrently although its family was locked");
+        }
         NewToken next = insertToken(family.id());
         jdbc.sql("UPDATE refresh_tokens SET replaced_by = :nextId WHERE id = :id")
                 .param("nextId", next.id())
@@ -156,7 +169,8 @@ public class RefreshTokenStore {
 
     private Family lockFamily(UUID familyId) {
         return jdbc.sql("""
-                        SELECT f.id, f.user_id, f.revoked_at IS NOT NULL AS revoked, u.role
+                        SELECT f.id, f.user_id, f.revoked_at IS NOT NULL AS revoked,
+                               f.expires_at <= now() AS expired, u.role
                         FROM refresh_token_families f
                         JOIN users u ON u.id = f.user_id
                         WHERE f.id = :familyId
@@ -167,6 +181,7 @@ public class RefreshTokenStore {
                         rs.getObject("id", UUID.class),
                         rs.getObject("user_id", UUID.class),
                         rs.getBoolean("revoked"),
+                        rs.getBoolean("expired"),
                         Role.valueOf(rs.getString("role"))))
                 .single();
     }
@@ -206,7 +221,7 @@ public class RefreshTokenStore {
     private record NewToken(UUID id, IssuedRefreshToken issued) {
     }
 
-    private record Family(UUID id, UUID userId, boolean revoked, Role role) {
+    private record Family(UUID id, UUID userId, boolean revoked, boolean expired, Role role) {
     }
 
     private record TokenState(UUID id, boolean used, boolean live) {
