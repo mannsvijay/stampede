@@ -243,7 +243,11 @@ Write these yourself, in your own words. Each one is an interview answer you've 
   puts a `CurrentUser` into the security context, so controllers in any module take
   `@AuthenticationPrincipal CurrentUser` without depending on identity. `shared` itself has
   `allowedDependencies = {}`, and every module lists `"shared :: security", "shared :: error"`
-  explicitly. Rule: only types that every module needs go in shared.
+  explicitly. Rule: only types that every module needs go in shared, plus the internal web plumbing
+  that applies those types to every module (amended by D-010): the application-wide problem+json
+  handler, the `/error` controller and the OpenAPI error documentation, in the internal package
+  `shared.web`. That package is not a named interface, so no module can reference it; Spring finds it
+  by component scanning.
 - **Why:** It keeps the D-007 graph unchanged and gives M0.6 a home for error handling. Probes showed
   how Modulith 1.4 treats it: types in shared's subpackages are internal unless marked as named
   interfaces; allowing just `"shared"` only covers its top-level package; `"shared :: *"` or naming
@@ -253,3 +257,71 @@ Write these yourself, in your own words. Each one is an interview answer you've 
 - **How I'd know it was wrong:** shared starts collecting module-specific types (anything only one or
   two modules use belongs in that module's api), or a change to shared keeps forcing changes in many
   modules at once.
+
+### D-010 Event read API, one problem+json handler, and a committed OpenAPI spec (DRAFT)
+- **Date:** 2026-11-09
+- **Context:** M0.6 adds the first public read endpoints (`GET /events`, `GET /events/{id}`) and
+  replaces identity's scoped error handler with one for the whole app. M0.7 generates the TypeScript
+  client from the OpenAPI spec, and PRD 10 says the spec is the source of truth, so the contract has
+  to be fixed somewhere reviewable before the frontend starts.
+- **Options considered:**
+  - Spec: generate it from code with springdoc; write it by hand first and check the code against it
+    (needs a contract-test library); generate it but commit the output and fail a test on drift.
+  - Handler location: an internal `shared.web` package; a new `platform` module; the root
+    `com.stampede` package (which Modulith doesn't verify at all).
+  - Error codes: one central `ErrorCode` enum in shared; per-module code enums behind an interface.
+  - Pagination: keyset cursor now; a hard cap now and a cursor later.
+  - Availability counts (available/held/sold) in the responses: now; leave them to realtime.
+- **Decision:**
+  - **OpenAPI:** springdoc-openapi 2.10.0 (`-api` artifact, no Swagger UI; built against Spring Boot
+    3.5.16, while the 3.x line targets Boot 4). The generated spec is committed at `docs/openapi.json`,
+    and `OpenApiSpecTest` fails if the code generates anything else. M0.7 builds the client from the
+    committed file, so every contract change shows up in a diff. `/v3/api-docs` is off unless the
+    `openapi` profile is active. Errors are documented from the code: `@ErrorResponses({...})` on a
+    controller method lists its codes, and each becomes a problem+json response under that code's own
+    status, plus `500 INTERNAL_ERROR` on every operation. Response-only schemas mark every property
+    required, because Jackson always writes every field (otherwise every generated TypeScript field
+    would be optional). The server URL is a fixed `/` so the file doesn't change with the test's
+    random port.
+  - **Error handler:** `ApiExceptionHandler` in internal `shared.web`, extending Spring's
+    `ResponseEntityExceptionHandler`, so every standard MVC error (404 route, 405, 415, malformed
+    parameter) passes through one method that adds our `code` and a fixed message. Anything unexpected
+    is a 500 with a generic message and an `errorId`; the exception goes only to the log. Security
+    exceptions thrown inside a controller are rethrown so Spring Security still answers 401/403. A
+    `ProblemErrorController` replaces Boot's `/error` page, which handles errors outside MVC (filters,
+    `sendError`) and uses only the status. D-009's wording was amended to allow this.
+  - **Error codes:** one central enum. New: `EVENT_NOT_FOUND`, `NOT_FOUND`, `METHOD_NOT_ALLOWED`,
+    `UNSUPPORTED_MEDIA_TYPE`, `REQUEST_FAILED`, `INTERNAL_ERROR`.
+  - **Read endpoints:** owned by inventory (D-007), in internal `inventory.catalog` with JdbcClient.
+    The list is `{items, serverTime}`, capped at 100, ordered by drop time; it hides DRAFT, ENDED and
+    already-started events. A DRAFT id gives 404, like an unknown id. The detail is read in one SQL
+    statement. No availability counts.
+  - **Demo times:** a dev-only `demo-reschedule` profile moves the demo event's drop and start back to
+    now + the seed file's offsets, only while it is SCHEDULED.
+- **Why:**
+  - Generating the spec means it can't fall out of date. Committing it and testing for drift means
+    nobody changes it without seeing the change, which keeps "the spec is the source of truth" honest
+    without hand-writing YAML.
+  - `shared.web` keeps the handler next to the types it applies, without a module that exists for two
+    classes, and it stays under Modulith's checks (unlike the root package).
+  - One code enum mirrors PRD 10's single table and gives the client generator one list.
+  - `items` in a wrapper object lets a cursor arrive later without breaking clients.
+  - Counts are stale as soon as they are sent, and counting `event_seats` on every board refresh adds
+    reads to the hottest table during a drop.
+  - One SQL statement for the detail: under READ COMMITTED, each statement sees its own snapshot, so
+    two separate queries could see the event and its tiers at different moments.
+- **Trade-offs:**
+  - The drift test needs its own application context with the `openapi` profile, so it starts its own
+    containers.
+  - An intended API change takes two steps: change the code, then copy `build/openapi/openapi.json`
+    over `docs/openapi.json`.
+  - Response fields are typed as always present, which stays true only while response records don't
+    use `@JsonInclude(NON_NULL)`.
+  - Shared now depends on springdoc and Spring Security classes (libraries, not modules).
+  - Security runs before routing, so anonymous callers get 401 instead of 404/405 (documented in PRD 10).
+- **How I'd know it was wrong:**
+  - The drift test gets "fixed" by copying the file without anyone reading the diff, so the committed
+    spec stops being a real review point.
+  - `shared.web` starts collecting non-error infrastructure.
+  - The 100-event cap is hit.
+  - The board needs live counts before M5 exists.

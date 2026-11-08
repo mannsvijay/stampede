@@ -65,6 +65,15 @@ Tick a task only when its tests pass and it's committed.
       current-user question in M0.5.
       Note (from M0.3): the demo event's drop_at/starts_at are set relative to now() on first load and
       never move afterwards, so after a while the board shows a past drop. Needs a reset/refresh option.
+      Decisions (D-010, draft): inventory owns the read endpoints (internal `inventory.catalog`,
+      JdbcClient, detail read in one SQL statement); list is `{items, serverTime}`, capped at 100,
+      no pagination yet; no availability counts (live demand comes from realtime, M5); DRAFT events
+      are hidden (404). One problem+json handler in shared's internal `shared.web` package (D-009
+      reworded), plus a problem+json `/error` controller; new codes EVENT_NOT_FOUND, NOT_FOUND,
+      METHOD_NOT_ALLOWED, UNSUPPORTED_MEDIA_TYPE, REQUEST_FAILED, INTERNAL_ERROR. OpenAPI: springdoc
+      2.10.0 (`-api`, no UI), generated spec committed at `docs/openapi.json` with a drift test;
+      `/v3/api-docs` is off unless the `openapi` profile is active. Dev-only `demo-reschedule`
+      profile moves the demo event's drop/start times into the future (SCHEDULED only).
 - [ ] M0.7 Frontend shell: Vite + React + TS, router, events list from the API, OpenAPI-generated client
       Note (from M0.5): funnel all refreshes through one shared in-flight call; strict reuse detection
       logs the user out if two tabs refresh with the same token at the same moment. Use the Vite dev
@@ -133,6 +142,8 @@ Tick a task only when its tests pass and it's committed.
 
 ## M5 - Realtime and frontend (weeks 9-10)
 - [ ] M5.1 WebSocket seat channel: snapshot, 100 ms bitset diffs, sequence numbers, resync
+      Note (from M0.6): GET /events and /events/{id} deliberately return no availability counts.
+      Live demand (seats left, people waiting) for the board and event page comes from realtime.
 - [ ] M5.2 Measure hold-to-visible latency against the budget above
 - [ ] M5.3 Seat map v2: pan/zoom, semantic zoom, "Taken N ms ago", keyboard navigation
 - [ ] M5.4 Hold timer bar + tab-title countdown; waiting room screen (simple version first)

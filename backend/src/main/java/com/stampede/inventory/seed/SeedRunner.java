@@ -6,6 +6,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.ApplicationArguments;
 import org.springframework.boot.ApplicationRunner;
 import org.springframework.context.annotation.Profile;
+import org.springframework.core.annotation.Order;
 import org.springframework.core.io.Resource;
 import org.springframework.stereotype.Component;
 
@@ -20,7 +21,11 @@ import org.springframework.stereotype.Component;
  */
 @Component
 @Profile("seed")
+@Order(SeedRunner.ORDER)
 class SeedRunner implements ApplicationRunner {
+
+    /** Runs before {@link DemoRescheduleRunner}, which needs the seeded event to exist. */
+    static final int ORDER = 100;
 
     private static final Logger log = LoggerFactory.getLogger(SeedRunner.class);
 

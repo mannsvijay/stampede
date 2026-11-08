@@ -411,7 +411,7 @@ The OpenAPI spec is the source of truth, and the TypeScript client is generated 
 | Method & path | Purpose | Notes |
 |---|---|---|
 | `POST /auth/register`, `/auth/login`, `/auth/refresh` | Identity | Refresh-token rotation |
-| `GET /events`, `GET /events/{id}` | Browse | |
+| `GET /events`, `GET /events/{id}` | Browse | Public. List: upcoming non-draft events as `{items, serverTime}`, at most 100, no pagination yet. Detail adds tiers with prices. No availability counts (live demand comes from realtime) |
 | `GET /events/{id}/seatmap` | Seat snapshot | Returns bitset + sequence number |
 | `POST /events/{id}/queue` | Join waiting room | Body includes PoW solution |
 | `GET /queue/{ticket}` | Position stream | SSE |
@@ -431,12 +431,34 @@ Auth and request errors (added in M0.5, D-008). Every problem body carries the c
 
 | Code | Status | When |
 |---|---|---|
-| `VALIDATION_FAILED` | 400 | Request body is invalid or not JSON; field errors listed in `errors` |
+| `VALIDATION_FAILED` | 400 | Request is invalid: body invalid or not JSON (field errors listed in `errors`), or a malformed path/query parameter such as a non-UUID id |
 | `UNAUTHENTICATED` | 401 | Missing, invalid, tampered or expired access token |
 | `INVALID_CREDENTIALS` | 401 | Login failed; the same response for an unknown email and a wrong password |
 | `INVALID_REFRESH_TOKEN` | 401 | Refresh token missing, unknown, expired, already used (reuse) or revoked; the reason is not exposed |
 | `FORBIDDEN` | 403 | Authenticated but not allowed (e.g. a non-admin on `/admin/**`), or the `X-Requested-With` header is missing on refresh/logout |
 | `EMAIL_TAKEN` | 409 | Registration with an email that already exists (case-insensitive) |
+
+Browse and general request errors (added in M0.6, D-010):
+
+| Code | Status | When |
+|---|---|---|
+| `EVENT_NOT_FOUND` | 404 | `GET /events/{id}` for an id that doesn't exist or is a DRAFT (drafts are indistinguishable from unknown ids) |
+| `NOT_FOUND` | 404 | No route at this path (only for requests that pass the security rules; see below) |
+| `METHOD_NOT_ALLOWED` | 405 | The path exists but not for this method; the `Allow` header lists the methods |
+| `UNSUPPORTED_MEDIA_TYPE` | 415 | The request body's content type isn't accepted (e.g. `text/plain` instead of JSON) |
+| `REQUEST_FAILED` | other 4xx | Any other client error the framework rejects; the response keeps the framework's status |
+| `INTERNAL_ERROR` | 500 | An unexpected server error. The body has a fixed message and an `errorId` that matches the server log; it never contains exception messages, SQL or stack traces |
+
+**Security runs before routing (401 before 404/405).** The security filter checks a request before
+Spring looks for a matching route, and every route that isn't explicitly public requires a token. So
+without a valid token, an unknown path or a wrong method on a public path (e.g. `DELETE /events/{id}`)
+returns `401 UNAUTHENTICATED`, not 404 or 405. With a valid token, the same requests return
+`NOT_FOUND` or `METHOD_NOT_ALLOWED`. This is deliberate deny-by-default: an anonymous caller can't
+probe which routes exist.
+
+**The spec.** The OpenAPI spec is generated from the code and committed at `docs/openapi.json`; a test
+fails if the two differ (D-010). Every operation documents its problem+json responses under the status
+of each code it can return, plus `500 INTERNAL_ERROR`.
 
 ---
 

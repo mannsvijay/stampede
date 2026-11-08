@@ -18,6 +18,28 @@ spring:
       timeout: 2s
       connect-timeout: 2s
 
+server:
+  error:
+    # Our ProblemErrorController replaces Boot's default /error handler and never reads these, but if
+    # the default ever came back, it must not leak internals either.
+    include-stacktrace: never
+    include-message: never
+    include-binding-errors: never
+    include-exception: false
+
+springdoc:
+  api-docs:
+    # Off by default: the spec endpoint is not public. The `openapi` profile turns it on (below).
+    enabled: false
+  # Our controllers only produce JSON; without this, success responses are documented as */*.
+  default-produces-media-type: application/json
+  # Stable output for the committed docs/openapi.json (D-010).
+  writer-with-order-by-keys: true
+  writer-with-default-pretty-printer: true
+  # Don't attach every @ExceptionHandler's response to every operation; OpenApiConfig documents
+  # errors explicitly from @ErrorResponses.
+  override-with-generic-response: false
+
 management:
   endpoints:
     web:
@@ -42,3 +64,14 @@ stampede:
   bootstrap-admin:
     email: ${STAMPEDE_ADMIN_EMAIL:}
     password: ${STAMPEDE_ADMIN_PASSWORD:}
+
+---
+# Serves the generated OpenAPI spec at /v3/api-docs. For local development and the drift test
+# (OpenApiSpecTest); the committed docs/openapi.json is what the frontend consumes.
+spring:
+  config:
+    activate:
+      on-profile: openapi
+springdoc:
+  api-docs:
+    enabled: true

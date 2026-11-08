@@ -117,7 +117,16 @@ public abstract class ApiTestSupport {
         return exchange(HttpMethod.GET, path, new HttpEntity<>(headers));
     }
 
-    private Response exchange(HttpMethod method, String path, HttpEntity<?> entity) {
+    /** Any method, no body, optionally with a bearer token. */
+    protected Response request(HttpMethod method, String path, String accessToken) {
+        HttpHeaders headers = new HttpHeaders();
+        if (accessToken != null) {
+            headers.setBearerAuth(accessToken);
+        }
+        return exchange(method, path, new HttpEntity<>(headers));
+    }
+
+    protected Response exchange(HttpMethod method, String path, HttpEntity<?> entity) {
         ResponseEntity<String> response = http.exchange(path, method, entity, String.class);
         try {
             JsonNode body = response.getBody() == null ? null : json.readTree(response.getBody());
