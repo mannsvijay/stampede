@@ -47,12 +47,20 @@ Tick a task only when its tests pass and it's committed.
       Note (from M0.4): decide how other modules get the current user: an `identity::api` type (only
       waitingroom and ticketing may depend on identity today) vs a shared module every module may use.
       Decide together with the shared-module question in M0.6 (problem+json error codes, money).
+      Decisions (D-008, D-009): Spring OAuth2 resource server, HS256 key from STAMPEDE_JWT_SECRET;
+      bcrypt cost 12 (72-byte cap); refresh token in an httpOnly SameSite=Strict cookie on /auth with a
+      required custom header; 15 min access / 7 day refresh / 30 day family cap; strict reuse
+      detection; `shared` module (CurrentUser, error codes); 401/403/auth errors as problem+json;
+      first ADMIN via the `bootstrap-admin` profile.
 - [ ] M0.6 GET /events, GET /events/{id}; RFC 7807 error handler
       Note (from M0.4): where shared code lives (error codes, problem+json types) is decided with the
       current-user question in M0.5.
       Note (from M0.3): the demo event's drop_at/starts_at are set relative to now() on first load and
       never move afterwards, so after a while the board shows a past drop. Needs a reset/refresh option.
 - [ ] M0.7 Frontend shell: Vite + React + TS, router, events list from the API, OpenAPI-generated client
+      Note (from M0.5): funnel all refreshes through one shared in-flight call; strict reuse detection
+      logs the user out if two tabs refresh with the same token at the same moment. Use the Vite dev
+      proxy so the API is same-origin and the /auth refresh cookie is sent.
 - [ ] M0.8 GitHub Actions: backend tests (Testcontainers) + frontend typecheck/lint
 - [ ] M0.9 Update CLAUDE.md commands with the real ones
 - [ ] M0.10 Backend Dockerfile + `backend` service in docker-compose (needed for the M0 exit criterion;
@@ -82,6 +90,8 @@ Tick a task only when its tests pass and it's committed.
       async persistence + reconciler)
 - [ ] M2.3 Strategy selectable per event (admin endpoint); concurrency test parameterised over all three
 - [ ] M2.4 k6 scenarios: seat-collision, mixed-realistic; `scripts/k6.sh` runs k6 in Docker
+      Note (from M0.5): log in during k6 `setup()`, not in the measured phase; bcrypt (cost 12) is
+      deliberately slow and would dominate the numbers.
 - [ ] M2.5 `scripts/bench.sh`: runs each strategy, collects k6 JSON + Postgres CPU, writes
       `benchmarks/results/<date>/` and a markdown results table
 - [ ] M2.6 Benchmark report v1 in `benchmarks/README.md` with your own analysis of why the numbers differ
@@ -127,6 +137,8 @@ Tick a task only when its tests pass and it's committed.
       health details (M0.1 set `show-details: always` for local dev). Split DB roles: a migration
       owner role and an app role; `REVOKE UPDATE, DELETE, TRUNCATE ON audit_log` from the app role
       (M0.2 made audit_log append-only with triggers only, which a superuser can bypass)
+      Note (from M0.5): serve frontend and API same-site (subdomains of one domain, or a Vercel
+      rewrite proxying the API), otherwise the SameSite=Strict refresh cookie is never sent.
 - [ ] M7.2 README: architecture diagram, decisions and trade-offs, results, how to reproduce
 - [ ] M7.3 Demo video (3 minutes): drop, collision, chaos run, invariants staying green
 
