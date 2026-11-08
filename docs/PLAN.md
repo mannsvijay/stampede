@@ -24,13 +24,15 @@ Tick a task only when its tests pass and it's committed.
 
 ## M0 - Skeleton (week 1)
 - [x] M0.1 Monorepo layout, docker-compose (postgres 16, redis 7, mailpit), Gradle backend that boots
-- [ ] M0.2 Flyway V1: full schema from PRD 9 with CHECK constraints and the unique partial index
+- [x] M0.2 Flyway V1: full schema from PRD 9 with CHECK constraints and the unique partial index
       Decisions: UUID v4 ids (app `UUID.randomUUID()`, `gen_random_uuid()` default); `holds.seat_ids uuid[]`
       with `event_seats.hold_id` as the authoritative owner; event_seats status AVAILABLE/HELD/SOLD only
       (CHECKED_IN lives on tickets; transfer = version bump); transition guard in code only (M1.1), plus a
       CHECK tying seat status to hold_id/order_id; audit_log append-only via triggers; added
       `user_event_allowance`, `tickets.issued_at`, composite same-event FKs, extra partial unique indexes.
 - [ ] M0.3 Venue JSON format + generator script + seed loader (one ~2,000-seat venue)
+      Note (from M0.2): the loader must only create event_seats whose seat belongs to the event's venue
+      (seat -> section -> venue = event.venue_id); the schema can't enforce this with a FK.
 - [ ] M0.4 Spring Modulith module packages + verification test
 - [ ] M0.5 Auth: register, login, refresh rotation, hashed refresh tokens, JWT filter
       (includes Flyway V2: `users.role` with a CHECK constraint; deferred from M0.2)
@@ -48,9 +50,14 @@ Tick a task only when its tests pass and it's committed.
       **Write this one yourself by hand; Claude reviews.**
 - [ ] M1.3 Concurrency test harness: N threads race for the same seats, exactly one wins, x1000
 - [ ] M1.4 Holds: create (all-or-nothing, per-user cap), release, 5-min expiry sweeper
+      Note (from M0.2): reject duplicate seat IDs in a hold request in code; `holds.seat_ids` has no
+      DB-level uniqueness (a CHECK can't contain a subquery).
 - [ ] M1.5 Orders from holds (happy path, synchronous fake payment for now)
+      Note (from M0.2): `orders` has no `hold_id`. Decide before starting how an order links to its
+      hold (the saga's HoldVerified step needs it), e.g. a V-next migration adding `orders.hold_id`.
 - [ ] M1.6 Ticket issuing: Ed25519 signing, QR payload, GET /me/tickets
 - [ ] M1.7 Invariant checker v1 (five checks as SQL) + hard assertion after every integration test
+      Note (from M0.2): also check that every event_seat's seat belongs to the event's venue.
 - [ ] M1.8 Basic seat map page: Canvas2D render of seats, click to hold, checkout, show ticket QR
 **Exit:** a full purchase works end to end in the browser; concurrency test passes 1000/1000.
 
@@ -109,3 +116,5 @@ Tick a task only when its tests pass and it's committed.
 Kafka/Redpanda publisher, OpenTelemetry + Jaeger, WebGL particle waiting room, ticket reveal and
 holographic foil, wallet, transfer with version bump, offline scanner PWA with revocation sync,
 presale codes, best-available, resale, venue editor, rotating QR.
+- Note (from M0.2) for the offline scanner: make `POST /checkins` idempotent by having the scanner
+  generate `checkins.id` (UUID) per scan and resend the same id on sync retries (PK dedupes).
