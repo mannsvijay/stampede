@@ -23,7 +23,7 @@ Tick a task only when its tests pass and it's committed.
 7. **Bot metric honesty.** The README states the bots were written by the author and what they do.
 
 ## M0 - Skeleton (week 1)
-- [ ] M0.1 Monorepo layout, docker-compose (postgres 16, redis 7, mailpit), Gradle backend that boots
+- [x] M0.1 Monorepo layout, docker-compose (postgres 16, redis 7, mailpit), Gradle backend that boots
 - [ ] M0.2 Flyway V1: full schema from PRD 9 with CHECK constraints and the unique partial index
 - [ ] M0.3 Venue JSON format + generator script + seed loader (one ~2,000-seat venue)
 - [ ] M0.4 Spring Modulith module packages + verification test
@@ -32,6 +32,8 @@ Tick a task only when its tests pass and it's committed.
 - [ ] M0.7 Frontend shell: Vite + React + TS, router, events list from the API, OpenAPI-generated client
 - [ ] M0.8 GitHub Actions: backend tests (Testcontainers) + frontend typecheck/lint
 - [ ] M0.9 Update CLAUDE.md commands with the real ones
+- [ ] M0.10 Backend Dockerfile + `backend` service in docker-compose (needed for the M0 exit criterion;
+      found in M0.1, which runs the backend on the host via `./gradlew bootRun`)
 **Exit:** `docker compose up` runs everything on a clean clone; CI green.
 
 ## M1 - Core booking, pessimistic (weeks 2-3)
@@ -90,7 +92,8 @@ Tick a task only when its tests pass and it's committed.
 - [ ] M6.4 Soak test (1 hour)
 
 ## M7 - Ship (week 12)
-- [ ] M7.1 Deploy backend (one VM, compose) + frontend (Vercel)
+- [ ] M7.1 Deploy backend (one VM, compose) + frontend (Vercel). Before deploying, restrict actuator
+      health details (M0.1 set `show-details: always` for local dev)
 - [ ] M7.2 README: architecture diagram, decisions and trade-offs, results, how to reproduce
 - [ ] M7.3 Demo video (3 minutes): drop, collision, chaos run, invariants staying green
 
