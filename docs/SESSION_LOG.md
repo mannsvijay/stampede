@@ -130,3 +130,42 @@ survive a logout. Fixed with one lock row per family (D-008).
 - Generate a JWT secret in plain PowerShell:
   `[Convert]::ToBase64String([Security.Cryptography.RandomNumberGenerator]::GetBytes(32))`
   (or `openssl rand -base64 32` from Git Bash)
+
+## 2026-11-09 — M0.6 GET /events, GET /events/{id}; RFC 7807 error handler
+
+**What changed**
+- Inventory: `inventory.catalog` (internal) serves `GET /events` (`{items, serverTime}`, upcoming
+  non-draft events, ordered by drop time, capped at 100) and `GET /events/{id}` (venue, tiers by
+  price, per-user limit; read in one SQL statement). DRAFT ids are 404. No availability counts.
+- Errors: one application-wide `ApiExceptionHandler` (extends `ResponseEntityExceptionHandler`) and a
+  problem+json `/error` controller in shared's internal `shared.web`; identity's
+  `AuthExceptionHandler` deleted. New codes: EVENT_NOT_FOUND, NOT_FOUND, METHOD_NOT_ALLOWED,
+  UNSUPPORTED_MEDIA_TYPE, REQUEST_FAILED, INTERNAL_ERROR. 500s carry only a fixed message and an
+  `errorId`; security exceptions inside controllers still become 401/403.
+- OpenAPI: springdoc 2.10.0 (`-api`, no UI). Generated spec committed at `docs/openapi.json`;
+  `OpenApiSpecTest` fails on drift (verified by tampering with the file). `/v3/api-docs` only under
+  the `openapi` profile. `@ErrorResponses` documents each operation's codes under their own status;
+  response fields are marked required; success media type is application/json.
+- Dev: `demo-reschedule` profile moves the demo event's drop/start into the future (SCHEDULED only).
+- Docs: PRD 10 (new codes, 401-before-404, spec location), D-009 reworded, D-010 drafted.
+- `JwtFilterTest.publicRoutesNeedNoToken` updated with approval: it expected 404 because no /events
+  controller existed before M0.6; it now asserts 200 and 404 EVENT_NOT_FOUND.
+
+**Verified**
+- `./gradlew test --rerun`: green, 180 tests, 0 failures (ModularityTest and all auth tests included).
+
+**Next**: M0.7 frontend shell, generating the client from `docs/openapi.json`.
+
+**Open problems**
+- `RegisterRequest.password` not marked required in the spec (PLAN M0.7 note).
+- `/events/{id}/seatmap` needs its own security rule (PLAN M1.8 note).
+- `OpenApiConfig` compiles with an unchecked-operations warning from swagger-models' raw types.
+- Carried over: no cleanup of expired refresh token families; rate-limit refresh/logout in M4.3.
+
+**Commands (PowerShell, for M0.9)**
+- Run with seed, rescheduled demo drop and the spec endpoint:
+  `cd backend`, `$env:SPRING_PROFILES_ACTIVE = "seed,demo-reschedule,openapi"`, `.\gradlew.bat bootRun`
+  (then `Remove-Item Env:SPRING_PROFILES_ACTIVE`)
+- Update the committed spec after an intended API change:
+  `cd backend`, `.\gradlew.bat test --tests "OpenApiSpecTest"`, `cd ..`,
+  `Copy-Item backend\build\openapi\openapi.json docs\openapi.json`

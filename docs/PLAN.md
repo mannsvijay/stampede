@@ -60,7 +60,7 @@ Tick a task only when its tests pass and it's committed.
       family-cap assertion; rotate now checks the family's own expiry) plus hardening (guarded
       consume with a row-count check; READ COMMITTED requirement documented). lock_timeout deferred
       to M4.3.
-- [ ] M0.6 GET /events, GET /events/{id}; RFC 7807 error handler
+- [x] M0.6 GET /events, GET /events/{id}; RFC 7807 error handler
       Note (from M0.4): where shared code lives (error codes, problem+json types) is decided with the
       current-user question in M0.5.
       Note (from M0.3): the demo event's drop_at/starts_at are set relative to now() on first load and
@@ -78,6 +78,11 @@ Tick a task only when its tests pass and it's committed.
       Note (from M0.5): funnel all refreshes through one shared in-flight call; strict reuse detection
       logs the user out if two tabs refresh with the same token at the same moment. Use the Vite dev
       proxy so the API is same-origin and the /auth refresh cookie is sent.
+      Note (from M0.6): generate the client from the committed `docs/openapi.json` (not the live
+      endpoint). The list response is `{items, serverTime}`; correct the board countdown with
+      `serverTime`. Errors: branch on `code` in the problem+json body. `RegisterRequest.password` is
+      not marked required in the spec (its custom @ValidPassword constraint isn't understood by
+      springdoc); fix that in the spec when the register form needs it.
 - [ ] M0.8 GitHub Actions: backend tests (Testcontainers) + frontend typecheck/lint
 - [ ] M0.9 Update CLAUDE.md commands with the real ones
 - [ ] M0.10 Backend Dockerfile + `backend` service in docker-compose (needed for the M0 exit criterion;
@@ -99,6 +104,9 @@ Tick a task only when its tests pass and it's committed.
 - [ ] M1.7 Invariant checker v1 (five checks as SQL) + hard assertion after every integration test
       Note (from M0.2): also check that every event_seat's seat belongs to the event's venue.
 - [ ] M1.8 Basic seat map page: Canvas2D render of seats, click to hold, checkout, show ticket QR
+      Note (from M0.6): SecurityConfig permits GET `/events/*`, which matches one path segment only,
+      so `GET /events/{id}/seatmap` needs its own rule (decide whether it is public). Add the venue
+      layout (`layout_json`) for the board silhouette / dot-matrix preview with that endpoint.
 **Exit:** a full purchase works end to end in the browser; concurrency test passes 1000/1000.
 
 ## M2 - Contention lab (weeks 4-5)  <- the heart of the portfolio
