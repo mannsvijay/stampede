@@ -169,3 +169,39 @@ survive a logout. Fixed with one lock row per family (D-008).
 - Update the committed spec after an intended API change:
   `cd backend`, `.\gradlew.bat test --tests "OpenApiSpecTest"`, `cd ..`,
   `Copy-Item backend\build\openapi\openapi.json docs\openapi.json`
+
+## 2026-11-09 — M0.8 GitHub Actions CI
+
+**What changed**
+- `.github/workflows/ci.yml`: push to main, pull_request, workflow_dispatch; `contents: read`;
+  superseded PR runs cancelled (main runs never are). Jobs `Backend` (Temurin 21, setup-gradle with
+  wrapper validation and cache, wrapper warm-up retried 3x for the github.com 504, `./gradlew test`,
+  reports uploaded on failure) and `Frontend` (Node from `.nvmrc`, `npm ci --ignore-scripts`,
+  typecheck, lint, test, check:api, build, blocking prod audit at high, report-only full audit).
+  Actions pinned to commit SHAs, each release 14+ days old.
+- `gradle-wrapper.properties`: `distributionSha256Sum` for gradle-8.14.6-bin.zip.
+- Docs: D-012 drafted; D-011 records the minimatch finding as accepted for now; PLAN M0.7a added
+  for the override.
+
+**Verified (locally)**
+- actionlint 1.7.12 (Docker, pinned by digest, shellcheck 0.11.0 inside): 0 errors.
+- Frontend after `npm ci --ignore-scripts` on Node 26.13.0: typecheck, lint, test (33/33),
+  check:api, build all exit 0; `npm audit --omit=dev --audit-level=high` exit 0 (0 found); full
+  `npm audit` exit 1 (10 moderate, minimatch; report-only in CI).
+- `./gradlew test --rerun`: BUILD SUCCESSFUL, 180 tests, 0 failures/errors/skipped.
+- Fresh `GRADLE_USER_HOME`: `./gradlew --version` downloaded 8.14.6 and passed the new checksum.
+
+**Next**: user pushes and confirms a green run, then proves a red run with a draft PR that breaks
+a test; tick M0.8 after that. Then M0.9.
+
+**Open problems**
+- M0.7a minimatch override, not before 2026-11-10T22:26Z.
+- main is not protected (D-012); add a ruleset with a self-bypass later if wanted.
+- Pinned action SHAs are bumped by hand (no Dependabot).
+- M0.7 is still unticked in PLAN.md and has no SESSION_LOG entry, although its code is committed
+  (noted, not changed in M0.8).
+
+**Commands (PowerShell, for M0.9)**
+- Lint the workflow: `docker run --rm -v "${PWD}:/repo" -w /repo rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667`
+- Frontend as CI runs it: `cd frontend`, `npm ci --ignore-scripts`, then `npm run typecheck`,
+  `npm run lint`, `npm test`, `npm run check:api`, `npm run build`

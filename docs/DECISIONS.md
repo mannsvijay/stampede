@@ -384,8 +384,69 @@ Write these yourself, in your own words. Each one is an interview answer you've 
     `npm audit` reports 10 moderate findings from one advisory (minimatch, GHSA-g3hv-75wg-m249) in
     lint tooling only. `npm audit --omit=dev` reports 0. The fix (minimatch 11.0.1, published
     2026-10-27) wasn't 14 days old yet.
+  - **Accepted (M0.8, 2026-11-09):** the minimatch finding is moderate, affects only dev-only lint
+    tooling that never ships, and `npm audit --omit=dev` reports 0. CI reports it without failing
+    (D-012). After 2026-11-10T22:26Z, add `"overrides": { "minimatch@10": "11.0.1" }` as its own
+    commit (PLAN M0.7a), and remove the override once ESLint itself requires minimatch 11.
   - Where the Web Locks API is missing (old browsers), only the per-tab protection applies.
 - **How I'd know it was wrong:**
   - Users get logged out with several tabs open (cross-tab serialisation not working).
   - `check:api` keeps failing on generator noise rather than real contract changes.
   - The hand-written query hooks grow into a parallel client.
+
+### D-012 CI: one GitHub Actions workflow, pinned actions, audit policy (DRAFT)
+- **Date:** 2026-11-09
+- **Context:** M0.8 needs every push to main and every PR to prove that the backend tests (including
+  Testcontainers, the Modulith verification and the OpenAPI drift test) and the frontend checks
+  pass. CI runs third-party code with access to the repo, so it needs the same supply-chain care as
+  npm packages (D-011). github.com sometimes returns 504 for the Gradle distribution (M0.1).
+- **Options considered:**
+  - Workflows: one workflow with two jobs; one workflow per app with path filters.
+  - Action references: tags (`@v7`); full commit SHAs with the version in a comment.
+  - npm audit: none; production only, blocking on high; that plus a report-only full audit; full
+    audit blocking on moderate (fails today on minimatch).
+  - Node version: from `frontend/.nvmrc`; a fixed version in the workflow; a matrix with the
+    `engines` minimum.
+  - Gradle 504: rely on the cache; a retried download step; hosting the distribution elsewhere.
+- **Decision:**
+  - `.github/workflows/ci.yml` runs on push to main, pull_request and workflow_dispatch. Jobs
+    `Backend` and `Frontend` run in parallel on `ubuntu-24.04`, without path filters.
+  - `permissions: contents: read`; checkout with `persist-credentials: false`.
+  - Concurrency group per branch. A new push cancels that PR branch's older run; runs on main are
+    never cancelled, so every main commit gets a result.
+  - Actions are pinned to full commit SHAs, each release at least 14 days old when pinned:
+    checkout v7.0.1, setup-java v6.1.0, gradle/actions/setup-gradle v6.4.0, setup-node v7.1.0,
+    upload-artifact v7.0.2.
+  - Backend: Temurin 21. setup-gradle validates the wrapper jar and caches `~/.gradle` (only main
+    writes the cache). A `./gradlew --version` warm-up is retried 3 times with backoff before
+    `./gradlew test`. Test reports are uploaded only when the job fails, kept 7 days.
+    `distributionSha256Sum` in `gradle-wrapper.properties` makes the wrapper check the downloaded
+    distribution, not just the jar.
+  - Frontend: Node from `.nvmrc`; `npm ci --ignore-scripts`; typecheck, lint, test, check:api and
+    build. `npm audit --omit=dev --audit-level=high` blocks; a full `npm audit` only reports
+    (`continue-on-error`).
+  - The workflow is checked locally with actionlint 1.7.12 in Docker, pinned by image digest:
+    `docker run --rm -v "${PWD}:/repo" -w /repo rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667`
+  - **main is not protected yet.** If I add a ruleset later (required checks `Backend` and
+    `Frontend`), I add myself to its bypass list so direct pushes to main still work.
+- **Why:**
+  - A tag can be moved to different code after I've reviewed it; a commit SHA can't. The 14-day
+    rule gives the community time to spot a compromised release.
+  - Install scripts are the usual way a compromised npm package runs code, and nothing here needs
+    them (the checks pass with `--ignore-scripts`).
+  - Audit results change when advisories are published, not when my code changes. Blocking only on
+    high issues in shipped code keeps unrelated PRs from turning red, and the report-only step
+    still shows everything.
+  - The cache removes most Gradle downloads; the retry covers a cold cache hitting a transient 504,
+    and fails clearly before the tests instead of halfway through them.
+- **Trade-offs:**
+  - Pinned SHAs don't update themselves; I bump them by hand (no Dependabot yet).
+  - Both jobs run on every change, even docs-only ones (simpler than path filters, a few minutes
+    of runner time).
+  - Without branch protection, a red CI run doesn't stop a push to main; it is only a signal.
+  - The report-only audit stays yellow until the minimatch override lands (PLAN M0.7a).
+- **How I'd know it was wrong:**
+  - CI fails on Gradle downloads even with the retry (then host or vendor the distribution).
+  - A dependency starts needing its install script and builds break in CI only.
+  - The blocking audit goes red on PRs that didn't touch dependencies often enough to be ignored.
+  - I keep finding red runs on main after the fact (time for branch protection).

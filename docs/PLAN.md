@@ -96,8 +96,23 @@ Tick a task only when its tests pass and it's committed.
       Open: `npm audit` reports 10 moderate findings, all one minimatch advisory (GHSA-g3hv-75wg-m249)
       in dev-only lint tooling (`npm audit --omit=dev`: 0). The fix (minimatch 11.0.1, published
       2026-10-27) passes the 14-day rule from 2026-11-10; it needs an npm `overrides` entry because
-      eslint 10.13 asks for minimatch 10. Decide then.
+      eslint 10.13 asks for minimatch 10. Decided in M0.8: accepted for now (D-011, see the
+      follow-up below).
+- [ ] M0.7a minimatch override (its own commit, not before 2026-11-10T22:26Z, when 11.0.1 is 14 days
+      old): add `"overrides": { "minimatch@10": "11.0.1" }` to frontend/package.json, install with
+      `npm install --before=<date>`, confirm `npm audit` is clean and lint/test/build pass. Remove the
+      override once ESLint itself requires minimatch 11 (10.14.0 still asks for `^10.2.6`).
 - [ ] M0.8 GitHub Actions: backend tests (Testcontainers) + frontend typecheck/lint
+      Decisions (D-012, draft): one workflow `.github/workflows/ci.yml` on push to main, pull_request
+      and workflow_dispatch; jobs Backend (Temurin 21, setup-gradle with wrapper validation and
+      cache, wrapper warm-up retried 3x for the github.com 504, `./gradlew test`, reports uploaded on
+      failure) and Frontend (Node from .nvmrc, `npm ci --ignore-scripts`, typecheck, lint, test,
+      check:api, build, `npm audit --omit=dev --audit-level=high` blocking, full `npm audit`
+      report-only). `contents: read`; superseded PR runs cancelled (main runs are not); actions
+      pinned to commit SHAs, each release 14+ days old. `distributionSha256Sum` added to the Gradle
+      wrapper. actionlint (Docker, pinned image) checks the workflow locally.
+      Proof: push, then a draft PR with a deliberately broken test must go red (user runs this).
+      Not done: branch protection on main (see D-012).
 - [ ] M0.9 Update CLAUDE.md commands with the real ones
 - [ ] M0.10 Backend Dockerfile + `backend` service in docker-compose (needed for the M0 exit criterion;
       found in M0.1, which runs the backend on the host via `./gradlew bootRun`)

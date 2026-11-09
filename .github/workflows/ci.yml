@@ -1,0 +1,130 @@
+# CI for Stampede (D-012). Two independent jobs: Backend (Gradle + Testcontainers) and Frontend (npm).
+#
+# Supply chain: every action is pinned to a full commit SHA (a tag can be moved, a SHA can't), with
+# the release in a comment. Each release was at least 14 days old when pinned, the same rule as npm
+# packages (D-011). To update one, look up the new tag's commit with
+#   git ls-remote https://github.com/<owner>/<repo>.git "refs/tags/<tag>^{}"
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # Adds a "Run workflow" button in the Actions tab, for manual runs.
+  workflow_dispatch:
+
+# Least privilege: the job token can read the repo and nothing else.
+permissions:
+  contents: read
+
+# A new push to a PR branch cancels that branch's older, now-pointless run. Runs on main are never
+# cancelled, so every commit on main gets its own green or red result.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  backend:
+    name: Backend
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Don't leave the job token in .git/config for later steps.
+          persist-credentials: false
+
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      # Validates gradle-wrapper.jar against Gradle's published checksums, and caches ~/.gradle
+      # (dependencies and the wrapper's Gradle distribution). Only main writes the cache; other
+      # branches only read it, so a PR can't poison it.
+      - uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
+        with:
+          validate-wrappers: true
+
+      # github.com sometimes returns 504 for the Gradle distribution (SESSION_LOG, M0.1). After the
+      # first green run on main it comes from the cache; on a cold cache, retry the download here so
+      # a transient error doesn't fail the build in the middle of the tests. The wrapper checks the
+      # download against distributionSha256Sum in gradle-wrapper.properties.
+      - name: Download Gradle (retried)
+        run: |
+          for attempt in 1 2 3; do
+            if ./gradlew --version; then
+              exit 0
+            fi
+            echo "::warning::Gradle download failed (attempt $attempt of 3)"
+            sleep $((attempt * 15))
+          done
+          echo "::error::Could not download Gradle after 3 attempts"
+          exit 1
+
+      # Includes the Testcontainers tests (Docker is preinstalled on the runner), the Modulith
+      # verification test and OpenApiSpecTest (which reads ../docs/openapi.json).
+      - name: Test
+        run: ./gradlew test
+
+      - name: Upload test reports
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: backend-test-reports
+          path: |
+            backend/build/reports/tests/test/
+            backend/build/test-results/test/
+          retention-days: 7
+
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: frontend/.nvmrc
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # Installs exactly the lockfile. --ignore-scripts stops dependencies' install scripts from
+      # running, a common way for a compromised package to execute code.
+      - name: Install
+        run: npm ci --ignore-scripts
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm test
+
+      # Fails if src/api/schema.d.ts doesn't match the committed docs/openapi.json.
+      - name: Generated client up to date
+        run: npm run check:api
+
+      - name: Build
+        run: npm run build
+
+      # Blocking: high or critical advisories in code that ships to users.
+      - name: Audit (production, blocking)
+        run: npm audit --omit=dev --audit-level=high
+
+      # Report-only: everything, including dev tooling. A red step here shows as a warning on the
+      # run, not a failure. Known and accepted: the minimatch advisory in lint tooling (D-011).
+      - name: Audit (all, report only)
+        continue-on-error: true
+        run: npm audit
