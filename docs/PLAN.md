@@ -149,9 +149,18 @@ and gets the seeded demo event from GET /events. Still open in M0: M0.7a (date-g
 - [ ] M1.4 Holds: create (all-or-nothing, per-user cap), release, 5-min expiry sweeper
       Note (from M0.2): reject duplicate seat IDs in a hold request in code; `holds.seat_ids` has no
       DB-level uniqueness (a CHECK can't contain a subquery).
+      Note (from M1.1, D-014): map `IllegalSeatTransitionException` to API errors here. Hold on a
+      HELD/SOLD seat is SEAT_TAKEN (409, with `takenAgoMs`). Decide what DELETE /holds/{id} returns for
+      a hold that already expired or isn't the owner, and HOLD_EXPIRED's HTTP status (PRD 10 names
+      the code but no status).
 - [ ] M1.5 Orders from holds (happy path, synchronous fake payment for now)
       Note (from M0.2): `orders` has no `hold_id`. Decide before starting how an order links to its
       hold (the saga's HoldVerified step needs it), e.g. a V-next migration adding `orders.hold_id`.
+      Note (from M1.1, D-014): decide when `event_seats.order_id` is set. The CHECK allows HELD with an
+      order_id (attach at PENDING), but `EventSeat` has no such transition; it only sets order_id on
+      `sell`, which clears hold_id. If orders attach while still HELD, add a guarded transition and
+      tests, and decide what `sell` does when the seat already points to a different order (today
+      it overwrites it). Sell on a seat no longer held by this hold maps to HOLD_EXPIRED.
 - [ ] M1.6 Ticket issuing: Ed25519 signing, QR payload, GET /me/tickets
 - [ ] M1.7 Invariant checker v1 (five checks as SQL) + hard assertion after every integration test
       Note (from M0.2): also check that every event_seat's seat belongs to the event's venue.

@@ -522,3 +522,44 @@ Write these yourself, in your own words. Each one is an interview answer you've 
     the backend behind a compose profile and change the exit criterion's command).
   - A security scan of the runtime image keeps flagging packages the app never uses (then
     distroless or jlink).
+
+### D-014 Seat state machine: shape, owner pointers, and jqwik (DRAFT)
+- **Date:** 2026-11-10
+- **Context:** M1.1 turns PRD 2's seat diagram into code (the guard D-004 put in code). The PRD
+  leaves some things open: refund (SOLD to AVAILABLE) is drawn but marked P2, the database CHECK
+  allows more pointer shapes than any transition needs, and it doesn't say what happens to
+  `hold_id` once a seat is sold. Property tests need a new test dependency.
+- **Options considered:**
+  - Shape: a mutable entity; an immutable record whose transitions return a new seat.
+  - SOLD: final; leaves SOLD through refund.
+  - `hold_id` on sell: kept (a trail from seat to hold); cleared.
+  - Property testing: jqwik 1.9.2, 1.9.3, 1.10.x; hand-rolled random loops in JUnit.
+- **Decision:**
+  - `inventory.seat.EventSeat`, an immutable record, internal to inventory (D-007): only inventory
+    writes `event_seats`. Transitions: `hold` (AVAILABLE to HELD), `release`, `expire`, `failSaga`
+    (HELD to AVAILABLE, the caller's hold must own the seat) and `sell` (HELD to SOLD, same check).
+    Everything else throws `IllegalSeatTransitionException` with a reason (WRONG_STATE or
+    HOLD_MISMATCH). It has no HTTP meaning; the inventory service maps it to SEAT_TAKEN or
+    HOLD_EXPIRED when those endpoints exist (M1.4/M1.5).
+  - The constructor enforces exactly `ck_event_seats_status_pointers`, so any row the database
+    accepts can be loaded. Transitions only produce the strict shape: **the pointer on a seat is its
+    current owner** (the hold while HELD, the order once SOLD). `sell` clears `hold_id`; history
+    stays in `holds.seat_ids` and `order_items`.
+  - **SOLD is final.** Refunding a sold seat is left out; adding it needs its own decision, and the
+    "SOLD never goes back" property test would change to "only through refund". A payment that
+    succeeds after its hold expired (PRD 6.4) refunds money but never touches a SOLD seat.
+  - Every successful transition bumps `version` by 1 (the optimistic strategy compares it, M2.1).
+  - Repeated or racing calls (expire after release) are rejected, not treated as no-ops.
+  - Test dependency: `net.jqwik:jqwik:1.9.2`.
+- **Why:** An immutable record can't be left half-changed by a rejected transition, and its
+  constructor makes an invalid seat impossible to build. Clearing `hold_id` keeps "who owns this
+  seat?" to one column per state, and stops it from quietly answering M1.5's open "how does an order
+  link to its hold" question. jqwik 1.9.2 is built against JUnit Platform 1.11.3, older than the
+  1.12.2 that Boot 3.5's BOM pins, so it runs on a newer platform (backwards compatible). 1.9.3 and
+  1.10.x target Platform 1.13 and 1.14 and would be forced down to 1.12.2, which risks
+  `NoSuchMethodError` at runtime. 1.9.3 only added a Kotlin API change. The trade-off of the guard
+  in code (D-004) remains: the optimistic and Lua strategies repeat these rules in a WHERE clause or
+  in Lua, and this class is the reference they must agree with.
+- **How I'd know it was wrong:** refunds or seat kills become real requirements and SOLD can't stay
+  final; or debugging keeps needing "which hold did this sold seat come from?" without joining
+  `holds`; or a JUnit upgrade (Boot 4) leaves jqwik 1.9.2 behind, at which point move to 1.10.x.

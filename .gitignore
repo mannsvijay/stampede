@@ -8,6 +8,8 @@ out/
 bin/
 # Keep the wrapper jar: it is what makes ./gradlew work without a Gradle install.
 !gradle/wrapper/gradle-wrapper.jar
+# jqwik stores failing property-test cases here to replay them first on the next run.
+.jqwik-database
 
 # IDEs
 .idea/

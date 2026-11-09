@@ -52,6 +52,10 @@ dependencies {
     testImplementation("org.testcontainers:postgresql")
     // ApplicationModules.verify() (module model built on ArchUnit) + @ApplicationModuleTest for later.
     testImplementation("org.springframework.modulith:spring-modulith-starter-test")
+    // Property-based tests (M1.1, D-014). Not managed by Boot's BOM. 1.9.2 is built against JUnit
+    // Platform 1.11.3, older than the 1.12.2 Boot 3.5 pins, so it runs on a newer platform (the safe
+    // direction). 1.9.3 and 1.10.x target Platform 1.13/1.14 and would be forced down to 1.12.2.
+    testImplementation("net.jqwik:jqwik:1.9.2")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
 
