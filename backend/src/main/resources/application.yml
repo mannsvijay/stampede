@@ -6,12 +6,14 @@ spring:
     # "optional:" means startup doesn't fail when it's missing (e.g. in tests or CI).
     import: optional:file:../.env[.properties]
   datasource:
-    url: jdbc:postgresql://localhost:${POSTGRES_PORT:5432}/${POSTGRES_DB:stampede}
+    # POSTGRES_HOST and REDIS_HOST are unset for host runs (bootRun), so localhost is used.
+    # docker-compose sets them to the service names, with the internal ports (D-013).
+    url: jdbc:postgresql://${POSTGRES_HOST:localhost}:${POSTGRES_PORT:5432}/${POSTGRES_DB:stampede}
     username: ${POSTGRES_USER:stampede}
     password: ${POSTGRES_PASSWORD:}
   data:
     redis:
-      host: localhost
+      host: ${REDIS_HOST:localhost}
       port: ${REDIS_PORT:6379}
       password: ${REDIS_PASSWORD:}
       # Fail fast instead of Lettuce's 60 s default, so health turns DOWN quickly when Redis is gone.

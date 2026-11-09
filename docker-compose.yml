@@ -1,5 +1,7 @@
-# Local infrastructure for Stampede. Credentials come from .env (template: .env.example).
+# Stampede: local infrastructure plus the backend (D-013). Credentials come from .env (template:
+# .env.example); a missing variable stops compose with an error naming it.
 # Ports are bound to 127.0.0.1 so nothing is exposed to your network.
+# The frontend runs on the host with `npm run dev` and proxies the API to localhost:8080.
 
 services:
   postgres:
@@ -45,6 +47,42 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+
+  backend:
+    build: ./backend
+    # Name for the built image, so it can be inspected directly (docker run ... stampede-backend:local).
+    image: stampede-backend:local
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    # An explicit list, not env_file: .env's POSTGRES_PORT and REDIS_PORT are the ports on your
+    # machine. Inside Docker the backend reaches the services by name on their own ports.
+    # Secrets are passed in when the container starts; they are not in the image.
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: ${POSTGRES_DB:?set POSTGRES_DB in .env}
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}
+      STAMPEDE_JWT_SECRET: ${STAMPEDE_JWT_SECRET:?set STAMPEDE_JWT_SECRET in .env}
+      # seed: load the demo venue and event (idempotent). demo-reschedule: move the demo drop into
+      # the future. Set STAMPEDE_COMPOSE_PROFILES in .env to change; set it empty for no seeding.
+      SPRING_PROFILES_ACTIVE: ${STAMPEDE_COMPOSE_PROFILES-seed,demo-reschedule}
+    ports:
+      - "127.0.0.1:${BACKEND_PORT:-8080}:8080"
+    healthcheck:
+      # curl ships in the runtime image. -f fails on HTTP errors: health is 503 when DOWN.
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://localhost:8080/actuator/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      # Startup (JVM, Flyway, seeding) is not counted against the retries.
+      start_period: 90s
 
 volumes:
   pg-data:

@@ -1,0 +1,24 @@
+# Keeps files out of the Docker build context (backend/). The Dockerfile copies only gradlew,
+# gradle/, the build files and src/, but excluding these here means they can't be sent to the
+# Docker daemon or copied in by mistake.
+
+# Secrets. Never in an image (D-013).
+.env
+.env.*
+**/.env
+**/.env.*
+
+# Build output and caches (the image builds its own).
+build/
+.gradle/
+out/
+bin/
+**/node_modules/
+
+# IDEs, logs, OS junk.
+.idea/
+*.iml
+.vscode/
+*.log
+.DS_Store
+Thumbs.db

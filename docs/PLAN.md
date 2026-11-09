@@ -123,7 +123,16 @@ Tick a task only when its tests pass and it's committed.
       deny `Read(**/.env)` and `Edit` on the .env files (no deny rule loosened).
 - [ ] M0.10 Backend Dockerfile + `backend` service in docker-compose (needed for the M0 exit criterion;
       found in M0.1, which runs the backend on the host via `./gradlew bootRun`)
-**Exit:** `docker compose up` runs everything on a clean clone; CI green.
+      Decisions (D-013): clean clone = one step, copy `.env.example` to `.env` and fill in the
+      secrets (compose's `:?` names anything missing); multi-stage Dockerfile, Temurin 21 JDK build
+      and Temurin 21 JRE (noble) runtime, pinned by digest (14-day rule), non-root uid 10001;
+      backend reaches postgres/redis by service name with internal ports fixed in compose; seeds
+      with `seed,demo-reschedule` by default (`STAMPEDE_COMPOSE_PROFILES` overrides); healthcheck
+      with the image's curl; frontend stays on `npm run dev`; CI `Compose smoke` job (plain
+      `docker compose build`, throwaway `.env`, GET /events, non-root and no-.env checks).
+**Exit:** on a clean clone, after copying `.env.example` to `.env` and filling in the secrets,
+`docker compose up` runs the backend and infrastructure (Postgres, Redis, Mailpit) with the demo
+data seeded; the frontend runs with `npm run dev` (it deploys to Vercel in M7.1); CI green.
 
 ## M1 - Core booking, pessimistic (weeks 2-3)
 - [ ] M1.1 Seat state machine (domain class) + unit tests + property tests (jqwik)
@@ -204,6 +213,8 @@ Tick a task only when its tests pass and it's committed.
       health details (M0.1 set `show-details: always` for local dev). Split DB roles: a migration
       owner role and an app role; `REVOKE UPDATE, DELETE, TRUNCATE ON audit_log` from the app role
       (M0.2 made audit_log append-only with triggers only, which a superuser can bypass)
+      Review seeding (from M0.10): compose runs the backend with `seed,demo-reschedule` by default;
+      decide whether the deployed instance seeds at all (set `STAMPEDE_COMPOSE_PROFILES` there).
       Note (from M0.5): serve frontend and API same-site (subdomains of one domain, or a Vercel
       rewrite proxying the API), otherwise the SameSite=Strict refresh cookie is never sent.
 - [ ] M7.2 README: architecture diagram, decisions and trade-offs, results, how to reproduce
