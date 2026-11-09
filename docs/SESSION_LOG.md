@@ -237,3 +237,35 @@ survive a logout. Fixed with one lock row per family (D-008).
 - Lint the workflow: `docker run --rm -v "${PWD}:/repo" -w /repo rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667`
 - Frontend as CI runs it: `cd frontend`, `npm ci --ignore-scripts`, then `npm run typecheck`,
   `npm run lint`, `npm test`, `npm run check:api`, `npm run build`
+
+## 2026-11-09 — M0.9 Real commands in CLAUDE.md
+
+**What changed**
+- `CLAUDE.md`: the placeholder Commands section replaced with the real Git Bash commands (infra,
+  backend tests, bootRun profiles, generateVenue, the openapi.json update, frontend scripts,
+  actionlint, k6 marked as M2.4) and a Gotchas section (`--rerun`, Docker needed, the JVM left on
+  :8080, never read or edit `.env`, MSYS path conversion for Docker `-v`).
+- `docs/DEVELOPING.md` (new): the same commands in PowerShell form, plus `.env` setup and JWT
+  secret generation. Root `README.md` (new): CI badge and links; M7.2 replaces it.
+- `.claude/settings.json`: allow `npm test`, `npm ci --ignore-scripts`, `npm audit` and
+  `npm audit --omit=dev --audit-level=high`, `docker ps`, `git status *`, `git show *`. New `ask`
+  rules for `docker compose down -v`/`--volumes`. Extra deny rules: `Read(**/.env)` and `Edit` on
+  the .env files. No existing rule removed or loosened.
+
+**Verified**
+- settings.json parses as JSON.
+- `./gradlew help --task bootRun` resolves; `./gradlew generateVenue` leaves the seed file unchanged.
+- Spec update flow: `OpenApiSpecTest` passes, copying the generated spec and `npm run gen:api` both
+  leave no diff.
+- Frontend: `npm ci --ignore-scripts`, typecheck, lint, check:api, build exit 0; `npm test` 33/33.
+- actionlint (the CLAUDE.md command, verbatim): exit 0. The :8080 netstat lookup runs in Git Bash.
+- `./gradlew test --rerun`: BUILD SUCCESSFUL, 180 tests, 0 failures/errors/skipped.
+- Not run by Claude: `bootRun` itself (needs the user's `.env`).
+
+**Next**: M0.10 backend Dockerfile + `backend` service in docker-compose (the M0 exit criterion).
+
+**Open problems**
+- The new permission rules take effect in the next session; check there that `npm test` doesn't
+  prompt and `docker compose down -v` does.
+- `Bash(cat .env)` isn't covered by Read deny rules; CLAUDE.md's rule covers it.
+- frontend/README.md repeats the frontend commands (kept; DEVELOPING.md links to it).
