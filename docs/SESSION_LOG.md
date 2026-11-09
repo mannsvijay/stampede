@@ -307,3 +307,36 @@ survive a logout. Fixed with one lock row per family (D-008).
 - Compose smoke builds cold every run (no layer cache), which sets CI's wall-clock time.
 - `docs/SESSION_LOG.md` M0.5 entry still shows the PowerShell-7-only JWT command (historical).
 - Actuator `show-details: always` until M7.1.
+
+## 2026-11-10 — M1.1 Seat state machine (commit ca1b7d6)
+
+**What changed**
+- `inventory.seat` (internal, D-007): `EventSeat` (immutable record), `SeatStatus`, `SeatTransition`,
+  `IllegalSeatTransitionException` (reason WRONG_STATE or HOLD_MISMATCH, no HTTP meaning).
+  Transitions: hold (AVAILABLE to HELD); release, expire, failSaga (HELD to AVAILABLE, owning hold
+  only); sell (HELD to SOLD, clears hold_id). SOLD is final. Every transition bumps `version`. The
+  constructor mirrors `ck_event_seats_status_pointers` exactly.
+- Tests: `EventSeatTest` (39: the full 3x5 table, written by hand and checked for completeness, hold
+  mismatch, nulls, every CHECK shape); `EventSeatPropertiesTest` (4 jqwik properties, 1000 tries
+  each: every reachable seat passes the CHECK, SOLD is final, every step follows the transition
+  table, constructor accepts exactly what the CHECK accepts).
+- New test dependency `net.jqwik:jqwik:1.9.2`; `.jqwik-database` gitignored.
+- Docs: D-014 (DRAFT); PLAN notes on M1.4 (error mapping, HOLD_EXPIRED status) and M1.5 (when
+  `order_id` is set, sell overwriting a different order_id).
+
+**Verified**
+- Temporarily allowed HOLD from SOLD: `soldIsFinal` and `everyStepFollowsTheTransitionTable` failed;
+  jqwik shrank the second to `AVAILABLE: [HOLD(A), SELL(A, ORDER_A), HOLD(A)]`. Reverted, green.
+  `everyReachableSeatPassesTheDatabaseCheck` did *not* catch it (SOLD to HELD with a hold_id is a
+  valid row), which is why the transition-table property exists.
+- `./gradlew test --rerun`: 223 tests, 0 failures/errors/skipped, ModularityTest green.
+- `dependencyInsight`: jqwik 1.9.2 requests JUnit Platform 1.11.3, resolved to Boot's 1.12.2.
+
+**Next**: M0.7a (minimatch override) after 2026-11-10T22:26Z; then M1.2 (pessimistic strategy,
+written by hand, Claude reviews).
+
+**Open problems**
+- jqwik's shrink for `soldIsFinal` stopped at 5 steps with two redundant rejected HOLDs (not
+  minimal); the other property shrank to the minimal 3. Cosmetic.
+- 90% of generated steps are rejected (seats get SOLD and stay there). One run still made 1,417
+  legal steps (AVAILABLE to HELD 579, HELD to AVAILABLE 610, HELD to SOLD 228); revisit the generator if a property needs deeper paths.

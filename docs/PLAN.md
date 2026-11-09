@@ -142,7 +142,7 @@ image on a fresh checkout with `.env` made from `.env.example`, brings every ser
 and gets the seeded demo event from GET /events. Still open in M0: M0.7a (date-gated override).
 
 ## M1 - Core booking, pessimistic (weeks 2-3)
-- [ ] M1.1 Seat state machine (domain class) + unit tests + property tests (jqwik)
+- [x] M1.1 Seat state machine (domain class) + unit tests + property tests (jqwik)
 - [ ] M1.2 `InventoryStrategy` interface; pessimistic strategy (SELECT ... FOR UPDATE, sorted IDs).
       **Write this one yourself by hand; Claude reviews.**
 - [ ] M1.3 Concurrency test harness: N threads race for the same seats, exactly one wins, x1000
