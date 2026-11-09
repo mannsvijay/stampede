@@ -143,10 +143,12 @@ and gets the seeded demo event from GET /events. Still open in M0: M0.7a (date-g
 
 ## M1 - Core booking, pessimistic (weeks 2-3)
 - [x] M1.1 Seat state machine (domain class) + unit tests + property tests (jqwik)
-- [ ] M1.2 `InventoryStrategy` interface; pessimistic strategy (SELECT ... FOR UPDATE, sorted IDs).
+- [x] M1.2 `InventoryStrategy` interface; pessimistic strategy (SELECT ... FOR UPDATE, sorted IDs).
       ~~Write this one yourself by hand; Claude reviews.~~ Changed during the task: Claude wrote the
       implementation (from the 13-step guide in the session), I reviewed it, plus the
-      correctness-reviewer agent and an explain-back quiz. The interface, types and tests came first.
+      correctness-reviewer agent. The interface, types and tests came first.
+- [ ] M1.2a `/explain-back M1.2` quiz (skipped at the end of the M1.2 session; do it before M1.4,
+      which builds on this lock order).
 - [ ] M1.3 Concurrency test harness: N threads race for the same seats, exactly one wins, x1000
 - [ ] M1.4 Holds: create (all-or-nothing, per-user cap), release, 5-min expiry sweeper
       Note (from M0.2): reject duplicate seat IDs in a hold request in code; `holds.seat_ids` has no

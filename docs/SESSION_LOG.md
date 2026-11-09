@@ -340,3 +340,44 @@ written by hand, Claude reviews).
   minimal); the other property shrank to the minimal 3. Cosmetic.
 - 90% of generated steps are rejected (seats get SOLD and stay there). One run still made 1,417
   legal steps (AVAILABLE to HELD 579, HELD to AVAILABLE 610, HELD to SOLD 228); revisit the generator if a property needs deeper paths.
+
+## 2026-11-10 — M1.2 InventoryStrategy + pessimistic strategy
+
+**What changed**
+- `inventory.strategy` (internal, D-007): `InventoryStrategy` (`hold`, `release`, `kind`),
+  `HoldRequest` (caller-generated holdId, no duplicate seats, `Duration holdFor` >= 1 s),
+  `HoldOutcome` (`Held` with DB-computed `expiresAt` / `Rejected` SEAT_TAKEN | UNKNOWN_SEAT),
+  `ReleaseOutcome` (`Released` / `NotActive` / `NotExpired` / `NotFound`), `ReleaseReason`,
+  `StrategyKind`. Interface, skeleton and first 13 tests in d029688.
+- `PessimisticInventoryStrategy`: plan changed mid-task, so Claude wrote it (not by hand) from the
+  13-step guide. hold: `ORDER BY seat_id FOR UPDATE`, unknown check, EventSeat decides every seat
+  before any write, holds row with `now() + holdFor`, seat UPDATEs with `AND version = :old`.
+  release: hold row `FOR UPDATE` first, re-check expiry for EXPIRED, then seats in seat_id order,
+  consistency check (owned seats = `seat_ids`), state machine, hold status.
+- Tests: `PessimisticInventoryStrategyTest`, 21 (Testcontainers, no test transaction), including
+  deterministic lock tests (lock order, wait-then-reread via `pg_stat_activity` + `NOWAIT`), rollback
+  after a failed write (test-only trigger), cancel vs sweeper race.
+- Docs: D-015 (DRAFT): interface, lock order, database clock (`now()` kept, decided), new holdId per
+  attempt, callers not transactional. PLAN notes on M1.4 (sweeper, allowance placement,
+  LIMIT_EXCEEDED) and M2.4 (`lock_timeout`, pool exhaustion).
+
+**Verified**
+- Experiments (all restored): no `FOR UPDATE` → race tests failed 5/5, caught by the version check
+  (rollback, no double-hold); no `FOR UPDATE` + no version check → both buyers `Held` the same seat
+  3/3; no `ORDER BY` → lock-order test failed 3/3 (the old opposite-order test still passed: it
+  can't detect lock order, now labelled a smoke test).
+- Java 21 vs Postgres 16 UUID order checked: `9000…` first in Java, last in Postgres.
+- correctness-reviewer: no race/deadlock/all-or-nothing bug; fixed expiry re-check, min holdFor and
+  four test gaps; holdId reuse judged a caller bug (documented), propagation/allowance/lock_timeout
+  deferred to M1.4/M2.4 notes.
+- `./gradlew test --rerun`: 244 tests, 0 failures/errors/skipped, ModularityTest green.
+
+**Next**: M1.2a explain-back quiz; M0.7a (minimatch override, after 2026-11-10T22:26Z); M1.3
+(concurrency harness x1000).
+
+**Open problems**
+- The old expiry test changed its setup to an already-expired hold (the new guard forbids expiring a
+  live hold); assertions unchanged.
+- The race tests rely on a latch, so overlap is likely, not guaranteed; the deterministic lock tests
+  and M1.3 carry the proof.
+- `@Transactional` REQUIRED: a transactional caller would batch releases (rule in D-015, unenforced).
