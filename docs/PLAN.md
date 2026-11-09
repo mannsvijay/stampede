@@ -153,6 +153,9 @@ and gets the seeded demo event from GET /events. Still open in M0: M0.7a (date-g
       HELD/SOLD seat is SEAT_TAKEN (409, with `takenAgoMs`). Decide what DELETE /holds/{id} returns for
       a hold that already expired or isn't the owner, and HOLD_EXPIRED's HTTP status (PRD 10 names
       the code but no status).
+      Note (from M1.2, D-015): keep the lock order. The allowance row is locked after the seats, in
+      both hold and release. The sweeper releases one hold per transaction (find expired ids first,
+      then call `release(…, EXPIRED)` for each), never several holds in one transaction.
 - [ ] M1.5 Orders from holds (happy path, synchronous fake payment for now)
       Note (from M0.2): `orders` has no `hold_id`. Decide before starting how an order links to its
       hold (the saga's HoldVerified step needs it), e.g. a V-next migration adding `orders.hold_id`.
