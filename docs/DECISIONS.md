@@ -593,10 +593,13 @@ Write these yourself, in your own words. Each one is an interview answer you've 
     can forget those checks.
   - `HoldRequest` carries `Duration holdFor`. Each strategy computes the expiry from its own
     authoritative clock: Postgres `now()` for pessimistic and optimistic, Redis `TIME` for Lua. The
-    database clock is authoritative for hold expiry; app servers' clocks are not. Known cost: `now()`
-    is the transaction's start time, so time spent waiting for a seat lock comes off the hold (a buyer
-    who queued 3 s on a hot seat gets 4 min 57 s). `statement_timestamp()` would avoid that; open
-    question, decided by me.
+    database clock is authoritative for hold expiry; app servers' clocks are not. `now()` (the
+    transaction's start time), not `statement_timestamp()`: time spent waiting for a seat lock comes
+    off the hold, but row locks are released at commit, so a buyer only ever waits for another
+    in-flight transaction (milliseconds), never for another buyer's 5-minute hold (a HELD seat is
+    rejected at once). The cost is negligible, and `now()` keeps `expires_at - created_at` exactly the
+    hold duration. If M2.4 shows long lock queues on hot seats, that is the `lock_timeout` question
+    below, not a reason to change the clock.
   - `release(…, EXPIRED)` re-checks `expires_at <= now()` after locking the hold row and returns
     `NotExpired` otherwise: the sweeper picks holds before it has the lock, and a hold extended in
     between (PRD 6.3) must survive.
