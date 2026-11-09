@@ -4,20 +4,38 @@
       "Bash(./gradlew *)",
       "Bash(cd backend && ./gradlew *)",
       "Bash(docker compose *)",
+      "Bash(docker ps)",
       "Bash(docker ps *)",
       "Bash(docker logs *)",
       "Bash(npm run *)",
+      "Bash(npm test)",
+      "Bash(npm ci --ignore-scripts)",
+      "Bash(npm audit)",
+      "Bash(npm audit --omit=dev --audit-level=high)",
       "Bash(./scripts/*)",
       "Bash(git status)",
+      "Bash(git status *)",
       "Bash(git diff *)",
       "Bash(git log *)",
+      "Bash(git show *)",
       "Bash(git add *)",
       "Bash(git commit *)"
+    ],
+    "ask": [
+      "Bash(docker compose down -v)",
+      "Bash(docker compose down -v *)",
+      "Bash(docker compose down --volumes)",
+      "Bash(docker compose down --volumes *)"
     ],
     "deny": [
        "Read(./.env)",
        "Read(./.env.local)",
        "Read(./.env.*.local)",
+       "Read(**/.env)",
+       "Edit(./.env)",
+       "Edit(**/.env)",
+       "Edit(./.env.local)",
+       "Edit(./.env.*.local)",
        "Bash(git push *)",
        "Bash(rm -rf *)"
     ]

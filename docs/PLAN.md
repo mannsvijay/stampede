@@ -115,7 +115,12 @@ Tick a task only when its tests pass and it's committed.
       draft PR #1 (ci/prove-red, broken money test) failed Frontend and passed Backend; PR closed,
       branch deleted, main never had the broken commit.
       Not done: branch protection on main (see D-012).
-- [ ] M0.9 Update CLAUDE.md commands with the real ones
+- [x] M0.9 Update CLAUDE.md commands with the real ones
+      Done: CLAUDE.md lists the Git Bash commands plus gotchas; docs/DEVELOPING.md has the PowerShell
+      forms, `.env` setup and JWT secret generation; a short root README.md carries the CI badge.
+      `.claude/settings.json`: allow `npm test`, `npm ci --ignore-scripts`, `npm audit` (two exact
+      forms), `docker ps`, `git status *`, `git show *`; `ask` before `docker compose down -v`;
+      deny `Read(**/.env)` and `Edit` on the .env files (no deny rule loosened).
 - [ ] M0.10 Backend Dockerfile + `backend` service in docker-compose (needed for the M0 exit criterion;
       found in M0.1, which runs the backend on the host via `./gradlew bootRun`)
 **Exit:** `docker compose up` runs everything on a clean clone; CI green.
@@ -202,6 +207,8 @@ Tick a task only when its tests pass and it's committed.
       Note (from M0.5): serve frontend and API same-site (subdomains of one domain, or a Vercel
       rewrite proxying the API), otherwise the SameSite=Strict refresh cookie is never sent.
 - [ ] M7.2 README: architecture diagram, decisions and trade-offs, results, how to reproduce
+      Note (from M0.9): replace the short root README.md (keep the CI badge) and link to
+      docs/DEVELOPING.md for how to run it rather than duplicating the commands.
 - [ ] M7.3 Demo video (3 minutes): drop, collision, chaos run, invariants staying green
 
 ## Stretch (only when everything above is green)

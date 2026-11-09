@@ -10,13 +10,35 @@ When you introduce a non-obvious concept (a locking pattern, a Redis primitive, 
 explain it in 2-3 plain sentences in your summary. Prefer clear code over clever code.
 
 ## Commands
-<!-- Update this section at the end of M0 with the real commands. -->
-- Start everything: `docker compose up -d`
-- Backend tests: `cd backend && ./gradlew test`
-- One test class: `cd backend && ./gradlew test --tests "ClassName"`
-- Frontend dev: `cd frontend && npm run dev`
-- Frontend checks: `cd frontend && npm run typecheck && npm run lint`
-- Load test: `./scripts/k6.sh <scenario>` (k6 runs in Docker)
+Git Bash forms, run from the repo root. PowerShell forms for me: docs/DEVELOPING.md.
+- Infra (Postgres, Redis, Mailpit): `docker compose up -d`; stop: `docker compose down`.
+  Reset data: `docker compose down -v` deletes the volumes. Ask me first, then `up -d` and seed again.
+- Backend tests: `cd backend && ./gradlew test --rerun`
+- One test class: `cd backend && ./gradlew test --rerun --tests "ClassName"`
+- Run the app: `cd backend && ./gradlew bootRun --args='--spring.profiles.active=seed,demo-reschedule'`
+  Profiles, comma-separated: `seed` (load the demo venue and event), `demo-reschedule` (move the demo
+  drop into the future), `openapi` (serve /v3/api-docs), `bootstrap-admin` (create the first admin
+  from .env). Seed once and exit: add ` --spring.main.web-application-type=none` inside the quotes.
+- Regenerate the demo venue file: `cd backend && ./gradlew generateVenue`
+- Update docs/openapi.json after an intended API change:
+  `cd backend && ./gradlew test --rerun --tests "OpenApiSpecTest"`, review the diff, then
+  `cp backend/build/openapi/openapi.json docs/openapi.json` and `cd frontend && npm run gen:api`.
+- Frontend install (as CI does): `cd frontend && npm ci --ignore-scripts`. Adding or upgrading
+  packages: ask me first; exact versions, `npm install --before=<date>` (D-011).
+- Frontend: `cd frontend && npm run <script>`: `dev` (:5173, proxies the API to :8080), `typecheck`,
+  `lint`, `check:api`, `gen:api`, `build`; tests: `npm test`. CI runs typecheck, lint, test,
+  check:api, build.
+- Lint the CI workflow (Docker):
+  `MSYS_NO_PATHCONV=1 docker run --rm -v "$(pwd -W):/repo" -w /repo rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667`
+- Load test (from M2.4): `./scripts/k6.sh <scenario>` (k6 runs in Docker)
+
+## Gotchas
+- Gradle can report `test UP-TO-DATE` and run nothing. Always use `--rerun` when showing evidence.
+- Testcontainers tests and actionlint need Docker Desktop running.
+- Windows: stopping bootRun can leave the app JVM on port 8080. Find it with
+  `netstat -ano | grep ':8080 .*LISTENING'` and ask me before `taskkill //PID <pid> //F`.
+- Never read, print or edit `.env` (secrets). `.env.example` is the template and is fine to read.
+- Git Bash rewrites paths in Docker `-v` arguments; use `MSYS_NO_PATHCONV=1` and `$(pwd -W)`.
 
 ## Architecture rules
 - Modular monolith: Spring Boot 3, Java 21, Spring Modulith. Modules: identity, inventory, booking,
