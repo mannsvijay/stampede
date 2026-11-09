@@ -11,7 +11,11 @@ explain it in 2-3 plain sentences in your summary. Prefer clear code over clever
 
 ## Commands
 Git Bash forms, run from the repo root. PowerShell forms for me: docs/DEVELOPING.md.
-- Infra (Postgres, Redis, Mailpit): `docker compose up -d`; stop: `docker compose down`.
+- Everything in Docker (infra + backend, seeded; D-013): `docker compose up -d --build --wait`;
+  status: `docker compose ps`; logs: `docker compose logs -f backend`; stop: `docker compose down`.
+  Backend container profiles: `STAMPEDE_COMPOSE_PROFILES` in .env (default `seed,demo-reschedule`).
+- Infra only, for bootRun: `docker compose up -d postgres redis mailpit` (the backend container
+  also uses :8080; `docker compose stop backend` if it is running).
   Reset data: `docker compose down -v` deletes the volumes. Ask me first, then `up -d` and seed again.
 - Backend tests: `cd backend && ./gradlew test --rerun`
 - One test class: `cd backend && ./gradlew test --rerun --tests "ClassName"`
@@ -37,6 +41,8 @@ Git Bash forms, run from the repo root. PowerShell forms for me: docs/DEVELOPING
 - Testcontainers tests and actionlint need Docker Desktop running.
 - Windows: stopping bootRun can leave the app JVM on port 8080. Find it with
   `netstat -ano | grep ':8080 .*LISTENING'` and ask me before `taskkill //PID <pid> //F`.
+- The backend image takes ~7 min to build cold (Gradle downloads). It doesn't run tests; run
+  `./gradlew test --rerun` separately. Rebuild after backend changes: `docker compose up -d --build`.
 - Never read, print or edit `.env` (secrets). `.env.example` is the template and is fine to read.
 - Git Bash rewrites paths in Docker `-v` arguments; use `MSYS_NO_PATHCONV=1` and `$(pwd -W)`.
 

@@ -29,18 +29,42 @@ Then open `.env` and:
 3. Optional, for the `bootstrap-admin` profile: set `STAMPEDE_ADMIN_EMAIL` and an
    `STAMPEDE_ADMIN_PASSWORD` of at least 12 characters.
 
-## Infrastructure
+## Run everything in Docker
+Postgres, Redis, Mailpit and the backend, with the demo data seeded (D-013). Needs `.env` (above).
 ```powershell
-docker compose up -d        # start Postgres, Redis, Mailpit
-docker compose ps           # all should be healthy
-docker compose down         # stop (keeps data)
+docker compose up -d --build --wait   # build the backend image, start all, wait until healthy
+docker compose ps                     # all four should be "healthy"
+Invoke-RestMethod http://localhost:8080/events   # the seeded demo event
+docker compose logs -f backend        # follow the backend log (Ctrl+C to stop following)
+docker compose down                   # stop (keeps data)
+```
+- The first build takes several minutes (Gradle and dependencies download inside Docker); later
+  builds reuse the cache. The image build doesn't run tests; run them with Gradle (below).
+- After changing backend code, rebuild: `docker compose up -d --build --wait`.
+- The backend container runs with the `seed,demo-reschedule` profiles. To change them, set
+  `STAMPEDE_COMPOSE_PROFILES` in `.env` (empty = no seeding). `BACKEND_PORT` changes the host port
+  (default 8080). Both are commented out in `.env.example`.
+- The frontend runs on the host: `npm run dev` proxies the API to `localhost:8080`, which is the
+  container (see Frontend below).
+- If compose stops with `required variable ... is missing a value`, that variable is missing or
+  empty in `.env`.
+
+## Infrastructure only (for `bootRun`)
+The backend container and `bootRun` both use port 8080, so run one at a time. For `bootRun`, start
+only the infrastructure:
+```powershell
+docker compose stop backend                    # if it is running
+docker compose up -d postgres redis mailpit    # start Postgres, Redis, Mailpit
+docker compose ps                              # all should be healthy
+docker compose down                            # stop (keeps data)
 ```
 Reset local data. This deletes the Postgres and Redis volumes:
 ```powershell
 docker compose down -v
-docker compose up -d
+docker compose up -d --build --wait
 ```
-Then seed again (below).
+The backend container seeds again on start. With `bootRun`, start only the infrastructure and seed
+with the `seed` profile (below).
 
 ## Backend
 ```powershell
@@ -110,7 +134,9 @@ with `npm install --before=<date>` (D-011). More detail: `frontend/README.md`.
 
 ## CI
 `.github/workflows/ci.yml` runs on pushes to main and on pull requests: the backend tests, and the
-frontend typecheck, lint, test, check:api, build and npm audit (D-012). Lint the workflow locally:
+frontend typecheck, lint, test, check:api, build and npm audit (D-012).
+A third job, `Compose smoke`, builds the backend image, starts the stack with a throwaway `.env`
+and checks `GET /events`, the non-root user and that the image holds no `.env` (D-013). Lint the workflow locally:
 ```powershell
 docker run --rm -v "${PWD}:/repo" -w /repo rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
 ```

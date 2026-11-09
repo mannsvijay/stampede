@@ -130,6 +130,9 @@ Tick a task only when its tests pass and it's committed.
       with `seed,demo-reschedule` by default (`STAMPEDE_COMPOSE_PROFILES` overrides); healthcheck
       with the image's curl; frontend stays on `npm run dev`; CI `Compose smoke` job (plain
       `docker compose build`, throwaway `.env`, GET /events, non-root and no-.env checks).
+      Verified locally (2026-11-09): image builds (6m 48s cold); `up --wait` all 4 healthy; /events
+      returns the demo event; uid 10001; no `.env` in image or jar; 180 backend tests green;
+      actionlint clean. Open: first CI run of `Compose smoke` (not pushed yet), then tick.
 **Exit:** on a clean clone, after copying `.env.example` to `.env` and filling in the secrets,
 `docker compose up` runs the backend and infrastructure (Postgres, Redis, Mailpit) with the demo
 data seeded; the frontend runs with `npm run dev` (it deploys to Vercel in M7.1); CI green.

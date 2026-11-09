@@ -1,4 +1,5 @@
-# CI for Stampede (D-012). Two independent jobs: Backend (Gradle + Testcontainers) and Frontend (npm).
+# CI for Stampede (D-012). Three independent jobs: Backend (Gradle + Testcontainers), Frontend (npm)
+# and Compose smoke (the backend image and docker-compose stack, D-013).
 #
 # Supply chain: every action is pinned to a full commit SHA (a tag can be moved, a SHA can't), with
 # the release in a comment. Each release was at least 14 days old when pinned, the same rule as npm
@@ -79,6 +80,78 @@ jobs:
             backend/build/reports/tests/test/
             backend/build/test-results/test/
           retention-days: 7
+
+  # Proves the M0 exit criterion: on a fresh checkout, with .env made from .env.example, compose
+  # builds the backend image, brings every service to healthy and serves the seeded demo event.
+  # No extra actions: plain `docker compose build`, so no layer cache (a cold build each run).
+  compose-smoke:
+    name: Compose smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # A throwaway .env from the template, with freshly generated secrets for this run only.
+      # add-mask hides them if anything prints them.
+      - name: Create .env
+        run: |
+          pg_password=$(openssl rand -hex 24)
+          redis_password=$(openssl rand -hex 24)
+          jwt_secret=$(openssl rand -base64 32)
+          echo "::add-mask::$pg_password"
+          echo "::add-mask::$redis_password"
+          echo "::add-mask::$jwt_secret"
+          cp .env.example .env
+          sed -i \
+            -e "s|^POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=$pg_password|" \
+            -e "s|^REDIS_PASSWORD=.*|REDIS_PASSWORD=$redis_password|" \
+            -e "s|^STAMPEDE_JWT_SECRET=.*|STAMPEDE_JWT_SECRET=$jwt_secret|" \
+            .env
+
+      # The Gradle download inside the build is retried (backend/Dockerfile).
+      - name: Build backend image
+        run: docker compose build backend
+
+      - name: Start the stack and wait for healthy
+        run: docker compose up -d --wait --wait-timeout 240
+
+      - name: GET /events returns the seeded demo event
+        run: |
+          curl -fsS http://localhost:8080/events | tee events.json
+          echo
+          jq -e '.items[] | select(.title == "Stampede Demo Drop" and .status == "SCHEDULED")' events.json
+
+      - name: Backend runs as non-root
+        run: |
+          uid=$(docker compose exec -T backend id -u)
+          echo "backend uid: $uid"
+          test "$uid" != "0"
+          image=$(docker inspect --format '{{.Config.Image}}' "$(docker compose ps -q backend)")
+          test "$(docker image inspect "$image" --format '{{.Config.User}}')" = "stampede"
+
+      # Searches the whole image filesystem (as root, so nothing is hidden by permissions) and the
+      # jar's entries. Any match fails the job.
+      - name: Image contains no .env
+        run: |
+          image=$(docker inspect --format '{{.Config.Image}}' "$(docker compose ps -q backend)")
+          echo "image: $image"
+          found=$(docker run --rm --user root --entrypoint find "$image" / -xdev -name '.env*')
+          if [ -n "$found" ]; then echo "::error::.env files in the image: $found"; exit 1; fi
+          cid=$(docker create "$image")
+          docker cp "$cid:/app/app.jar" app.jar
+          docker rm "$cid"
+          if unzip -Z1 app.jar | grep -E '(^|/)\.env'; then echo "::error::.env in app.jar"; exit 1; fi
+          echo "No .env in the image or the jar"
+
+      - name: Logs on failure
+        if: failure()
+        run: docker compose logs --no-color
+
+      - name: Stop and remove the stack
+        if: always()
+        run: docker compose down -v
 
   frontend:
     name: Frontend

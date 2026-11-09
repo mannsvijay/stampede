@@ -49,9 +49,9 @@ services:
       retries: 10
 
   backend:
+    # Image name is <project>-backend (the project defaults to the folder name), so two clones
+    # don't overwrite each other's image.
     build: ./backend
-    # Name for the built image, so it can be inspected directly (docker run ... stampede-backend:local).
-    image: stampede-backend:local
     depends_on:
       postgres:
         condition: service_healthy
