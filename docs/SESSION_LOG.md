@@ -170,6 +170,34 @@ survive a logout. Fixed with one lock row per family (D-008).
   `cd backend`, `.\gradlew.bat test --tests "OpenApiSpecTest"`, `cd ..`,
   `Copy-Item backend\build\openapi\openapi.json docs\openapi.json`
 
+## 2026-11-09 — M0.7 Frontend shell (written in M0.8 from git history, commit a853965)
+
+**What changed**
+- Frontend (D-011): Vite + React 19 + TypeScript 5.9.3, npm with exact pins (`save-exact`) and the
+  14-day rule, Node 26 in `.nvmrc`. React Router with `/` (BoardPage: upcoming drops) and
+  `/drops/:id` (EventPage: venue, tiers, status), plus a not-found page; TanStack Query; CSS Modules
+  with `tokens.css` (PRD 7 colours).
+- Generated client: `src/api/schema.d.ts` from the committed `docs/openapi.json` via
+  openapi-typescript (`npm run gen:api`; `npm run check:api` fails on drift); openapi-fetch with our
+  `authFetch` (access token in memory, one shared refresh on 401, serialised across tabs with the
+  Web Locks API, retry once). problem+json errors become `ApiError` with the generated `code` union.
+- `formatPaise` for money; `serverClock` corrects countdowns using `serverTime`.
+- Vite dev proxy forwards only /auth, /events, /actuator and /v3.
+- Tests: Vitest + React Testing Library + jsdom + MSW (unhandled requests fail the test).
+- Backend: documentation-only `@Schema` makes `RegisterRequest.password` required (minLength 12) in
+  the spec; `OpenApiSpecTest` asserts it; `docs/openapi.json` updated.
+- Docs: D-011 drafted; PLAN M0.7 notes.
+
+**Verified** (re-run in the M0.8 session and in CI; the original session's output isn't recorded)
+- Frontend: typecheck, lint, 33 tests in 5 files, check:api and build all pass locally and in CI
+  run #1 on main. Backend `./gradlew test --rerun`: 180 tests, 0 failures.
+
+**Open problems**
+- Resolved here: `RegisterRequest.password` not required in the spec (M0.6 open problem).
+- TypeScript 5.9.3 pin: revisit when typescript-eslint and openapi-typescript support 7.
+- minimatch advisory in lint tooling: accepted for now (D-011), override in PLAN M0.7a.
+- No login UI yet (M1.8).
+
 ## 2026-11-09 — M0.8 GitHub Actions CI
 
 **What changed**
@@ -191,15 +219,19 @@ survive a logout. Fixed with one lock row per family (D-008).
 - `./gradlew test --rerun`: BUILD SUCCESSFUL, 180 tests, 0 failures/errors/skipped.
 - Fresh `GRADLE_USER_HOME`: `./gradlew --version` downloaded 8.14.6 and passed the new checksum.
 
-**Next**: user pushes and confirms a green run, then proves a red run with a draft PR that breaks
-a test; tick M0.8 after that. Then M0.9.
+**Verified (on GitHub, by the user)**
+- CI run #1 on main (commit 2a4ece4): Backend and Frontend green, 2m 32s.
+- Draft PR #1 from `ci/prove-red` with the money test deliberately broken: Frontend failed, Backend
+  passed, so a failing test turns CI red. PR closed, branch deleted; main never had the commit.
+
+**Next**: M0.9 update CLAUDE.md commands with the real ones.
 
 **Open problems**
 - M0.7a minimatch override, not before 2026-11-10T22:26Z.
 - main is not protected (D-012); add a ruleset with a self-bypass later if wanted.
 - Pinned action SHAs are bumped by hand (no Dependabot).
-- M0.7 is still unticked in PLAN.md and has no SESSION_LOG entry, although its code is committed
-  (noted, not changed in M0.8).
+- M0.7 was unticked with no log entry although its code was committed; fixed after M0.8 (ticked,
+  entry above written from git history).
 
 **Commands (PowerShell, for M0.9)**
 - Lint the workflow: `docker run --rm -v "${PWD}:/repo" -w /repo rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667`
