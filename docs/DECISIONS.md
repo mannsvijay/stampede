@@ -582,21 +582,36 @@ Write these yourself, in your own words. Each one is an interview answer you've 
 - **Decision:**
   - `inventory.strategy.InventoryStrategy` (internal, D-007): `hold(HoldRequest)` returns
     `Held(holdId, seatIds, expiresAt)` or `Rejected(SEAT_TAKEN | UNKNOWN_SEAT, offending seatIds)`;
-    `release(eventId, holdId, reason)` returns `Released`, `NotActive` or `NotFound`. UNKNOWN_SEAT
-    (a seat not in this event) takes precedence over SEAT_TAKEN. Exceptions are only for bugs and
-    infrastructure failures.
-  - The caller generates `holdId` (D-002). `HoldRequest` rejects an empty list and duplicate seat ids,
-    so no strategy can forget that check.
+    `release(eventId, holdId, reason)` returns `Released`, `NotActive`, `NotExpired` or `NotFound`.
+    UNKNOWN_SEAT (a seat not in this event) takes precedence over SEAT_TAKEN. Exceptions are only for
+    bugs and infrastructure failures.
+  - The caller (the hold service, M1.4) generates a **new** `holdId` for every attempt (D-002). Reusing
+    one is a programming error: the `holds` primary key rejects it with an exception and the
+    transaction rolls back. Retrying the same buyer action safely is the job of an idempotency key at
+    the API, not of the strategy.
+  - `HoldRequest` rejects an empty list, duplicate seat ids and a `holdFor` under 1 s, so no strategy
+    can forget those checks.
   - `HoldRequest` carries `Duration holdFor`. Each strategy computes the expiry from its own
     authoritative clock: Postgres `now()` for pessimistic and optimistic, Redis `TIME` for Lua. The
-    database clock is authoritative for hold expiry; app servers' clocks are not.
+    database clock is authoritative for hold expiry; app servers' clocks are not. Known cost: `now()`
+    is the transaction's start time, so time spent waiting for a seat lock comes off the hold (a buyer
+    who queued 3 s on a hot seat gets 4 min 57 s). `statement_timestamp()` would avoid that; open
+    question, decided by me.
+  - `release(…, EXPIRED)` re-checks `expires_at <= now()` after locking the hold row and returns
+    `NotExpired` otherwise: the sweeper picks holds before it has the lock, and a hold extended in
+    between (PRD 6.3) must survive.
+  - Both methods are `@Transactional` with the default REQUIRED propagation, so a caller that is
+    already in a transaction pulls them into it. Callers must not do that: the sweeper and the hold
+    service call the strategy from outside any transaction, one hold per call. (Joining several holds
+    in one transaction would break the lock order below, and one failure would roll back all of them.)
   - The strategy inserts the `holds` row in the same transaction as the seat updates.
   - **Lock order, for every code path:** (1) the hold row, when the path starts from an existing hold
     (release, expiry, sell); (2) the event seats, in Postgres `seat_id` order, taken by one
     `SELECT … ORDER BY seat_id FOR UPDATE`; (3) the user's allowance row (M1.4). Creating a hold never
     waits on an existing hold row. The sweeper releases one hold per transaction.
   - Seat UPDATEs add `AND version = :oldVersion`; zero rows updated under the lock is a bug and
-    throws.
+    throws. (Measured: with `FOR UPDATE` removed, this check alone turned every double-hold in the race
+    tests into a rollback; with both removed, two buyers were told `Held` for the same seat.)
 - **Why:**
   - Caller-generated ids and outcome values fit all three strategies: Lua returns a status code, not
     an exception, and "seat taken" is the normal result under contention.
@@ -605,10 +620,15 @@ Write these yourself, in your own words. Each one is an interview answer you've 
   - Postgres does the sort because the order that matters is the order rows are locked in, and that
     is Postgres's order. Java's `UUID.compareTo` compares signed longs and disagrees with Postgres's
     unsigned byte order (checked on Java 21 and Postgres 16: `9000…` sorts first in Java and last in
-    Postgres). A Java sort followed by one `IN (…) FOR UPDATE` changes nothing, and mixing a Java
-    order in one path with `ORDER BY` in another is two orders, which can deadlock.
+    Postgres). A Java sort followed by one `IN (…) FOR UPDATE` changes nothing: Postgres locks rows
+    in the order its scan returns them, not the order of the IN list. Without `ORDER BY` that scan
+    order is the physical or index order, which happens to be consistent but is not a rule anyone
+    wrote down (the lock-order test stores rows out of `seat_id` order and fails without `ORDER BY`).
+    Mixing a Java order in one path with `ORDER BY` in another is two orders, which can deadlock.
   - Locking several holds in one sweeper transaction would take seat locks hold by hold, not in one
     global seat order.
 - **How I'd know it was wrong:** M1.3 or the k6 runs log deadlocks (`40P01`); or holds expire at
   visibly different times on different instances; or the optimistic strategy needs a third
-  rejection the interface can't express (I'd add `CONTENDED` then).
+  rejection the interface can't express (I'd add `CONTENDED` then); or under a drop, buyers queueing
+  on one hot seat's lock use up the connection pool and stall other events (then add a bounded
+  `lock_timeout` returning a rejection; measured in M2.4).

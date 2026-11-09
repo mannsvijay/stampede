@@ -19,6 +19,8 @@ import java.util.UUID;
  */
 public record HoldRequest(UUID holdId, UUID eventId, UUID userId, List<UUID> seatIds, Duration holdFor) {
 
+    static final Duration MIN_HOLD = Duration.ofSeconds(1);
+
     public HoldRequest {
         Objects.requireNonNull(holdId, "holdId");
         Objects.requireNonNull(eventId, "eventId");
@@ -35,8 +37,10 @@ public record HoldRequest(UUID holdId, UUID eventId, UUID userId, List<UUID> sea
                 throw new IllegalArgumentException("Seat " + seatId + " appears more than once in the request");
             }
         }
-        if (holdFor.isNegative() || holdFor.isZero()) {
-            throw new IllegalArgumentException("holdFor must be positive, was " + holdFor);
+        // At least a second: below a millisecond the expiry would equal created_at and break
+        // ck_holds_expires_after_created, and no real hold is that short.
+        if (holdFor.compareTo(MIN_HOLD) < 0) {
+            throw new IllegalArgumentException("holdFor must be at least " + MIN_HOLD + ", was " + holdFor);
         }
         seatIds = List.copyOf(seatIds);
     }

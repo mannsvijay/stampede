@@ -144,7 +144,9 @@ and gets the seeded demo event from GET /events. Still open in M0: M0.7a (date-g
 ## M1 - Core booking, pessimistic (weeks 2-3)
 - [x] M1.1 Seat state machine (domain class) + unit tests + property tests (jqwik)
 - [ ] M1.2 `InventoryStrategy` interface; pessimistic strategy (SELECT ... FOR UPDATE, sorted IDs).
-      **Write this one yourself by hand; Claude reviews.**
+      ~~Write this one yourself by hand; Claude reviews.~~ Changed during the task: Claude wrote the
+      implementation (from the 13-step guide in the session), I reviewed it, plus the
+      correctness-reviewer agent and an explain-back quiz. The interface, types and tests came first.
 - [ ] M1.3 Concurrency test harness: N threads race for the same seats, exactly one wins, x1000
 - [ ] M1.4 Holds: create (all-or-nothing, per-user cap), release, 5-min expiry sweeper
       Note (from M0.2): reject duplicate seat IDs in a hold request in code; `holds.seat_ids` has no
@@ -155,7 +157,11 @@ and gets the seeded demo event from GET /events. Still open in M0: M0.7a (date-g
       the code but no status).
       Note (from M1.2, D-015): keep the lock order. The allowance row is locked after the seats, in
       both hold and release. The sweeper releases one hold per transaction (find expired ids first,
-      then call `release(…, EXPIRED)` for each), never several holds in one transaction.
+      then call `release(…, EXPIRED)` for each), never several holds in one transaction. The sweeper
+      and hold service must not be `@Transactional` themselves (the strategy's REQUIRED would join).
+      Put the allowance UPDATE between the seat decision (step 4) and the hold insert (step 5), so
+      LIMIT_EXCEEDED can be a `Rejected` with nothing written; add `LIMIT_EXCEEDED` to `HoldRejection`.
+      `release(…, EXPIRED)` already returns `NotExpired` for a hold extended after it was picked.
 - [ ] M1.5 Orders from holds (happy path, synchronous fake payment for now)
       Note (from M0.2): `orders` has no `hold_id`. Decide before starting how an order links to its
       hold (the saga's HoldVerified step needs it), e.g. a V-next migration adding `orders.hold_id`.
@@ -181,6 +187,9 @@ and gets the seeded demo event from GET /events. Still open in M0: M0.7a (date-g
 - [ ] M2.4 k6 scenarios: seat-collision, mixed-realistic; `scripts/k6.sh` runs k6 in Docker
       Note (from M0.5): log in during k6 `setup()`, not in the measured phase; bcrypt (cost 12) is
       deliberately slow and would dominate the numbers.
+      Note (from M1.2 review, D-015): the pessimistic strategy has no `lock_timeout`, so buyers
+      queueing on one hot seat each hold a pooled connection (Hikari default 10). Measure pool
+      exhaustion in seat-collision; decide on `SET LOCAL lock_timeout` plus a rejection.
 - [ ] M2.5 `scripts/bench.sh`: runs each strategy, collects k6 JSON + Postgres CPU, writes
       `benchmarks/results/<date>/` and a markdown results table
 - [ ] M2.6 Benchmark report v1 in `benchmarks/README.md` with your own analysis of why the numbers differ

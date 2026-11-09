@@ -9,7 +9,10 @@ import com.stampede.inventory.strategy.HoldOutcome.Rejected;
 import com.stampede.inventory.strategy.ReleaseOutcome.NotActive;
 import com.stampede.inventory.strategy.ReleaseOutcome.NotFound;
 import com.stampede.inventory.strategy.ReleaseOutcome.Released;
+import com.stampede.inventory.strategy.ReleaseOutcome.NotExpired;
 import java.sql.Array;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.time.Duration;
 import java.time.Instant;
@@ -25,6 +28,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import javax.sql.DataSource;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -89,6 +93,9 @@ class PessimisticInventoryStrategyTest {
     @Autowired
     JdbcClient jdbc;
 
+    @Autowired
+    DataSource dataSource;
+
     @AfterAll
     static void stopThreads() {
         THREADS.shutdownNow();
@@ -107,7 +114,10 @@ class PessimisticInventoryStrategyTest {
             jdbc.sql("INSERT INTO seats (id, section_id, row_label, number, x, y) VALUES (?, ?, 'A', ?, 0, 0)")
                     .params(seat, SECTION, number++).update();
         }
-        insertEvent(EVENT_A, TIER_A, SEAT_1, SEAT_2, SEAT_3, SEAT_4);
+        // SEAT_2 is inserted first ON PURPOSE: a scan in physical order then meets SEAT_2 before SEAT_1,
+        // the opposite of seat_id order. lockOrderIsPostgresSeatIdOrder relies on that to tell
+        // "ORDER BY seat_id FOR UPDATE" apart from "whatever order the scan returns".
+        insertEvent(EVENT_A, TIER_A, SEAT_2, SEAT_1, SEAT_3, SEAT_4);
         insertEvent(EVENT_B, TIER_B, SEAT_B);
     }
 
@@ -188,6 +198,41 @@ class PessimisticInventoryStrategyTest {
     }
 
     @Test
+    void holdShorterThanOneSecondIsRejectedBeforeAnyStrategyRuns() {
+        // Below 1 ms the expiry would equal created_at and break ck_holds_expires_after_created.
+        assertThatThrownBy(() -> new HoldRequest(UUID.randomUUID(), EVENT_A, USER, List.of(SEAT_1),
+                Duration.ofNanos(500_000)))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void holdRollsBackEverythingWhenAWriteFailsHalfway() {
+        // A trigger (test-only) makes the UPDATE of SEAT_3 fail. Seats are written in Postgres
+        // seat_id order (SEAT_1, SEAT_3, SEAT_2), so by then the hold row and SEAT_1 are already
+        // written. @Transactional must roll all of it back.
+        jdbc.sql("""
+                CREATE FUNCTION test_fail_seat_update() RETURNS trigger LANGUAGE plpgsql AS $$
+                BEGIN RAISE EXCEPTION 'test: simulated failure'; END $$
+                """).update();
+        jdbc.sql("CREATE TRIGGER test_fail_seat_3 BEFORE UPDATE ON event_seats FOR EACH ROW "
+                + "WHEN (NEW.seat_id = '" + SEAT_3 + "') EXECUTE FUNCTION test_fail_seat_update()").update();
+        try {
+            UUID holdId = UUID.randomUUID();
+
+            assertThatThrownBy(() -> strategy.hold(request(holdId, EVENT_A, SEAT_1, SEAT_2, SEAT_3)))
+                    .hasStackTraceContaining("test: simulated failure");
+
+            assertThat(hold(holdId)).as("hold row rolled back").isEmpty();
+            for (UUID seat : List.of(SEAT_1, SEAT_2, SEAT_3)) {
+                assertThat(seat(EVENT_A, seat)).as("seat %s rolled back", seat).isEqualTo(SeatRow.FRESH);
+            }
+        } finally {
+            jdbc.sql("DROP TRIGGER test_fail_seat_3 ON event_seats").update();
+            jdbc.sql("DROP FUNCTION test_fail_seat_update()").update();
+        }
+    }
+
+    @Test
     void duplicateSeatIdIsRejectedBeforeAnyStrategyRuns() {
         // Validated in HoldRequest, so every strategy gets the check (PLAN note on M1.4).
         assertThatThrownBy(() -> request(UUID.randomUUID(), EVENT_A, SEAT_1, SEAT_2, SEAT_1))
@@ -252,7 +297,7 @@ class PessimisticInventoryStrategyTest {
     @Test
     void expiryClosesTheHoldAsExpiredAndASecondReleaseIsNotActive() {
         UUID holdId = UUID.randomUUID();
-        holdDirectly(holdId, EVENT_A, SEAT_3);
+        holdDirectlyExpired(holdId, EVENT_A, SEAT_3);
 
         assertThat(strategy.release(EVENT_A, holdId, ReleaseReason.EXPIRED))
                 .isEqualTo(new Released(List.of(SEAT_3)));
@@ -262,6 +307,45 @@ class PessimisticInventoryStrategyTest {
         // e.g. the buyer clicks "cancel" just after the sweeper expired the hold
         assertThat(strategy.release(EVENT_A, holdId, ReleaseReason.RELEASED)).isEqualTo(new NotActive("EXPIRED"));
         assertThat(seat(EVENT_A, SEAT_3)).as("unchanged").isEqualTo(new SeatRow(SeatStatus.AVAILABLE, null, null, 2));
+    }
+
+    @Test
+    void expiryOfAHoldThatHasNotExpiredChangesNothing() {
+        // The sweeper picked the hold, then the buyer extended it before the sweeper got the lock.
+        // release(EXPIRED) re-checks expires_at under the lock and must leave the hold alone.
+        UUID holdId = UUID.randomUUID();
+        holdDirectly(holdId, EVENT_A, SEAT_1);
+        Instant expiresAt = hold(holdId).orElseThrow().expiresAt();
+
+        assertThat(strategy.release(EVENT_A, holdId, ReleaseReason.EXPIRED)).isEqualTo(new NotExpired(expiresAt));
+        assertThat(hold(holdId).orElseThrow().status()).isEqualTo("ACTIVE");
+        assertThat(seat(EVENT_A, SEAT_1)).isEqualTo(new SeatRow(SeatStatus.HELD, holdId, null, 1));
+    }
+
+    @Test
+    void sagaFailureFreesTheSeatsAndClosesTheHoldAsReleased() {
+        // ck_holds_status has no separate value for a failed checkout, so the hold ends RELEASED.
+        UUID holdId = UUID.randomUUID();
+        holdDirectly(holdId, EVENT_A, SEAT_4);
+
+        assertThat(strategy.release(EVENT_A, holdId, ReleaseReason.SAGA_FAILED)).isEqualTo(new Released(List.of(SEAT_4)));
+        assertThat(hold(holdId).orElseThrow().status()).isEqualTo("RELEASED");
+        assertThat(seat(EVENT_A, SEAT_4)).isEqualTo(new SeatRow(SeatStatus.AVAILABLE, null, null, 2));
+    }
+
+    @Test
+    void releaseOfAnInconsistentHoldThrowsAndRollsBack() {
+        // Broken data on purpose: the hold lists SEAT_2 but owns only SEAT_1. Release must refuse
+        // (exception) and leave everything as it was, not free half the hold.
+        UUID holdId = UUID.randomUUID();
+        holdDirectly(holdId, EVENT_A, SEAT_1);
+        jdbc.sql("UPDATE holds SET seat_ids = ? WHERE id = ?").params(new UUID[] {SEAT_1, SEAT_2}, holdId).update();
+
+        assertThatThrownBy(() -> strategy.release(EVENT_A, holdId, ReleaseReason.RELEASED))
+                .isInstanceOf(IllegalStateException.class);
+
+        assertThat(hold(holdId).orElseThrow().status()).isEqualTo("ACTIVE");
+        assertThat(seat(EVENT_A, SEAT_1)).isEqualTo(new SeatRow(SeatStatus.HELD, holdId, null, 1));
     }
 
     @Test
@@ -295,10 +379,78 @@ class PessimisticInventoryStrategyTest {
     }
 
     @Test
-    void oppositeRequestOrdersDoNotDeadlock() throws Exception {
-        // {SEAT_1, SEAT_2} and {SEAT_2, SEAT_1} at the same moment, 20 times. Without a single lock
-        // order this can deadlock: Postgres then aborts one transaction, which surfaces here as an
-        // exception from the future. A smoke test, not a proof (the proof is M1.3's harness).
+    void holdWaitsForALockedSeatThenSeesTheCommittedState() throws Exception {
+        // Deterministic version of the race: another transaction locks SEAT_1 first, hold() must
+        // WAIT on that lock (proved via pg_stat_activity), and after the other transaction commits
+        // the seat as HELD, hold() must see that new state (Postgres re-reads a row it waited for)
+        // and reject. Without FOR UPDATE the SELECT doesn't wait and reads AVAILABLE; hold() then
+        // blocks later on its own UPDATE, and the version check throws: the test fails either way.
+        UUID otherHold = UUID.randomUUID();
+        try (Connection other = openTransaction()) {
+            exec(other, "SELECT 1 FROM event_seats WHERE event_id = ? AND seat_id = ? FOR UPDATE", EVENT_A, SEAT_1);
+
+            Future<HoldOutcome> pending = THREADS.submit(() -> strategy.hold(request(UUID.randomUUID(), EVENT_A, SEAT_1)));
+            waitUntilOneSessionIsBlockedOnALock();
+
+            exec(other, "INSERT INTO holds (id, event_id, user_id, seat_ids, expires_at, status) "
+                    + "VALUES (?, ?, ?, ?, now() + interval '5 minutes', 'ACTIVE')",
+                    otherHold, EVENT_A, USER, new UUID[] {SEAT_1});
+            exec(other, "UPDATE event_seats SET status = 'HELD', hold_id = ?, version = version + 1 "
+                    + "WHERE event_id = ? AND seat_id = ?", otherHold, EVENT_A, SEAT_1);
+            other.commit();
+
+            assertThat(pending.get(30, TimeUnit.SECONDS)).isEqualTo(new Rejected(HoldRejection.SEAT_TAKEN, List.of(SEAT_1)));
+        }
+        assertThat(seat(EVENT_A, SEAT_1)).isEqualTo(new SeatRow(SeatStatus.HELD, otherHold, null, 1));
+    }
+
+    @Test
+    void lockOrderIsPostgresSeatIdOrder() throws Exception {
+        // D-015: seats are locked in Postgres seat_id order, whatever order the request lists them in
+        // and whatever order the rows are stored in (the fixture stores SEAT_2 before SEAT_1).
+        // SEAT_1 comes first in Postgres order. We lock SEAT_1 elsewhere, start hold({SEAT_2, SEAT_1})
+        // and wait until it blocks. If it locks in seat_id order it is blocked on SEAT_1 and has NOT
+        // taken SEAT_2 yet, so a third session can lock SEAT_2 with NOWAIT (fail instead of waiting).
+        try (Connection blocker = openTransaction(); Connection probe = openTransaction()) {
+            exec(blocker, "SELECT 1 FROM event_seats WHERE event_id = ? AND seat_id = ? FOR UPDATE", EVENT_A, SEAT_1);
+
+            Future<HoldOutcome> pending = THREADS.submit(
+                    () -> strategy.hold(request(UUID.randomUUID(), EVENT_A, SEAT_2, SEAT_1)));
+            waitUntilOneSessionIsBlockedOnALock();
+
+            exec(probe, "SELECT 1 FROM event_seats WHERE event_id = ? AND seat_id = ? FOR UPDATE NOWAIT",
+                    EVENT_A, SEAT_2);  // throws "could not obtain lock" if hold() already locked SEAT_2
+            probe.rollback();
+            blocker.rollback();
+
+            assertThat(pending.get(30, TimeUnit.SECONDS)).isInstanceOf(Held.class);
+        }
+    }
+
+    @Test
+    void cancelAndExpiryOfTheSameHoldTakeTurns() throws Exception {
+        // A buyer's cancel and the sweeper hit the same (expired) hold at once. Both lock the hold row
+        // first, so the second waits, then sees the status the first wrote: one Released, one NotActive.
+        UUID holdId = UUID.randomUUID();
+        holdDirectlyExpired(holdId, EVENT_A, SEAT_1, SEAT_2);
+
+        List<ReleaseOutcome> outcomes = race(
+                () -> strategy.release(EVENT_A, holdId, ReleaseReason.RELEASED),
+                () -> strategy.release(EVENT_A, holdId, ReleaseReason.EXPIRED));
+
+        assertThat(outcomes).filteredOn(Released.class::isInstance).hasSize(1);
+        assertThat(outcomes).filteredOn(NotActive.class::isInstance).hasSize(1);
+        assertThat(seat(EVENT_A, SEAT_1)).isEqualTo(new SeatRow(SeatStatus.AVAILABLE, null, null, 2));
+        assertThat(seat(EVENT_A, SEAT_2)).isEqualTo(new SeatRow(SeatStatus.AVAILABLE, null, null, 2));
+    }
+
+    @Test
+    void oppositeRequestOrdersBothComplete() throws Exception {
+        // Smoke test only: {SEAT_1, SEAT_2} and {SEAT_2, SEAT_1} at once, 20 times; exactly one wins
+        // each round and nothing throws. It can NOT prove the lock order (Postgres locks in the order
+        // its scan returns rows, which doesn't depend on the order of ids in the IN list, so these two
+        // requests lock in the same order even without ORDER BY). lockOrderIsPostgresSeatIdOrder is
+        // the real test of the lock order; M1.3's harness is the load test.
         for (int round = 0; round < 20; round++) {
             insertFixture();
             UUID holdA = UUID.randomUUID();
@@ -319,23 +471,65 @@ class PessimisticInventoryStrategyTest {
         return new HoldRequest(holdId, eventId, USER, List.of(seats), FIVE_MINUTES);
     }
 
-    /** Starts both calls at the same moment and returns their results (rethrowing any exception). */
+    /**
+     * Starts both calls at the same moment and returns their results (rethrowing any exception). This
+     * makes overlap likely, not certain; the deterministic lock tests above don't rely on timing.
+     */
     @SafeVarargs
-    private static List<HoldOutcome> race(Callable<HoldOutcome>... calls) throws Exception {
+    private static <T> List<T> race(Callable<T>... calls) throws Exception {
         CountDownLatch start = new CountDownLatch(1);
-        List<Future<HoldOutcome>> futures = new ArrayList<>();
-        for (Callable<HoldOutcome> call : calls) {
+        List<Future<T>> futures = new ArrayList<>();
+        for (Callable<T> call : calls) {
             futures.add(THREADS.submit(() -> {
                 start.await();
                 return call.call();
             }));
         }
         start.countDown();
-        List<HoldOutcome> results = new ArrayList<>();
-        for (Future<HoldOutcome> future : futures) {
+        List<T> results = new ArrayList<>();
+        for (Future<T> future : futures) {
             results.add(future.get(30, TimeUnit.SECONDS));
         }
         return results;
+    }
+
+    /** A plain JDBC connection with its own transaction, outside Spring: "another buyer". */
+    private Connection openTransaction() throws SQLException {
+        Connection connection = dataSource.getConnection();
+        connection.setAutoCommit(false);
+        return connection;
+    }
+
+    private static void exec(Connection connection, String sql, Object... params) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            for (int i = 0; i < params.length; i++) {
+                statement.setObject(i + 1, params[i]);
+            }
+            statement.execute();
+        }
+    }
+
+    /** Polls Postgres until exactly one session is waiting for a row lock (at most 10 s). */
+    private void waitUntilOneSessionIsBlockedOnALock() throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+        while (System.nanoTime() < deadline) {
+            long waiting = jdbc.sql("SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock'")
+                    .query(Long.class).single();
+            if (waiting == 1) {
+                return;
+            }
+            Thread.sleep(20);
+        }
+        throw new AssertionError("Expected exactly one session waiting for a row lock within 10 s");
+    }
+
+    /** Like {@link #holdDirectly}, but the hold expired a minute ago (created 6 minutes ago). */
+    private void holdDirectlyExpired(UUID holdId, UUID eventId, UUID... seats) {
+        holdDirectly(holdId, eventId, seats);
+        jdbc.sql("""
+                UPDATE holds SET created_at = now() - interval '6 minutes', expires_at = now() - interval '1 minute'
+                WHERE id = ?
+                """).param(holdId).update();
     }
 
     /** Test setup without the strategy: an ACTIVE hold that owns these seats (version 1). */
