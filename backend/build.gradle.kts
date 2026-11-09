@@ -61,6 +61,11 @@ dependencies {
 
 tasks.withType<Test> {
     useJUnitPlatform()
+    // Forward -Dstampede.harness.rounds / .seed from the Gradle command line to the test JVM (M1.3).
+    // They become task inputs, so a run with a different value is never skipped as UP-TO-DATE.
+    System.getProperties().stringPropertyNames()
+        .filter { it.startsWith("stampede.harness.") }
+        .forEach { systemProperty(it, System.getProperty(it)) }
 }
 
 // Regenerates the committed demo venue file. The generator lives in the test source set (a dev tool,

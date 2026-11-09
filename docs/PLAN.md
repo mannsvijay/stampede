@@ -149,7 +149,12 @@ and gets the seeded demo event from GET /events. Still open in M0: M0.7a (date-g
       correctness-reviewer agent. The interface, types and tests came first.
 - [ ] M1.2a `/explain-back M1.2` quiz (skipped at the end of the M1.2 session; do it before M1.4,
       which builds on this lock order).
-- [ ] M1.3 Concurrency test harness: N threads race for the same seats, exactly one wins, x1000
+- [x] M1.3 Concurrency test harness: N threads race for the same seats, exactly one wins, x1000
+      Result 2026-11-10 (local, pessimistic, 16 threads, pool 20, the M1 exit evidence):
+      singleSeat 1000/1000 in 71.7 s, overlappingSets 1000/1000 in 95.4 s, churn 1000/1000 in
+      94.4 s (261.5 s total); 0 invariant violations, 0 exceptions. CI runs 100 rounds per scenario
+      (`-Dstampede.harness.rounds=100`, about 26 s). Run: `PessimisticConcurrencyTest`; reports in
+      `backend/build/reports/concurrency/`.
 - [ ] M1.4 Holds: create (all-or-nothing, per-user cap), release, 5-min expiry sweeper
       Note (from M0.2): reject duplicate seat IDs in a hold request in code; `holds.seat_ids` has no
       DB-level uniqueness (a CHECK can't contain a subquery).
@@ -174,6 +179,9 @@ and gets the seeded demo event from GET /events. Still open in M0: M0.7a (date-g
       it overwrites it). Sell on a seat no longer held by this hold maps to HOLD_EXPIRED.
 - [ ] M1.6 Ticket issuing: Ed25519 signing, QR payload, GET /me/tickets
 - [ ] M1.7 Invariant checker v1 (five checks as SQL) + hard assertion after every integration test
+      Note (from M1.3): reuse the hold checks in test `HoldInvariants` (I1 seat in two active
+      holds, I2 held seat without its active hold, I3 active hold not owning its seat) instead of
+      rewriting them; then make the harness call the M1.7 checker.
       Note (from M0.2): also check that every event_seat's seat belongs to the event's venue.
 - [ ] M1.8 Basic seat map page: Canvas2D render of seats, click to hold, checkout, show ticket QR
       Note (from M0.6): SecurityConfig permits GET `/events/*`, which matches one path segment only,

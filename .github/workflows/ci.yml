@@ -68,8 +68,9 @@ jobs:
 
       # Includes the Testcontainers tests (Docker is preinstalled on the runner), the Modulith
       # verification test and OpenApiSpecTest (which reads ../docs/openapi.json).
+      # The concurrency harness (M1.3) runs 100 rounds per scenario here; the full 1000 runs locally.
       - name: Test
-        run: ./gradlew test
+        run: ./gradlew test -Dstampede.harness.rounds=100
 
       - name: Upload test reports
         if: failure()

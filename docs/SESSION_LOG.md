@@ -381,3 +381,40 @@ written by hand, Claude reviews).
 - The race tests rely on a latch, so overlap is likely, not guaranteed; the deterministic lock tests
   and M1.3 carry the proof.
 - `@Transactional` REQUIRED: a transactional caller would batch releases (rule in D-015, unenforced).
+
+## 2026-11-10 — M1.3 Concurrency harness
+
+**What changed**
+- Test code in `inventory.strategy` (src/test, next to the strategy tests; package access to the
+  package-private strategy): `ConcurrencyHarness` (takes any `InventoryStrategy`), `HarnessScenarios`
+  (singleSeat, overlappingSets, churn), `HoldInvariants` (I1-I3 as SQL, for M1.7 to take over),
+  `HarnessReport` (counts, p50/p99, failures with round seed), `PessimisticConcurrencyTest`
+  (16 threads, Hikari pool 20 for this test only, asserted).
+- Checks after every round: I1 seat in two active holds, I2 held seat without its active hold,
+  I3 active hold not owning its seat, I4 winners (exactly 1 for one seat, disjoint live winners,
+  at least 1 per overlapping round), I5 database = outcomes (HELD seats and ACTIVE holds), I6 version =
+  number of successful transitions (lost updates), I7 zero exceptions (classified by SQLState).
+- Rounds: default 1000 (`-Dstampede.harness.rounds`), seed `-Dstampede.harness.seed`; Gradle
+  forwards `stampede.harness.*` to the test JVM. CI: `./gradlew test -Dstampede.harness.rounds=100`;
+  actionlint clean. No new dependency.
+
+**Verified (the M1 exit criterion "concurrency test passes 1000/1000")**
+- Local, pessimistic, 16 threads: singleSeat 1000/1000 in 71.7 s, overlappingSets 1000/1000 in
+  95.4 s, churn 1000/1000 in 94.4 s; 261.5 s total; 0 violations, 0 exceptions. Over the 90 s
+  threshold, so CI stays at 100 rounds.
+- Experiment A (temporary): no `FOR UPDATE` + no version check -> singleSeat and overlappingSets
+  failed 100/100 rounds (16 winners for one seat; I1, I3, I4, I5, I6), churn 50/100 (plus I7 from
+  release's own consistency check).
+- Experiment B (temporary): no `ORDER BY seat_id` -> real deadlocks (40P01): churn 99/1000 rounds
+  (188 deadlocks), overlappingSets 4/1000 (15), singleSeat clean. Data stayed correct (only I7);
+  deadlocks cost about 1 s each (p99 1047 ms, max 4.3 s). My prediction that hold-vs-hold could not
+  deadlock was wrong: concurrent UPDATEs move rows in the heap, so two scans can see different orders.
+- Strategy file restored; `git diff` on src/main empty.
+- Final `./gradlew test --rerun` (9 min 3 s): 247 tests, 0 failures/errors/skipped, ModularityTest
+  green; the harness inside it was 1000/1000 clean again with fresh seeds (68.6 s, 92.1 s, 91.4 s).
+
+**Next**: M1.2a explain-back quiz; M0.7a (minimatch override, after 2026-11-10T22:26Z); M1.4.
+
+**Open problems**
+- A seed replays a round's inputs, not its interleaving.
+- The full suite now includes ~4.4 min of harness locally (default 1000 rounds).
