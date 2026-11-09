@@ -23,8 +23,12 @@ Then open `.env` and:
 2. Generate the JWT signing key (base64 of 32 random bytes) and paste the output as
    `STAMPEDE_JWT_SECRET`:
    ```powershell
-   [Convert]::ToBase64String([Security.Cryptography.RandomNumberGenerator]::GetBytes(32))
+   $bytes = New-Object byte[] 32
+   [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+   [Convert]::ToBase64String($bytes)
    ```
+   (Works in Windows PowerShell 5.1 and PowerShell 7. The shorter static
+   `RandomNumberGenerator]::GetBytes(32)` needs .NET 6+, so it fails in 5.1.)
    (Git Bash alternative: `openssl rand -base64 32`.)
 3. Optional, for the `bootstrap-admin` profile: set `STAMPEDE_ADMIN_EMAIL` and an
    `STAMPEDE_ADMIN_PASSWORD` of at least 12 characters.
