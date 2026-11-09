@@ -121,7 +121,7 @@ Tick a task only when its tests pass and it's committed.
       `.claude/settings.json`: allow `npm test`, `npm ci --ignore-scripts`, `npm audit` (two exact
       forms), `docker ps`, `git status *`, `git show *`; `ask` before `docker compose down -v`;
       deny `Read(**/.env)` and `Edit` on the .env files (no deny rule loosened).
-- [ ] M0.10 Backend Dockerfile + `backend` service in docker-compose (needed for the M0 exit criterion;
+- [x] M0.10 Backend Dockerfile + `backend` service in docker-compose (needed for the M0 exit criterion;
       found in M0.1, which runs the backend on the host via `./gradlew bootRun`)
       Decisions (D-013): clean clone = one step, copy `.env.example` to `.env` and fill in the
       secrets (compose's `:?` names anything missing); multi-stage Dockerfile, Temurin 21 JDK build
@@ -132,10 +132,14 @@ Tick a task only when its tests pass and it's committed.
       `docker compose build`, throwaway `.env`, GET /events, non-root and no-.env checks).
       Verified locally (2026-11-09): image builds (6m 48s cold); `up --wait` all 4 healthy; /events
       returns the demo event; uid 10001; no `.env` in image or jar; 180 backend tests green;
-      actionlint clean. Open: first CI run of `Compose smoke` (not pushed yet), then tick.
+      actionlint clean.
+      Proof (2026-11-10): CI run #7 on main (05edf51) green for Backend, Frontend and Compose smoke.
 **Exit:** on a clean clone, after copying `.env.example` to `.env` and filling in the secrets,
 `docker compose up` runs the backend and infrastructure (Postgres, Redis, Mailpit) with the demo
 data seeded; the frontend runs with `npm run dev` (it deploys to Vercel in M7.1); CI green.
+**Exit met (2026-11-10):** CI run #7 (05edf51), all three jobs green; `Compose smoke` builds the
+image on a fresh checkout with `.env` made from `.env.example`, brings every service to healthy
+and gets the seeded demo event from GET /events. Still open in M0: M0.7a (date-gated override).
 
 ## M1 - Core booking, pessimistic (weeks 2-3)
 - [ ] M1.1 Seat state machine (domain class) + unit tests + property tests (jqwik)

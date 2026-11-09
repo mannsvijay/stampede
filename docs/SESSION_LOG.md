@@ -269,3 +269,41 @@ survive a logout. Fixed with one lock row per family (D-008).
   prompt and `docker compose down -v` does.
 - `Bash(cat .env)` isn't covered by Read deny rules; CLAUDE.md's rule covers it.
 - frontend/README.md repeats the frontend commands (kept; DEVELOPING.md links to it).
+
+## 2026-11-10 — M0.10 Backend container and compose (M0 exit criterion)
+
+**What changed** (commits 94c9917, d977d72, 05edf51; decisions in D-013)
+- `backend/Dockerfile` (new): JDK build stage, wrapper download retried 3x (the github.com 504),
+  Gradle home as a BuildKit cache mount, `bootJar` only; JRE runtime stage as uid 10001
+  `stampede`. Both Temurin 21.0.12+8 noble, pinned by digest (the 21.0.13 builds were under 14
+  days old). `backend/.dockerignore` (new): `.env*`, build output, `node_modules`.
+- `docker-compose.yml`: `backend` service, waits for healthy postgres/redis, explicit environment
+  (service names, internal ports, secrets from `.env` with `:?`), `127.0.0.1:${BACKEND_PORT:-8080}`,
+  curl healthcheck on `/actuator/health`, profiles `${STAMPEDE_COMPOSE_PROFILES-seed,demo-reschedule}`.
+  No fixed image name, so clones don't overwrite each other's image.
+- `application.yml`: `POSTGRES_HOST`/`REDIS_HOST`, default `localhost`. `.env.example`: optional
+  `BACKEND_PORT` and `STAMPEDE_COMPOSE_PROFILES`.
+- CI: `Compose smoke` job (throwaway `.env` with `openssl rand` secrets, build, `up --wait`,
+  GET /events, non-root, no `.env` in image or jar, `down -v`). No new actions.
+- Docs: PLAN exit criterion reworded (backend + infra in compose, frontend on `npm run dev`),
+  M7.1 seeding review note; DEVELOPING.md and CLAUDE.md compose workflow; DEVELOPING.md JWT
+  command fixed for Windows PowerShell 5.1.
+
+**Verified**
+- Local: cold image build 6m 48s; `up -d --wait` all 4 healthy; `/events` has the demo event;
+  `id` in the container is uid 10001; `find / -name '.env*'` in the image (as root) is empty,
+  0 `.env` entries in `app.jar`; a missing variable fails with its name; actionlint clean;
+  `./gradlew test --rerun` 180 tests, 0 failures/errors/skipped.
+- CI run #7 on main (05edf51): Backend, Frontend and Compose smoke green (reported by the user;
+  `gh` isn't authenticated here). M0 exit criterion met.
+- Not run by Claude: the new JWT command in PowerShell 5.1 (blocked); the clean-clone steps in a
+  separate folder (given to the user).
+
+**Next**: M1, starting with M0.7a (minimatch override) once 2026-11-10T22:26Z has passed.
+
+**Open problems**
+- Bump the Temurin digests to 21.0.13 (October security update) from 2026-11-12.
+- `docker compose up -d` now starts the backend on :8080; use `up -d postgres redis mailpit` for bootRun.
+- Compose smoke builds cold every run (no layer cache), which sets CI's wall-clock time.
+- `docs/SESSION_LOG.md` M0.5 entry still shows the PowerShell-7-only JWT command (historical).
+- Actuator `show-details: always` until M7.1.
