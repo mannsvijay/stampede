@@ -249,7 +249,7 @@ and gets the seeded demo event from GET /events. Still open in M0: M0.7a (date-g
       pg_locks, race two orders for one seat, honour -Dstampede.harness.rounds; test invariant T3
       (PRD 6.10 "every paid order has issued tickets"). Full suite 370 tests, 0 failures/errors/
       skipped (6 min 9 s).
-- [ ] M1.7 Invariant checker v1 (five checks as SQL) + hard assertion after every integration test
+- [x] M1.7 Invariant checker v1 (five checks as SQL) + hard assertion after every integration test
       Note (from M1.3): reuse the hold checks in test `HoldInvariants` (I1 seat in two active
       holds, I2 held seat without its active hold, I3 active hold not owning its seat) instead of
       rewriting them; then make the harness call the M1.7 checker.
@@ -281,6 +281,11 @@ and gets the seeded demo event from GET /events. Still open in M0: M0.7a (date-g
       Measured: full check of a sold-out 2,000-seat event, median 83 ms.
       Follow-up rule (not done in M1.7): "ACTIVE hold expired longer ago than the grace period"
       (the sweeper is stuck or keeps failing a hold); see the M2.2 note.
+      Verified 2026-11-11: full suite 407 tests, 0 failures/errors/skipped (7 min 24 s) with the
+      after-test assertion on (hard mode); all six harness scenarios 100/100 rounds clean with the
+      full checker each round; ModularityTest green. Every rule shown to fire in InvariantCheckerTest;
+      the listener shown to fail a test that leaves bad data (InvariantAssertionListenerTest).
+      Not run: the 1000-round proof (M1 exit criterion) and a correctness-reviewer pass.
 - [ ] M1.8 Basic seat map page: Canvas2D render of seats, click to hold, checkout, show ticket QR
       Note (from M1.6, D-018): tickets come from GET /me/tickets (`qr` is the string to draw, byte
       mode, 195 chars; labels in section/row/seatNumber). A 201 order can briefly have no tickets

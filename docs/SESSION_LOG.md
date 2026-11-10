@@ -548,3 +548,44 @@ PENDING orders), then M1.8 seat map with the ticket QR.
 - One signing key, no rotation; changing it invalidates earlier tickets.
 - CI's Compose smoke job with the new key was not run locally (needs your .env); `.env` needs
   `STAMPEDE_TICKET_SIGNING_KEY` before `docker compose up`.
+
+## 2026-11-11 - M1.7 Invariant checker v1 + hard assertion after every test
+
+**What changed**
+- `control.invariants.InvariantChecker`: 16 SQL rules per event in one read-only REPEATABLE READ
+  snapshot. Moved word for word from the tests: I1-I3, I8 (`HoldInvariants`, deleted), O1-O5 and
+  T1-T3 (`CheckoutTestSupport`). New: V1 (seat in the event's venue), O6 (seat in two active
+  orders), O7 (stuck PENDING order), C1 (capacity). `InvariantCheck` interface is the slot for the
+  M2.2 Redis rule.
+- Grace (from `orders.created_at`) excuses a running checkout's in-between states (O1, O4, O5, O7,
+  T3); tests check strictly.
+- `testsupport.InvariantAssertionListener` (spring.factories): checks every event's committed state
+  after every Spring test; for tests inside a test transaction, after its rollback.
+  `@ExpectInvariantViolations(rules, reason)` must match exactly: 16 tests annotated, 5 half-built
+  setups fixed (`sellDirectly`, `holdWaits…`, two `HoldApiTest` cases; `HoldApiTest` cleans orders).
+  `-Dstampede.invariants.after-test=report` lists instead of failing.
+- `InvariantMonitor` + schedule: every 30 s, 30 s grace, non-DRAFT/ENDED events; ERROR log + gauge
+  `stampede.invariants.violations{rule}`. Off in tests.
+- Harness and `CheckoutTestSupport` call the checker. D-019 (draft); PLAN notes on M2.2, M2.3, M3.4,
+  M5.5. No new dependency.
+
+**Verified**
+- `./gradlew test --rerun`: 407 tests, 0 failures/errors/skipped (7 min 24 s), hard mode; six harness
+  scenarios 100/100 clean; ModularityTest green.
+- InvariantCheckerTest: every rule fires on a deliberate violation (O6 by dropping the unique index
+  in a rolled-back transaction in its own container: the one recorded exception). Sold-out
+  2,000-seat event: full check median 83 ms.
+- Step-3 report run flagged 21 tests; each was reviewed with the user before annotating or fixing.
+
+**Next**: 1000-round proof (M1 exit criterion), then M1.8 seat map with the ticket QR.
+
+**Open problems**
+- First report run deadlocked (listener vs an open test transaction's TRUNCATE locks); fixed by
+  checking after the rollback and a 10 s `lock_timeout`. No dedicated test proves the after-rollback
+  path catches a violation (D-019 known limits).
+- `/actuator/metrics` isn't exposed, so the gauge isn't visible outside the app yet (M5.5).
+- Grace is measured from order creation; M3's async payment may need a longer grace or `updated_at`.
+- `TicketsApiTest` refund annotation to revisit once M3 defines a refund's end state.
+- Not done this session: a correctness-reviewer pass and the stuck-sweeper rule (moved to M2.2).
+- Stale `backend/build/reports/invariants/after-test.txt` from the report run (build output, safe
+  to delete).
