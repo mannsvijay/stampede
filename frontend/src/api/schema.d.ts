@@ -129,6 +129,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/me/tickets": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["myTickets"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/orders": {
         parameters: {
             query?: never;
@@ -153,6 +169,22 @@ export interface paths {
             cookie?: never;
         };
         get: operations["getOrder"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/tickets/keys": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["ticketKeys"];
         put?: never;
         post?: never;
         delete?: never;
@@ -219,9 +251,32 @@ export interface components {
         HoldSeatsRequest: {
             seatIds: string[];
         };
+        Jwk: {
+            /** @example EdDSA */
+            alg: string;
+            /** @example Ed25519 */
+            crv: string;
+            /**
+             * @description Key id: hex of the first 4 bytes of SHA-256 over the raw public key
+             * @example 1a2b3c4d
+             */
+            kid: string;
+            /** @example OKP */
+            kty: string;
+            /** @example sig */
+            use: string;
+            /** @description The raw 32-byte Ed25519 public key, base64url without padding */
+            x: string;
+        };
+        KeySet: {
+            keys: components["schemas"]["Jwk"][];
+        };
         LoginRequest: {
             email: string;
             password: string;
+        };
+        MyTicketsResponse: {
+            items: components["schemas"]["TicketResponse"][];
         };
         OrderItemResponse: {
             /** Format: int64 */
@@ -293,6 +348,33 @@ export interface components {
             email: string;
             /** @description At least 12 characters and at most 72 UTF-8 bytes */
             password: string;
+        };
+        TicketResponse: {
+            /** Format: uuid */
+            eventId: string;
+            /** Format: date-time */
+            issuedAt: string;
+            /** Format: uuid */
+            orderId: string;
+            /** @description What the QR code encodes: base64url(payload).base64url(signature), see docs/ticket-format.md */
+            qr: string;
+            /** @example 3 */
+            row: string;
+            /** Format: uuid */
+            seatId: string;
+            /**
+             * Format: int32
+             * @example 5
+             */
+            seatNumber: number;
+            /** @example A */
+            section: string;
+            /** @enum {string} */
+            status: "ISSUED" | "CHECKED_IN" | "REVOKED";
+            /** Format: uuid */
+            ticketId: string;
+            /** Format: int32 */
+            version: number;
         };
         TokenResponse: {
             accessToken: string;
@@ -736,6 +818,44 @@ export interface operations {
             };
         };
     };
+    myTickets: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The caller's tickets */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MyTicketsResponse"];
+                };
+            };
+            /** @description UNAUTHENTICATED */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description INTERNAL_ERROR */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
     placeOrder: {
         parameters: {
             query?: never;
@@ -877,6 +997,35 @@ export interface operations {
                 };
                 content: {
                     "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description INTERNAL_ERROR */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    ticketKeys: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The keys that sign tickets (JWKS, RFC 7517/8037) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["KeySet"];
                 };
             };
             /** @description INTERNAL_ERROR */

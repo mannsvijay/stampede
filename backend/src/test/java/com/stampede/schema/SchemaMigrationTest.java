@@ -22,7 +22,7 @@ import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
 /**
- * Checks the Flyway schema (V1 to V3) against a fresh Postgres container.
+ * Checks the Flyway schema (V1 to V4) against a fresh Postgres container.
  *
  * <p>{@code @JdbcTest} starts only the JDBC + Flyway slice, and wraps each test in a transaction that
  * is rolled back, so every test builds its own fixture and leaves nothing behind. A failed statement
@@ -59,7 +59,7 @@ class SchemaMigrationTest {
     @Test
     void migrationsApplyCleanlyOnFreshDatabase() {
         MigrationInfo[] applied = flyway.info().applied();
-        assertThat(applied).extracting(m -> m.getVersion().getVersion()).containsExactly("1", "2", "3");
+        assertThat(applied).extracting(m -> m.getVersion().getVersion()).containsExactly("1", "2", "3", "4");
         assertThat(applied).allSatisfy(m -> assertThat(m.getState()).isEqualTo(MigrationState.SUCCESS));
 
         List<String> tables = jdbc.sql("""
@@ -142,6 +142,50 @@ class SchemaMigrationTest {
     // -------------------------------------------------------------------------------------------
     // CHECK constraints: status values and money
     // -------------------------------------------------------------------------------------------
+
+    // -------------------------------------------------------------------------------------------
+    // Tickets: uq_tickets_live_seat (V1) and the V4 signing columns (D-018)
+    // -------------------------------------------------------------------------------------------
+
+    @Test
+    void secondLiveTicketForTheSameSeatIsRejected() {
+        Fixture f = fixture();
+        UUID order = insertOrder(f, "PAID");
+        insertTicket(f, order, "ISSUED", "16ea0a37", new byte[64]);
+
+        assertViolates(() -> insertTicket(f, order, "ISSUED", "16ea0a37", new byte[64]),
+                UNIQUE_VIOLATION, "uq_tickets_live_seat");
+    }
+
+    @Test
+    void aRevokedTicketDoesNotBlockANewOne() {
+        Fixture f = fixture();
+        UUID order = insertOrder(f, "PAID");
+        insertTicket(f, order, "REVOKED", "16ea0a37", new byte[64]);
+
+        insertTicket(f, order, "ISSUED", "16ea0a37", new byte[64]);
+
+        assertThat(jdbc.sql("SELECT count(*) FROM tickets WHERE seat_id = ?").param(f.seatId).query(Long.class)
+                .single()).isEqualTo(2);
+    }
+
+    @Test
+    void ticketKeyIdMustBeEightLowercaseHexCharacters() {
+        Fixture f = fixture();
+        UUID order = insertOrder(f, "PAID");
+
+        assertViolates(() -> insertTicket(f, order, "ISSUED", "16EA0A37", new byte[64]),
+                CHECK_VIOLATION, "ck_tickets_key_id");
+    }
+
+    @Test
+    void ticketSignatureMustBe64Bytes() {
+        Fixture f = fixture();
+        UUID order = insertOrder(f, "PAID");
+
+        assertViolates(() -> insertTicket(f, order, "ISSUED", "16ea0a37", new byte[63]),
+                CHECK_VIOLATION, "ck_tickets_signature_length");
+    }
 
     @Test
     void invalidEventSeatStatusIsRejected() {
@@ -373,6 +417,15 @@ class SchemaMigrationTest {
                 VALUES (?, ?, ?, ?, now() + interval '5 minutes', 'CONVERTED')
                 """).params(holdId, eventId, userId, new UUID[] {seatId}).update();
         return holdId;
+    }
+
+    /** A ticket for the fixture's seat; section A, row R1, seat 1 like the fixture's seat row. */
+    private void insertTicket(Fixture f, UUID orderId, String status, String keyId, byte[] signature) {
+        jdbc.sql("""
+                INSERT INTO tickets (order_id, event_id, seat_id, holder_user_id, signature, status,
+                                     key_id, section_code, row_label, seat_number)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'A', 'R1', 1)
+                """).params(orderId, f.eventId, f.seatId, f.userId, signature, status, keyId).update();
     }
 
     private void insertOrderItem(UUID orderId, Fixture f, boolean active) {

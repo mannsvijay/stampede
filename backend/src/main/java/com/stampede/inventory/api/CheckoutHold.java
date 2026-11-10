@@ -10,18 +10,21 @@ import java.util.UUID;
  */
 public sealed interface CheckoutHold {
 
-    /** One held seat with the price of its tier, in paise. */
-    record SeatPrice(UUID seatId, long pricePaise) {
+    /**
+     * One seat of the hold: its tier price in paise, and its human label (section code, row, seat
+     * number) so booking can hand it to ticketing without ticketing reading inventory's tables (D-018).
+     */
+    record CheckoutSeat(UUID seatId, long pricePaise, String section, String row, int number) {
     }
 
     /** The caller's hold is ACTIVE and not expired by the database clock. */
-    record Orderable(UUID holdId, UUID eventId, List<SeatPrice> seats, Instant expiresAt) implements CheckoutHold {
+    record Orderable(UUID holdId, UUID eventId, List<CheckoutSeat> seats, Instant expiresAt) implements CheckoutHold {
         public Orderable {
             seats = List.copyOf(seats);
         }
 
         public long totalPaise() {
-            return seats.stream().mapToLong(SeatPrice::pricePaise).sum();
+            return seats.stream().mapToLong(CheckoutSeat::pricePaise).sum();
         }
     }
 
@@ -29,8 +32,14 @@ public sealed interface CheckoutHold {
     record Expired() implements CheckoutHold {
     }
 
-    /** The hold has already become an order. */
-    record Converted() implements CheckoutHold {
+    /**
+     * The hold has already become an order. Its seats are exactly that order's seats (a hold converts
+     * only by selling all of them), so a retried checkout can finish issuing tickets (D-018).
+     */
+    record Converted(UUID eventId, List<CheckoutSeat> seats) implements CheckoutHold {
+        public Converted {
+            seats = List.copyOf(seats);
+        }
     }
 
     /** No hold with this id belongs to the caller (unknown, or someone else's; indistinguishable). */

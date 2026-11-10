@@ -30,7 +30,17 @@ Then open `.env` and:
    (Works in Windows PowerShell 5.1 and PowerShell 7. The shorter static
    `RandomNumberGenerator]::GetBytes(32)` needs .NET 6+, so it fails in 5.1.)
    (Git Bash alternative: `openssl rand -base64 32`.)
-3. Optional, for the `bootstrap-admin` profile: set `STAMPEDE_ADMIN_EMAIL` and an
+3. Generate the ticket signing key (M1.6, D-018) the same way, as a **separate** value, and paste
+   it as `STAMPEDE_TICKET_SIGNING_KEY`. It is the Ed25519 private key that signs tickets: exactly
+   32 random bytes in base64. The backend refuses to start without a valid one.
+   ```powershell
+   $bytes = New-Object byte[] 32
+   [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+   [Convert]::ToBase64String($bytes)
+   ```
+   Keep it once set: a new key gets a new key id, and tickets signed with the old key stop
+   verifying (rotation isn't built yet). Scanners only need the public key, from `GET /tickets/keys`.
+4. Optional, for the `bootstrap-admin` profile: set `STAMPEDE_ADMIN_EMAIL` and an
    `STAMPEDE_ADMIN_PASSWORD` of at least 12 characters.
 
 ## Run everything in Docker

@@ -70,6 +70,7 @@ services:
       REDIS_PORT: "6379"
       REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}
       STAMPEDE_JWT_SECRET: ${STAMPEDE_JWT_SECRET:?set STAMPEDE_JWT_SECRET in .env}
+      STAMPEDE_TICKET_SIGNING_KEY: ${STAMPEDE_TICKET_SIGNING_KEY:?set STAMPEDE_TICKET_SIGNING_KEY in .env}
       # seed: load the demo venue and event (idempotent). demo-reschedule: move the demo drop into
       # the future. Set STAMPEDE_COMPOSE_PROFILES in .env to change; set it empty for no seeding.
       SPRING_PROFILES_ACTIVE: ${STAMPEDE_COMPOSE_PROFILES-seed,demo-reschedule}

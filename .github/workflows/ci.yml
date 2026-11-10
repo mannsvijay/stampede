@@ -103,14 +103,17 @@ jobs:
           pg_password=$(openssl rand -hex 24)
           redis_password=$(openssl rand -hex 24)
           jwt_secret=$(openssl rand -base64 32)
+          ticket_key=$(openssl rand -base64 32)
           echo "::add-mask::$pg_password"
           echo "::add-mask::$redis_password"
           echo "::add-mask::$jwt_secret"
+          echo "::add-mask::$ticket_key"
           cp .env.example .env
           sed -i \
             -e "s|^POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=$pg_password|" \
             -e "s|^REDIS_PASSWORD=.*|REDIS_PASSWORD=$redis_password|" \
             -e "s|^STAMPEDE_JWT_SECRET=.*|STAMPEDE_JWT_SECRET=$jwt_secret|" \
+            -e "s|^STAMPEDE_TICKET_SIGNING_KEY=.*|STAMPEDE_TICKET_SIGNING_KEY=$ticket_key|" \
             .env
 
       # The Gradle download inside the build is retried (backend/Dockerfile).

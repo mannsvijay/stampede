@@ -60,6 +60,8 @@ class SecurityConfig {
                         .requestMatchers(HttpMethod.POST,
                                 "/auth/register", "/auth/login", "/auth/refresh", "/auth/logout").permitAll()
                         .requestMatchers(HttpMethod.GET, "/events", "/events/*").permitAll()
+                        // Ticket public keys (D-018): scanners fetch them to verify tickets offline.
+                        .requestMatchers(HttpMethod.GET, "/tickets/keys").permitAll()
                         .requestMatchers("/actuator/health", "/actuator/health/**").permitAll()
                         // The OpenAPI spec. The endpoint only exists under the `openapi` profile (D-010);
                         // otherwise this path is a plain 404.

@@ -77,14 +77,27 @@ class OpenApiSpecTest {
     }
 
     @Test
-    void specCoversTheAuthEventHoldAndOrderEndpointsOnly() {
+    void specCoversTheAuthEventHoldOrderAndTicketEndpointsOnly() {
         List<String> paths = fieldNames(generated.path("paths"));
 
         assertThat(paths).containsExactlyInAnyOrder(
                 "/auth/register", "/auth/login", "/auth/refresh", "/auth/logout",
                 "/events", "/events/{id}",
                 "/events/{id}/holds", "/holds/{id}",
-                "/orders", "/orders/{id}");
+                "/orders", "/orders/{id}",
+                "/me/tickets", "/tickets/keys");
+    }
+
+    @Test
+    void ticketEndpointsDocumentTheirResponses() {
+        JsonNode wallet = generated.path("paths").path("/me/tickets").path("get");
+        assertThat(wallet.path("operationId").asText()).isEqualTo("myTickets");
+        assertThat(fieldNames(wallet.path("responses"))).containsExactlyInAnyOrder("200", "401", "500");
+
+        // Public: scanners fetch the keys without logging in, so no 401 is documented.
+        JsonNode keys = generated.path("paths").path("/tickets/keys").path("get");
+        assertThat(keys.path("operationId").asText()).isEqualTo("ticketKeys");
+        assertThat(fieldNames(keys.path("responses"))).containsExactlyInAnyOrder("200", "500");
     }
 
     @Test

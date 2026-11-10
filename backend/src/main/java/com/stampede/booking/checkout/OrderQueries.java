@@ -27,6 +27,18 @@ class OrderQueries {
         return find("o.hold_id = :key", userId, holdId);
     }
 
+    /**
+     * Whether this order is PAID but its tickets aren't recorded as issued yet (saga still at
+     * SEATS_SOLD): step 5 failed earlier, or is running right now in another request (D-018).
+     */
+    boolean awaitsTickets(UUID orderId) {
+        return jdbc.sql("SELECT status = 'PAID' AND saga_state = 'SEATS_SOLD' FROM orders WHERE id = ?")
+                .param(orderId)
+                .query(Boolean.class)
+                .optional()
+                .orElse(false);
+    }
+
     private Optional<OrderView> find(String condition, UUID userId, UUID key) {
         Optional<OrderRow> order = jdbc.sql("""
                         SELECT o.id, o.event_id, o.hold_id, o.status, o.total_paise, o.created_at

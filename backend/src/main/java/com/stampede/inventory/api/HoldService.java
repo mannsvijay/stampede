@@ -116,7 +116,7 @@ public class HoldService {
 
     /**
      * Checkout step 0, HoldVerified (M1.5, D-017): whether the caller's hold can become an order,
-     * with each seat's tier price. Someone else's hold is reported exactly like an unknown id.
+     * with each seat's tier price and label. Someone else's hold is reported exactly like an unknown id.
      * <p>
      * Not locked: the hold can expire or be cancelled right after this read. That is fine because
      * {@link #sellForOrder} checks again under the hold lock, and the checkout handles the answer.
@@ -137,26 +137,12 @@ public class HoldService {
         }
         CheckoutRow row = hold.get();
         if (row.status().equals("CONVERTED")) {
-            return new CheckoutHold.Converted();
+            return new CheckoutHold.Converted(row.eventId(), seats(holdId));
         }
         if (!row.status().equals("ACTIVE") || row.expired()) {
             return new CheckoutHold.Expired();
         }
-        // The seats the hold lists, priced by their tier. A HELD seat's tier is fixed, so reading
-        // through holds.seat_ids (not event_seats.hold_id) is enough here; sell() checks ownership.
-        List<CheckoutHold.SeatPrice> seats = jdbc.sql("""
-                        SELECT es.seat_id, pt.price_paise
-                        FROM holds h
-                        JOIN event_seats es ON es.event_id = h.event_id AND es.seat_id = ANY (h.seat_ids)
-                        JOIN price_tiers pt ON pt.id = es.tier_id
-                        WHERE h.id = ?
-                        ORDER BY es.seat_id
-                        """)
-                .param(holdId)
-                .query((rs, n) -> new CheckoutHold.SeatPrice(rs.getObject("seat_id", UUID.class),
-                        rs.getLong("price_paise")))
-                .list();
-        return new CheckoutHold.Orderable(holdId, row.eventId(), seats, row.expiresAt());
+        return new CheckoutHold.Orderable(holdId, row.eventId(), seats(holdId), row.expiresAt());
     }
 
     /**
@@ -249,6 +235,30 @@ public class HoldService {
     }
 
     private record HoldOwner(UUID eventId, UUID userId, String strategy) {
+    }
+
+    /**
+     * The seats the hold lists, priced by their tier and labelled by section, row and number. A seat's
+     * tier and label never change after seeding, so reading through holds.seat_ids (not
+     * event_seats.hold_id) is enough here; sell() checks ownership. For a CONVERTED hold these are
+     * exactly its order's seats.
+     */
+    private List<CheckoutHold.CheckoutSeat> seats(UUID holdId) {
+        return jdbc.sql("""
+                        SELECT es.seat_id, pt.price_paise, sec.code AS section, s.row_label, s.number
+                        FROM holds h
+                        JOIN event_seats es ON es.event_id = h.event_id AND es.seat_id = ANY (h.seat_ids)
+                        JOIN price_tiers pt ON pt.id = es.tier_id
+                        JOIN seats s ON s.id = es.seat_id
+                        JOIN sections sec ON sec.id = s.section_id
+                        WHERE h.id = ?
+                        ORDER BY es.seat_id
+                        """)
+                .param(holdId)
+                .query((rs, n) -> new CheckoutHold.CheckoutSeat(rs.getObject("seat_id", UUID.class),
+                        rs.getLong("price_paise"), rs.getString("section"), rs.getString("row_label"),
+                        rs.getInt("number")))
+                .list();
     }
 
     private record CheckoutRow(UUID userId, UUID eventId, String status, Instant expiresAt, boolean expired) {

@@ -11,6 +11,7 @@ import static org.mockito.Mockito.verify;
 
 import com.stampede.inventory.api.HoldService;
 import com.stampede.payments.provider.PaymentProvider;
+import com.stampede.ticketing.api.TicketIssuer;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
 import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
@@ -31,6 +32,9 @@ class CheckoutFailureTest extends CheckoutTestSupport {
 
     @MockitoSpyBean
     OrderWriter writer;
+
+    @MockitoSpyBean
+    TicketIssuer tickets;
 
     @Test
     void anUnexpectedExceptionInTheSellStepLeavesNoSeatStuck() {
@@ -227,6 +231,89 @@ class CheckoutFailureTest extends CheckoutTestSupport {
         verify(holds, times(0)).releaseForFailedCheckout(any());
         assertInvariants();
         assertNoPendingOrders();
+    }
+
+    // --- step 5, TicketsIssued (M1.6, D-018): the order is PAID, so nothing is ever undone -------
+
+    @Test
+    void aTicketIssueThatFailsOnceIsRetried() {
+        UUID holdId = hold(alice, seats.get(0), seats.get(1));
+        doThrow(new IllegalStateException("injected: issuing failed once"))
+                .doCallRealMethod()
+                .when(tickets).issueForOrder(any());
+
+        Response response = postOrder(alice, holdId);
+
+        assertThat(response.status()).isEqualTo(201);
+        UUID orderId = orderId(response);
+        verify(tickets, times(2)).issueForOrder(any());
+        assertThat(ticketsOfOrder(orderId)).isEqualTo(2);
+        assertThat(sagaState(orderId)).isEqualTo("TICKETS_ISSUED");
+        assertInvariants();
+        assertNoPendingOrders();
+    }
+
+    @Test
+    void ticketsThatCannotBeIssuedLeaveThePaidSaleAloneAndARetryIssuesThem() {
+        UUID holdId = hold(alice, seats.get(0), seats.get(1));
+        doThrow(new IllegalStateException("injected: ticketing down")).when(tickets).issueForOrder(any());
+
+        Response response = postOrder(alice, holdId);
+
+        // The buyer paid and has the seats: still 201 PAID, nothing released or refunded.
+        assertThat(response.status()).isEqualTo(201);
+        assertThat(response.body().path("status").asText()).isEqualTo("PAID");
+        UUID orderId = orderId(response);
+        verify(tickets, times(CheckoutService.TICKET_ATTEMPTS)).issueForOrder(any());
+        verify(holds, times(0)).releaseForFailedCheckout(any());
+        assertThat(ticketsOfOrder(orderId)).isZero();
+        assertThat(sagaState(orderId)).as("saga stays at SEATS_SOLD").isEqualTo("SEATS_SOLD");
+        assertThat(paymentStatuses(orderId)).as("not refunded").containsExactly("SUCCEEDED");
+        assertThat(seatOrder(seats.get(0))).isEqualTo(orderId);
+        assertInvariants();
+        assertNoPendingOrders();
+
+        // Ticketing is back; the buyer retries the same checkout.
+        org.mockito.Mockito.reset(tickets);
+        Response retry = postOrder(alice, holdId);
+
+        assertThat(retry.status()).as("the existing order").isEqualTo(200);
+        assertThat(orderId(retry)).isEqualTo(orderId);
+        assertThat(ticketsOfOrder(orderId)).isEqualTo(2);
+        assertThat(sagaState(orderId)).isEqualTo("TICKETS_ISSUED");
+        assertThat(paymentStatuses(orderId)).as("charged once").containsExactly("SUCCEEDED");
+        assertInvariants();
+
+        // A further retry changes nothing.
+        assertThat(postOrder(alice, holdId).status()).isEqualTo(200);
+        assertThat(ticketsOfOrder(orderId)).isEqualTo(2);
+    }
+
+    @Test
+    void aSaleThatCommittedBeforeThrowingStillGetsItsTickets() {
+        UUID holdId = hold(alice, seats.get(0));
+        doAnswer(invocation -> {
+            invocation.callRealMethod();
+            throw new IllegalStateException("injected: failed after the sale committed");
+        }).when(holds).sellForOrder(any(), any());
+
+        Response response = postOrder(alice, holdId);
+
+        assertThat(response.status()).isEqualTo(201);
+        assertThat(ticketsOfOrder(orderId(response))).isEqualTo(1);
+        assertThat(sagaState(orderId(response))).isEqualTo("TICKETS_ISSUED");
+        assertInvariants();
+    }
+
+    @Test
+    void failedCheckoutsIssueNoTickets() {
+        doReturn(PaymentProvider.Charge.declined("fake_declined", "card_declined"))
+                .when(provider).charge(any(), anyLong());
+
+        assertThat(postOrder(alice, hold(alice, seats.get(0))).status()).isEqualTo(402);
+
+        verify(tickets, times(0)).issueForOrder(any());
+        assertThat(ticketsOfEvent()).isZero();
     }
 
     private UUID onlyOrderOfEvent() {

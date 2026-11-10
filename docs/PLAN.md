@@ -233,7 +233,16 @@ and gets the seeded demo event from GET /events. Still open in M0: M0.7a (date-g
       1000/1000 rounds clean, 0 invariant violations, 0 exceptions (9 min 40 s; OrderConcurrencyTest
       runs its own fixed 10 forced-overlap rounds); frontend typecheck, lint, test (33), check:api,
       build green.
-- [ ] M1.6 Ticket issuing: Ed25519 signing, QR payload, GET /me/tickets
+- [x] M1.6 Ticket issuing: Ed25519 signing, QR payload, GET /me/tickets
+      D-018 (draft): JDK Ed25519 from a 32-byte seed (`STAMPEDE_TICKET_SIGNING_KEY`, app won't start
+      without a valid one); compact 81-byte payload + signature, 195-char QR string, spec and test
+      vector in docs/ticket-format.md; saga step 5 after PAID, 3 attempts, on failure PAID/SEATS_SOLD
+      and 201, a retried POST /orders issues them; idempotent via `uq_tickets_live_seat` + ON CONFLICT;
+      holder = user id; V4 adds key_id and a seat-label snapshot; GET /me/tickets, public
+      GET /tickets/keys (JWKS). No new dependency.
+      Verified 2026-11-10: full suite 364 tests, 0 failures/errors/skipped (6 min 14 s); the issuing
+      concurrency test fails against a check-then-insert mutation; frontend typecheck, lint, test (33),
+      check:api, build green; actionlint 0 errors. Compose smoke job not run locally (needs .env).
 - [ ] M1.7 Invariant checker v1 (five checks as SQL) + hard assertion after every integration test
       Note (from M1.3): reuse the hold checks in test `HoldInvariants` (I1 seat in two active
       holds, I2 held seat without its active hold, I3 active hold not owning its seat) instead of
@@ -246,6 +255,10 @@ and gets the seeded demo event from GET /events. Still open in M0: M0.7a (date-g
       items in CANCELLED orders; money matches; CONVERTED hold <-> PAID order), and report PENDING
       orders older than a checkout takes (the known stuck-checkout cases). `HoldInvariants` is now
       public and its I8 counts ACTIVE + CONVERTED holds.
+      Note (from M1.6, D-018): take over the ticket rules T1-T2 in `CheckoutTestSupport` (a live
+      ticket's seat is SOLD to its PAID order and its holder is the buyer; an order at TICKETS_ISSUED
+      has exactly one live ticket per active item), and report PAID orders still at saga state
+      SEATS_SOLD (tickets not issued yet: step 5 failed and nobody retried).
 - [ ] M1.8 Basic seat map page: Canvas2D render of seats, click to hold, checkout, show ticket QR
       Note (from M0.6): SecurityConfig permits GET `/events/*`, which matches one path segment only,
       so `GET /events/{id}/seatmap` needs its own rule (decide whether it is public). Add the venue

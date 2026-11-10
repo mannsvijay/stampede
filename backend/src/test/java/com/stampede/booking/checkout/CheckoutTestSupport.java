@@ -77,6 +77,7 @@ abstract class CheckoutTestSupport extends ApiTestSupport {
     /** Other tests share this database (and GET /events must only list the demo event there). */
     @AfterEach
     void deleteEvent() {
+        jdbc.sql("DELETE FROM tickets WHERE event_id = ?").param(event).update();
         jdbc.sql("DELETE FROM payments WHERE order_id IN (SELECT id FROM orders WHERE event_id = ?)")
                 .param(event).update();
         jdbc.sql("DELETE FROM order_items WHERE event_id = ?").param(event).update();
@@ -172,10 +173,22 @@ abstract class CheckoutTestSupport extends ApiTestSupport {
         return jdbc.sql("SELECT id FROM users WHERE email = ?").param(email).query(UUID.class).single();
     }
 
+    long ticketsOfEvent() {
+        return count("SELECT count(*) FROM tickets WHERE event_id = ?", event);
+    }
+
+    long ticketsOfOrder(UUID orderId) {
+        return count("SELECT count(*) FROM tickets WHERE order_id = ?", orderId);
+    }
+
+    String sagaState(UUID orderId) {
+        return jdbc.sql("SELECT saga_state FROM orders WHERE id = ?").param(orderId).query(String.class).single();
+    }
+
     // --- invariants ------------------------------------------------------------------------------
 
     /**
-     * The hold invariants (I1-I3, I8 counting bought seats) plus the order rules below. Each query
+     * The hold invariants (I1-I3, I8 counting bought seats) plus the order and ticket rules below. Each query
      * returns the rows that break its rule, so empty means it holds. Candidates for the M1.7 checker.
      */
     void assertInvariants() {
@@ -232,6 +245,37 @@ abstract class CheckoutTestSupport extends ApiTestSupport {
                 WHERE coalesce(h.event_id, o.event_id) = ?
                   AND ((h.status = 'CONVERTED' AND o.status IS DISTINCT FROM 'PAID')
                     OR (o.status = 'PAID' AND h.status IS DISTINCT FROM 'CONVERTED'))
+                """));
+        violations.addAll(run("T1 live ticket whose seat isn't SOLD to its PAID order, or held by someone else", """
+                SELECT 'ticket ' || t.id::text || ' for seat ' || t.seat_id::text || ' is in order '
+                       || t.order_id::text || ' (' || o.status || '), seat is ' || es.status || ' owned by '
+                       || coalesce(es.order_id::text, 'no order')
+                       || CASE WHEN t.holder_user_id = o.user_id THEN '' ELSE ', holder is not the buyer' END
+                FROM tickets t
+                JOIN orders o ON o.id = t.order_id
+                JOIN event_seats es ON es.event_id = t.event_id AND es.seat_id = t.seat_id
+                WHERE t.event_id = ? AND t.status <> 'REVOKED'
+                  AND (o.status <> 'PAID' OR es.status <> 'SOLD' OR es.order_id IS DISTINCT FROM t.order_id
+                       OR t.holder_user_id <> o.user_id)
+                """));
+        violations.addAll(run("T2 order at TICKETS_ISSUED without exactly one live ticket per active item", """
+                SELECT 'order ' || o.id::text || ' (' || o.status || '/' || o.saga_state || ') has '
+                       || (SELECT count(*) FROM order_items oi WHERE oi.order_id = o.id AND oi.active)
+                       || ' active items and live tickets for '
+                       || (SELECT count(*) FROM order_items oi JOIN tickets t ON t.order_id = o.id
+                               AND t.event_id = oi.event_id AND t.seat_id = oi.seat_id AND t.status <> 'REVOKED'
+                           WHERE oi.order_id = o.id AND oi.active)
+                       || ' of them, ' || (SELECT count(*) FROM tickets t WHERE t.order_id = o.id
+                                              AND t.status <> 'REVOKED') || ' in all'
+                FROM orders o
+                WHERE o.event_id = ? AND o.saga_state = 'TICKETS_ISSUED'
+                  AND (o.status <> 'PAID'
+                    OR (SELECT count(*) FROM order_items oi WHERE oi.order_id = o.id AND oi.active)
+                       <> (SELECT count(*) FROM order_items oi JOIN tickets t ON t.order_id = o.id
+                               AND t.event_id = oi.event_id AND t.seat_id = oi.seat_id AND t.status <> 'REVOKED'
+                           WHERE oi.order_id = o.id AND oi.active)
+                    OR (SELECT count(*) FROM tickets t WHERE t.order_id = o.id AND t.status <> 'REVOKED')
+                       <> (SELECT count(*) FROM order_items oi WHERE oi.order_id = o.id AND oi.active))
                 """));
         assertThat(violations).as("invariant violations").isEmpty();
     }

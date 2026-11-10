@@ -62,6 +62,10 @@ stampede:
     access-token-ttl: 15m
     refresh-token-ttl: 7d
     refresh-family-max-age: 30d
+  tickets:
+    # Ed25519 private key for signing tickets (D-018): base64 of exactly 32 random bytes (the seed).
+    # No default: the app refuses to start without a valid one. Generate: docs/DEVELOPING.md.
+    signing-key: ${STAMPEDE_TICKET_SIGNING_KEY:}
   holds:
     sweeper:
       # Expires holds past their time (D-016). Every instance sweeps; duplicates are harmless.

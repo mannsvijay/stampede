@@ -6,6 +6,9 @@ import com.stampede.inventory.api.HoldService;
 import com.stampede.inventory.api.SellResult;
 import com.stampede.payments.api.ChargeResult;
 import com.stampede.payments.api.PaymentService;
+import com.stampede.ticketing.api.IssueTickets;
+import com.stampede.ticketing.api.TicketIssuer;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 import org.slf4j.Logger;
@@ -22,6 +25,9 @@ import org.springframework.stereotype.Service;
  *   <li>Payment: {@link PaymentService#charge}.</li>
  *   <li>SeatsSold: {@link HoldService#sellForOrder}, in the inventory strategy's transaction.</li>
  *   <li>PAID: {@link OrderWriter#markPaid}.</li>
+ *   <li>TicketsIssued: {@link TicketIssuer#issueForOrder}, then {@link OrderWriter#markTicketsIssued}
+ *       (M1.6, D-018). The order is already PAID, so a failure here never undoes anything: the order
+ *       stays PAID at saga state SEATS_SOLD, and a retried POST /orders for the hold issues the tickets.</li>
  * </ol>
  * <b>Deliberately not {@code @Transactional}</b> (D-015): the strategy must run in its own transaction,
  * the provider call must not hold a database transaction open, and M3 will persist progress between
@@ -45,16 +51,22 @@ class CheckoutService {
     /** Attempts at step 4 before giving up (the seats are sold by then; only the status is missing). */
     static final int FINISH_ATTEMPTS = 3;
 
+    /** Attempts at step 5 before giving up (the order is PAID by then; only its tickets are missing). */
+    static final int TICKET_ATTEMPTS = 3;
+
     private final HoldService holds;
     private final PaymentService payments;
     private final OrderWriter writer;
     private final OrderQueries queries;
+    private final TicketIssuer tickets;
 
-    CheckoutService(HoldService holds, PaymentService payments, OrderWriter writer, OrderQueries queries) {
+    CheckoutService(HoldService holds, PaymentService payments, OrderWriter writer, OrderQueries queries,
+                    TicketIssuer tickets) {
         this.holds = holds;
         this.payments = payments;
         this.writer = writer;
         this.queries = queries;
+        this.tickets = tickets;
     }
 
     PlaceOrderResult placeOrder(UUID userId, UUID holdId) {
@@ -69,7 +81,7 @@ class CheckoutService {
                 return new PlaceOrderResult.HoldExpired();
             }
             case CheckoutHold.Converted converted -> {
-                return existingOrder(userId, holdId);
+                return retriedAfterSale(userId, holdId, converted);
             }
             case CheckoutHold.Orderable orderable -> hold = orderable;
         }
@@ -90,7 +102,7 @@ class CheckoutService {
                 // its job either way; the buyer can retry shortly.
                 log.warn("Hold {}: a seat is still in another order's active items (in-flight or unfinished checkout)",
                         holdId);
-                return new PlaceOrderResult.SeatTaken(hold.seats().stream().map(CheckoutHold.SeatPrice::seatId)
+                return new PlaceOrderResult.SeatTaken(hold.seats().stream().map(CheckoutHold.CheckoutSeat::seatId)
                         .toList());
             }
             throw e;
@@ -122,6 +134,7 @@ class CheckoutService {
             // the answer was lost)? undo() releases the hold first and finds out under the lock.
             if (undo(orderId, holdId, "sell threw", e) == Undo.SALE_HAD_COMMITTED) {
                 finish(orderId);
+                issueTickets(orderId, userId, hold.eventId(), hold.seats());
                 return placed(userId, orderId);
             }
             throw e;
@@ -138,6 +151,8 @@ class CheckoutService {
 
         // Step 4
         finish(orderId);
+        // Step 5
+        issueTickets(orderId, userId, hold.eventId(), hold.seats());
         return placed(userId, orderId);
     }
 
@@ -218,7 +233,45 @@ class CheckoutService {
         throw last;
     }
 
-    private PlaceOrderResult existingOrder(UUID userId, UUID holdId) {
+    /**
+     * Step 5, TicketsIssued (D-018), with retries. The order is PAID: the buyer has paid and has the
+     * seats, so nothing here may release, refund or cancel, and the answer stays 201. If every attempt
+     * fails, the order stays PAID at saga state SEATS_SOLD with no (or not all) tickets; a retried
+     * POST /orders for the same hold runs this again ({@link #retriedAfterSale}), as will M3 recovery.
+     * Never throws. Issuing is idempotent, so retrying after a lost answer creates no duplicates.
+     */
+    private void issueTickets(UUID orderId, UUID userId, UUID eventId, List<CheckoutHold.CheckoutSeat> seats) {
+        for (int attempt = 1; attempt <= TICKET_ATTEMPTS; attempt++) {
+            try {
+                tickets.issueForOrder(new IssueTickets(orderId, eventId, userId, seats.stream()
+                        .map(seat -> new IssueTickets.Seat(seat.seatId(), seat.section(), seat.row(), seat.number()))
+                        .toList()));
+                writer.markTicketsIssued(orderId);
+                return;
+            } catch (RuntimeException e) {
+                log.warn("Order {}: issuing tickets failed (attempt {}/{})", orderId, attempt, TICKET_ATTEMPTS, e);
+            }
+        }
+        log.error("Order {}: PAID but its tickets could not be issued; saga left at SEATS_SOLD until a retried "
+                + "POST /orders for its hold or M3 recovery issues them", orderId);
+    }
+
+    /**
+     * POST /orders for a hold that is already CONVERTED: its order exists and its seats are sold. If
+     * that checkout's step 5 failed (or is running right now in another request), issue the tickets
+     * now; issuing is idempotent, so racing the original request is harmless. Then 200 with the order.
+     */
+    private PlaceOrderResult retriedAfterSale(UUID userId, UUID holdId, CheckoutHold.Converted converted) {
+        PlaceOrderResult.Existing existing = existingOrder(userId, holdId);
+        UUID orderId = existing.order().orderId();
+        if (queries.awaitsTickets(orderId)) {
+            log.info("Order {}: retried checkout found it PAID without tickets; issuing them", orderId);
+            issueTickets(orderId, userId, converted.eventId(), converted.seats());
+        }
+        return existing;
+    }
+
+    private PlaceOrderResult.Existing existingOrder(UUID userId, UUID holdId) {
         return new PlaceOrderResult.Existing(queries.byHold(userId, holdId)
                 .orElseThrow(() -> new IllegalStateException("Hold " + holdId + " has an order, but not this user's")));
     }

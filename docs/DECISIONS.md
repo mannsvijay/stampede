@@ -847,3 +847,78 @@ Write these yourself, in your own words. Each one is an interview answer you've 
   more common than assumed, so M3 recovery is needed sooner); M2.4 load runs show `uq_orders_hold`
   violations from something other than double clicks; or M3's saga can't reuse these steps as they
   are.
+
+### D-018 Signed tickets: JDK Ed25519, compact payload, issued after PAID (DRAFT)
+- **Date:** 2026-11-10
+- **Context:** M1.6 issues the tickets of a PAID order as the saga's TicketsIssued step (PRD 6.4)
+  and signs them so a gate scanner can verify them offline with only a public key (PRD 6.9). Three
+  choices were open: how to sign and encode the payload (a smaller payload is an easier QR code to
+  scan), what happens when issuing fails after the order is already PAID (D-017: a sale is never
+  undone), and what "holder" means in a payload anyone can read. Ticketing may not read inventory's
+  or booking's tables (D-007), yet the wallet should show "Section A, Row 3, Seat 5".
+- **Options considered:**
+  - Signing: the JDK's built-in Ed25519; BouncyCastle (`bcprov-jdk18on`); Nimbus JOSE (already on
+    the classpath) for a JWS, which needs Google Tink for Ed25519.
+  - Payload: a compact binary format in base64url (195 characters); a hand-built JWS (about 400).
+  - Issuing fails after PAID: retry, then keep PAID and answer 201; the same but answer 500; issue
+    in the transaction that marks the order PAID.
+  - Holder: the user id; a per-ticket HMAC of the user id; the name or email.
+  - Seat labels: ids only (the frontend resolves labels); booking passes labels and ticketing keeps a
+    snapshot.
+- **Decision:**
+  - **JDK Ed25519, no new dependency.** The key in the environment is the 32-byte seed
+    (`STAMPEDE_TICKET_SIGNING_KEY`, base64), which PowerShell can generate. The JDK has no public
+    "seed to public key" method, so `Ed25519Keys` hands the JDK key generator a random source that
+    returns the seed, then checks that the private key it got back contains that seed. The signer
+    signs and verifies a test message at startup, and `Ed25519KeysTest` checks the RFC 8032 vector.
+    A missing, malformed or wrongly sized key (exactly 32 bytes) stops the app at startup.
+  - **Compact binary payload, format 1:** format byte, 4-byte key id, ticket, event, seat and holder
+    UUIDs, issue time in epoch seconds, version: 81 bytes, signed, then
+    `base64url(payload).base64url(signature)`, 195 characters. Specified in docs/ticket-format.md
+    with a test vector.
+  - **Key id derived, not configured:** the first 4 bytes of SHA-256 over the raw public key. Stored
+    on each ticket (V4 `tickets.key_id`) and published as `kid` by `GET /tickets/keys` (public, a
+    JWKS with one OKP key today), so rotation can later publish several keys.
+  - **Step 5 after step 4.** `CheckoutService` calls `ticketing::api` `TicketIssuer.issueForOrder`
+    with the order, event, buyer and labelled seats, then records saga state TICKETS_ISSUED (guarded:
+    only from PAID/SEATS_SOLD). Three attempts. If all fail, the order stays **PAID at SEATS_SOLD**,
+    the answer is still **201**, and an error is logged; nothing is released or refunded. A retried
+    `POST /orders` for the same hold (hold CONVERTED) re-runs issuing before answering 200.
+  - **Idempotent by the database:** each insert is `ON CONFLICT (event_id, seat_id) WHERE status <>
+    'REVOKED' DO NOTHING` on `uq_tickets_live_seat`, in one transaction with seats in id order;
+    afterwards every seat's live ticket must belong to this order, or the whole issue rolls back
+    and throws.
+  - **Holder = user id only.** No personal data in a readable QR code.
+  - **Seat labels as a snapshot** (V4 `section_code`, `row_label`, `seat_number`), passed by booking
+    from inventory's checkout data (`CheckoutHold.CheckoutSeat`). Not signed: the scanner trusts the
+    seat id, the label is for display. `GET /me/tickets` rebuilds the QR string from the stored row
+    and signature; it never signs.
+  - `issued_at` is whole seconds, set in Java, so the row holds exactly what was signed.
+- **Why:**
+  - The JDK does Ed25519 natively; one checked workaround is cheaper than an 8 MB library (or Tink)
+    for one call. Ed25519 is deterministic, so no per-signature random nonce can go wrong.
+  - 195 characters is roughly a 57×57 QR code at medium error correction, against roughly 81×81 for
+    a JWS: fewer, larger dots scan more reliably from a phone screen in a queue. The cost is a format
+    of our own, hence the spec and test vector.
+  - After PAID the buyer has paid and has the seats; a 500 would call a successful purchase a
+    failure, and the retry it invites returns the existing order anyway. Issuing in the PAID
+    transaction would widen D-017's stuck-PENDING case for a failure that loses nothing.
+  - The unique index already says "one live ticket per seat"; letting it decide races needs no lock
+    taken by hand and keeps the guarantee even for callers that skip the Java checks.
+- **Known limits:**
+  - A PAID order can be without tickets until its buyer retries or M3 recovery runs; the wallet is
+    empty meanwhile. The M1.7 checker should report PAID orders still at SEATS_SOLD.
+  - One key, no rotation yet: changing `STAMPEDE_TICKET_SIGNING_KEY` makes earlier tickets fail to
+    verify. Rotation means keeping old public keys in the key set (and in `TicketVerifier`).
+  - The signing key is a plain environment variable, like the JWT secret; no HSM or KMS.
+  - The signature proves authenticity, not current validity: a screenshot of a valid QR scans as
+    valid until check-in records it (PRD's rotating QR is a stretch goal).
+  - Seat labels are a snapshot; renaming a section after issue isn't reflected (seat labels don't
+    change after seeding today).
+  - Saga state is guarded by WHERE clauses in `OrderWriter`, not yet by a saga state machine class
+    (M3 persists the saga).
+- **How I'd know it was wrong:** a JDK upgrade fails the RFC 8032 test or startup self-test (then
+  move to a library); gate scanners struggle to read the codes (then a smaller encoding such as
+  base45 in alphanumeric mode); the checker often finds PAID orders without tickets (then issue
+  asynchronously from an outbox event, M3); or a scanner vendor needs a standard format (then JWS
+  or CWT).
