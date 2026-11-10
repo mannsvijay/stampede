@@ -243,6 +243,12 @@ and gets the seeded demo event from GET /events. Still open in M0: M0.7a (date-g
       Verified 2026-11-10: full suite 364 tests, 0 failures/errors/skipped (6 min 14 s); the issuing
       concurrency test fails against a check-then-insert mutation; frontend typecheck, lint, test (33),
       check:api, build green; actionlint 0 errors. Compose smoke job not run locally (needs .env).
+      Correctness review 2026-11-11 (no live bug; fixes in D-018): step 5 is now one booking
+      transaction (`TicketStep`: order row lock, PAID/SEATS_SOLD, seats = active items, issue, record
+      TICKETS_ISSUED); verifier accepts only canonical QR text; concurrency tests prove the wait in
+      pg_locks, race two orders for one seat, honour -Dstampede.harness.rounds; test invariant T3
+      (PRD 6.10 "every paid order has issued tickets"). Full suite 370 tests, 0 failures/errors/
+      skipped (6 min 9 s).
 - [ ] M1.7 Invariant checker v1 (five checks as SQL) + hard assertion after every integration test
       Note (from M1.3): reuse the hold checks in test `HoldInvariants` (I1 seat in two active
       holds, I2 held seat without its active hold, I3 active hold not owning its seat) instead of
@@ -260,6 +266,10 @@ and gets the seeded demo event from GET /events. Still open in M0: M0.7a (date-g
       has exactly one live ticket per active item; a PAID order is at TICKETS_ISSUED, i.e. PRD 6.10
       invariant 3). The checker needs a grace period for T3 (checkouts still in step 5).
 - [ ] M1.8 Basic seat map page: Canvas2D render of seats, click to hold, checkout, show ticket QR
+      Note (from M1.6, D-018): tickets come from GET /me/tickets (`qr` is the string to draw, byte
+      mode, 195 chars; labels in section/row/seatNumber). A 201 order can briefly have no tickets
+      (step 5 failed): show "tickets on the way" and let the buyer retry POST /orders for the same
+      hold, which issues them. Add `/me` and `/tickets` to the Vite dev proxy.
       Note (from M0.6): SecurityConfig permits GET `/events/*`, which matches one path segment only,
       so `GET /events/{id}/seatmap` needs its own rule (decide whether it is public). Add the venue
       layout (`layout_json`) for the board silhouette / dot-matrix preview with that endpoint.
@@ -306,6 +316,9 @@ and gets the seeded demo event from GET /events. Still open in M0: M0.7a (date-g
       recover PENDING orders left by a crash, by step 4 failing every retry, or by a failed release.
       Re-check the hold in step 1 so an in-flight checkout on an ended hold can't block other buyers
       for the length of an async payment. Add backoff to the step 4 retries.
+      Note (from M1.6, D-018): also recover PAID orders still at SEATS_SOLD (step 5 failed every
+      attempt) by running `booking.checkout.TicketStep` again (idempotent, locks the order row). Any
+      step that moves an order out of PAID (refund) must take the same order row lock.
 - [ ] M3.5 Webhook ingestion: signature check, dedupe, out-of-order handling, reconciliation poller
       Note (from M1.5): the poller must resolve payments left CREATED (unknown outcome) by asking the
       provider by payment id.

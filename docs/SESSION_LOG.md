@@ -504,3 +504,47 @@ HOLD_EXPIRED 410; CONVERTED keeps the allowance; I8 counts orders).
   step 3 (seconds now, minutes with async payment in M3).
 - Payments with an unknown outcome stay CREATED until the M3.5 reconciliation poller.
 - POST /orders has no Idempotency-Key (M3.1); `/orders` and `/holds` not in the Vite proxy (M1.8).
+
+## 2026-11-11 - M1.6 Ticket issuing: Ed25519, QR payload, GET /me/tickets
+
+**Changed** (committed as f181194, then the correctness-review fixes as 3c2cacf)
+- Saga step 5 (TicketsIssued) after PAID: `booking.checkout.TicketStep`, one booking transaction:
+  lock the order row (`FOR NO KEY UPDATE`), require PAID/SEATS_SOLD, seats = the order's active
+  items, `ticketing::api` `TicketIssuer.issueForOrder` (joins), record TICKETS_ISSUED. 3 attempts;
+  on failure the order stays PAID/SEATS_SOLD, 201, logged; a retried POST /orders for the
+  CONVERTED hold issues them.
+- `TicketIssuer`: one insert per seat with `ON CONFLICT ... DO NOTHING` on `uq_tickets_live_seat`,
+  seats in id order, then every seat's live ticket must be this order's (else roll back, throw).
+- Signing (`ticketing.signing`): JDK Ed25519 from a 32-byte seed (`STAMPEDE_TICKET_SIGNING_KEY`;
+  app won't start without a valid one); the seed workaround isolated in `Ed25519Keys`; 81-byte
+  binary payload, 195-char QR string, canonical text only; key id = first 4 bytes of SHA-256 of
+  the public key. Spec + test vector: docs/ticket-format.md.
+- `GET /me/tickets` (caller's tickets, labels, QR string rebuilt from the row), public
+  `GET /tickets/keys` (JWKS). V4: `tickets.key_id`, seat-label snapshot, signature length check.
+- Inventory's `CheckoutHold` seats carry labels; a CONVERTED hold returns its seats (retry path).
+- Config: application.yml, docker-compose, .env.example (PowerShell generator), test key, CI
+  "Create .env" step, DEVELOPING.md. No new dependency.
+- Tests: Ed25519KeysTest (RFC 8032), TicketSigningPropertiesTest, TicketSignerTest (every bit of
+  payload and signature, forged key, canonical text, known-answer vector), TicketsApiTest (one
+  per seat, idempotent, cross-order refusal, TicketStep checks, wallet scoping, offline verify via
+  GET /tickets/keys), TicketIssuingConcurrencyTest, step-5 cases in CheckoutFailureTest, V4 schema
+  tests, ticket rules T1-T3. D-018 (draft).
+
+**Verified**
+- `./gradlew test --rerun`: 370 tests, 0 failures/errors/skipped (6 min 9 s), on the final code.
+- Mutation: check-then-insert instead of ON CONFLICT -> issuing concurrency test failed; restored.
+- A second issuer is seen waiting in pg_locks while the first transaction is open; two-order race
+  exercises both winners (17/30 for Alice in the final run).
+- Correctness-reviewer agent: no live bug; four findings fixed, the rest recorded in D-018.
+- Frontend typecheck, lint, test (33), check:api, build green; actionlint 0 errors.
+
+**Next**: M1.7 invariant checker (take over I1-I3, I8, O1-O5, T1-T3; grace period for T3 and for
+PENDING orders), then M1.8 seat map with the ticket QR.
+
+**Open problems**
+- A PAID order can stay without tickets until the buyer retries or M3.4 recovery; the 201 response
+  doesn't tell the client (D-018 known limits).
+- `TicketIssuer` can't check PAID or seat ownership itself (D-007); every caller must (TicketStep does).
+- One signing key, no rotation; changing it invalidates earlier tickets.
+- CI's Compose smoke job with the new key was not run locally (needs your .env); `.env` needs
+  `STAMPEDE_TICKET_SIGNING_KEY` before `docker compose up`.
