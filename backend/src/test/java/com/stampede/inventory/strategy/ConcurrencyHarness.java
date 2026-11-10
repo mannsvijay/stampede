@@ -72,6 +72,15 @@ final class ConcurrencyHarness {
     interface Scenario {
         String name();
 
+        /**
+         * The event's per_user_limit for this scenario (every call is by the fixture's one user). By
+         * default the number of seats, so the cap never rejects but its row is still locked on every
+         * hold and release, which keeps the allowance in the lock-order mix (D-015).
+         */
+        default int perUserLimit(Fixture fixture) {
+            return fixture.seatIds().size();
+        }
+
         RoundPlan plan(Random random, Fixture fixture, int threads);
 
         /** Extra checks on this round's race results (setup excluded); empty list = fine. */
@@ -103,6 +112,8 @@ final class ConcurrencyHarness {
 
     HarnessReport run(Scenario scenario) {
         HarnessReport report = new HarnessReport(strategy.kind(), scenario.name(), config);
+        jdbc.sql("UPDATE events SET per_user_limit = ? WHERE id = ?")
+                .params(scenario.perUserLimit(fixture), fixture.eventId()).update();
         long start = System.nanoTime();
         for (int round = 0; round < config.rounds(); round++) {
             long seed = config.baseSeed() + round;
@@ -135,7 +146,7 @@ final class ConcurrencyHarness {
         return report;
     }
 
-    /** Empties the event: seats back to AVAILABLE at version 0, its holds deleted. */
+    /** Empties the event: seats back to AVAILABLE at version 0, its holds and allowance rows deleted. */
     private void reset() {
         // Seats first: event_seats.hold_id references holds.
         jdbc.sql("""
@@ -143,6 +154,7 @@ final class ConcurrencyHarness {
                 WHERE event_id = ?
                 """).param(fixture.eventId()).update();
         jdbc.sql("DELETE FROM holds WHERE event_id = ?").param(fixture.eventId()).update();
+        jdbc.sql("DELETE FROM user_event_allowance WHERE event_id = ?").param(fixture.eventId()).update();
     }
 
     private List<CallResult> runConcurrently(List<List<Action>> plans) throws TimeoutException {
@@ -261,7 +273,7 @@ final class ConcurrencyHarness {
                     }
                 });
 
-        // I1-I3 in SQL, then the scenario's own checks.
+        // I1-I3 and I8 in SQL, then the scenario's own checks.
         violations.addAll(HoldInvariants.check(jdbc, fixture.eventId()));
         violations.addAll(scenario.checkRace(race));
         return violations;

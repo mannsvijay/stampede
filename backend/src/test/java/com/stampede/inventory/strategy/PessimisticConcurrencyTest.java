@@ -119,6 +119,11 @@ class PessimisticConcurrencyTest {
         run(HarnessScenarios.churn());
     }
 
+    @Test
+    void capRace() {
+        run(HarnessScenarios.capRace());
+    }
+
     private void run(Scenario scenario) {
         ConcurrencyHarness harness = new ConcurrencyHarness(strategy, jdbc, FIXTURE,
                 Config.fromSystemProperties(THREADS), RACERS);

@@ -21,11 +21,25 @@ public sealed interface HoldOutcome {
 
     /**
      * Nothing changed. {@code seatIds} are the seats that caused the rejection (not the whole request),
-     * so the caller can tell the buyer which seats to pick again.
+     * so the caller can tell the buyer which seats to pick again. For LIMIT_EXCEEDED that is every
+     * requested seat.
+     *
+     * @param takenAgoMs SEAT_TAKEN only: how long ago the most recently taken of {@code seatIds} was
+     *                   taken, by the database clock (from its owner's {@code created_at}, D-016);
+     *                   null for the other reasons
      */
-    record Rejected(HoldRejection reason, List<UUID> seatIds) implements HoldOutcome {
+    record Rejected(HoldRejection reason, List<UUID> seatIds, Long takenAgoMs) implements HoldOutcome {
         public Rejected {
             seatIds = List.copyOf(seatIds);
+            if ((takenAgoMs != null) != (reason == HoldRejection.SEAT_TAKEN)) {
+                throw new IllegalArgumentException("takenAgoMs is set exactly for SEAT_TAKEN, was " + takenAgoMs
+                        + " for " + reason);
+            }
+        }
+
+        /** A rejection without {@code takenAgoMs} (UNKNOWN_SEAT, LIMIT_EXCEEDED). */
+        public Rejected(HoldRejection reason, List<UUID> seatIds) {
+            this(reason, seatIds, null);
         }
     }
 }

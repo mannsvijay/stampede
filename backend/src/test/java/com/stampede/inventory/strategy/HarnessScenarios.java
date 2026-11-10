@@ -14,7 +14,10 @@ import java.util.List;
 import java.util.Random;
 import java.util.UUID;
 
-/** The three M1.3 scenarios. Every random choice comes from the round's Random, so seeds replay. */
+/**
+ * The three M1.3 scenarios and the M1.4 cap scenario. Every random choice comes from the round's
+ * Random, so seeds replay.
+ */
 final class HarnessScenarios {
 
     private HarnessScenarios() {
@@ -116,6 +119,50 @@ final class HarnessScenarios {
                     }
                 }
                 return new RoundPlan(setup, plans);
+            }
+        };
+    }
+
+    /**
+     * The per-user cap under contention (M1.4, D-005). Limit 2; every thread (all the same user) holds
+     * one random seat. A request can lose two ways, a seat collision (SEAT_TAKEN) or a full allowance
+     * (LIMIT_EXCEEDED), so the number of winners must be exactly min(limit, distinct seats requested):
+     * fewer means a request was refused although its seat and the allowance were both free; more means
+     * the cap was broken. I8 also checks the counter against the holds after every round.
+     */
+    static Scenario capRace() {
+        final int limit = 2;
+        return new Scenario() {
+            @Override
+            public String name() {
+                return "capRace";
+            }
+
+            @Override
+            public int perUserLimit(Fixture fixture) {
+                return limit;
+            }
+
+            @Override
+            public RoundPlan plan(Random random, Fixture fixture, int threads) {
+                List<List<Action>> plans = new ArrayList<>();
+                for (int t = 0; t < threads; t++) {
+                    UUID seat = fixture.seatIds().get(random.nextInt(fixture.seatIds().size()));
+                    plans.add(List.of(new Action.Hold(uuid(random), List.of(seat))));
+                }
+                return new RoundPlan(List.of(), plans);
+            }
+
+            @Override
+            public List<String> checkRace(List<CallResult> race) {
+                long distinctSeats = race.stream()
+                        .map(r -> ((Action.Hold) r.action()).seatIds().get(0))
+                        .distinct().count();
+                long expected = Math.min(limit, distinctSeats);
+                long winners = race.stream().filter(r -> r.outcome() instanceof Held).count();
+                return winners == expected ? List.of()
+                        : List.of("I9 " + winners + " winners with limit " + limit + " and " + distinctSeats
+                                + " distinct seats requested (expected exactly " + expected + ")");
             }
         };
     }

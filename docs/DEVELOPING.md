@@ -46,7 +46,8 @@ docker compose down                   # stop (keeps data)
   builds reuse the cache. The image build doesn't run tests; run them with Gradle (below).
 - After changing backend code, rebuild: `docker compose up -d --build --wait`.
 - The backend container runs with the `seed,demo-reschedule` profiles. To change them, set
-  `STAMPEDE_COMPOSE_PROFILES` in `.env` (empty = no seeding). `BACKEND_PORT` changes the host port
+  `STAMPEDE_COMPOSE_PROFILES` in `.env` (empty = no seeding; `seed,demo-open-sale` to hold demo
+  seats now, see Backend below). `BACKEND_PORT` changes the host port
   (default 8080). Both are commented out in `.env.example`.
 - The frontend runs on the host: `npm run dev` proxies the API to `localhost:8080`, which is the
   container (see Frontend below).
@@ -83,6 +84,7 @@ Run the app (http://localhost:8080). Profiles are comma-separated:
 |---|---|
 | `seed` | Loads the demo venue and event (safe to repeat) |
 | `demo-reschedule` | Moves the demo event's drop and start times into the future (SCHEDULED events only) |
+| `demo-open-sale` | Dev only: puts the demo drop one minute in the past (start stays in the future), so its seats can be held now. Holds before the drop are refused with 409 `SALE_NOT_OPEN`. Wins over `demo-reschedule` if both are set |
 | `openapi` | Serves the generated spec at `/v3/api-docs` |
 | `bootstrap-admin` | Creates the first ADMIN user from `STAMPEDE_ADMIN_*` in `.env` |
 
@@ -90,6 +92,13 @@ Run the app (http://localhost:8080). Profiles are comma-separated:
 cd backend
 .\gradlew.bat bootRun --args="--spring.profiles.active=seed,demo-reschedule"
 ```
+To hold seats locally (seat map, manual API tests), open the demo sale instead of rescheduling it:
+```powershell
+.\gradlew.bat bootRun --args="--spring.profiles.active=seed,demo-open-sale"
+```
+In Docker, set `STAMPEDE_COMPOSE_PROFILES=seed,demo-open-sale` in `.env`, then
+`docker compose up -d --wait backend`. Each start opens the sale again, one minute before now.
+
 Or set the profiles in the environment, and clear them afterwards:
 ```powershell
 $env:SPRING_PROFILES_ACTIVE = "seed,demo-reschedule,openapi"

@@ -21,8 +21,9 @@ Git Bash forms, run from the repo root. PowerShell forms for me: docs/DEVELOPING
 - One test class: `cd backend && ./gradlew test --rerun --tests "ClassName"`
 - Run the app: `cd backend && ./gradlew bootRun --args='--spring.profiles.active=seed,demo-reschedule'`
   Profiles, comma-separated: `seed` (load the demo venue and event), `demo-reschedule` (move the demo
-  drop into the future), `openapi` (serve /v3/api-docs), `bootstrap-admin` (create the first admin
-  from .env). Seed once and exit: add ` --spring.main.web-application-type=none` inside the quotes.
+  drop into the future), `demo-open-sale` (dev only: put the demo drop 1 min in the past so its seats
+  can be held now; use `seed,demo-open-sale`), `openapi` (serve /v3/api-docs), `bootstrap-admin`
+  (create the first admin from .env). Holds before the drop return 409 SALE_NOT_OPEN. Seed once and exit: add ` --spring.main.web-application-type=none` inside the quotes.
 - Regenerate the demo venue file: `cd backend && ./gradlew generateVenue`
 - Update docs/openapi.json after an intended API change:
   `cd backend && ./gradlew test --rerun --tests "OpenApiSpecTest"`, review the diff, then

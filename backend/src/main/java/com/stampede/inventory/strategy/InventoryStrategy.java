@@ -13,8 +13,11 @@ import java.util.UUID;
  *       state machine (D-004, D-014), never by SQL or Lua alone.</li>
  *   <li><b>Expected outcomes are values.</b> A taken seat is a normal answer under contention, returned
  *       as {@link HoldOutcome.Rejected}; exceptions mean a bug or an infrastructure failure.</li>
+ *   <li><b>Per-user cap</b> (D-005): a hold adds its seats to {@code user_event_allowance.used} in the
+ *       same atomic step that checks {@code events.per_user_limit}, and is rejected with
+ *       LIMIT_EXCEEDED (nothing written) if that would exceed it. Every release gives them back.</li>
  *   <li><b>Lock order</b> (D-015): seats are locked in Postgres {@code seat_id} order; a release locks
- *       the hold row before its seats; the per-user allowance row (M1.4) is locked after the seats.</li>
+ *       the hold row before its seats; the per-user allowance row is locked after the seats.</li>
  * </ul>
  */
 public interface InventoryStrategy {
@@ -29,8 +32,8 @@ public interface InventoryStrategy {
     HoldOutcome hold(HoldRequest request);
 
     /**
-     * Frees every seat the hold owns and closes the hold (status RELEASED or EXPIRED, by reason).
-     * Only an ACTIVE hold can be released.
+     * Frees every seat the hold owns, gives them back to the user's allowance and closes the hold
+     * (status RELEASED or EXPIRED, by reason). Only an ACTIVE hold can be released.
      */
     ReleaseOutcome release(UUID eventId, UUID holdId, ReleaseReason reason);
 }

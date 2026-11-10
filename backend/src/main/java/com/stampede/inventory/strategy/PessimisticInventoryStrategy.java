@@ -82,7 +82,30 @@ class PessimisticInventoryStrategy implements InventoryStrategy {
             }
         }
         if (!taken.isEmpty()) {
-            return new Rejected(HoldRejection.SEAT_TAKEN, taken);
+            return new Rejected(HoldRejection.SEAT_TAKEN, taken, takenAgoMs(request.eventId(), taken));
+        }
+
+        // Step 4b: the per-user cap (D-005). After the seat decision, so a cap rejection also writes
+        // nothing; after the seat locks, because the allowance row is last in the lock order (D-015).
+        // One statement checks and increments: the upsert creates the user's counter row on their
+        // first hold, and when two requests race, the second waits for the first to commit and then
+        // re-evaluates the WHERE against the committed value. Zero rows written = over the limit.
+        // The limit is read here, in the same statement, so nothing can change it in between.
+        int allowance = jdbc.sql("""
+                        INSERT INTO user_event_allowance (event_id, user_id, used)
+                        SELECT e.id, :userId, :seats FROM events e
+                        WHERE e.id = :eventId AND :seats <= e.per_user_limit
+                        ON CONFLICT (event_id, user_id) DO UPDATE
+                        SET used = user_event_allowance.used + EXCLUDED.used
+                        WHERE user_event_allowance.used + EXCLUDED.used
+                              <= (SELECT per_user_limit FROM events WHERE id = EXCLUDED.event_id)
+                        """)
+                .param("eventId", request.eventId())
+                .param("userId", request.userId())
+                .param("seats", request.seatIds().size())
+                .update();
+        if (allowance == 0) {
+            return new Rejected(HoldRejection.LIMIT_EXCEEDED, request.seatIds());
         }
 
         // Step 5: the hold row first, because event_seats.hold_id has a foreign key to holds.
@@ -118,15 +141,16 @@ class PessimisticInventoryStrategy implements InventoryStrategy {
         // sweeper for the same hold now take turns: the second one waits here, then sees the status
         // the first one wrote and returns NotActive.
         Optional<HoldRow> hold = jdbc.sql("""
-                        SELECT status, seat_ids, expires_at, expires_at <= now() AS expired
+                        SELECT user_id, status, seat_ids, expires_at, expires_at <= now() AS expired
                         FROM holds
                         WHERE id = :holdId AND event_id = :eventId
                         FOR UPDATE
                         """)
                 .param("holdId", holdId)
                 .param("eventId", eventId)
-                .query((rs, rowNum) -> new HoldRow(rs.getString("status"), uuids(rs, "seat_ids"),
-                        rs.getObject("expires_at", OffsetDateTime.class).toInstant(), rs.getBoolean("expired")))
+                .query((rs, rowNum) -> new HoldRow(rs.getObject("user_id", UUID.class), rs.getString("status"),
+                        uuids(rs, "seat_ids"), rs.getObject("expires_at", OffsetDateTime.class).toInstant(),
+                        rs.getBoolean("expired")))
                 .optional();
         if (hold.isEmpty()) {
             return new NotFound();
@@ -177,6 +201,25 @@ class PessimisticInventoryStrategy implements InventoryStrategy {
             // Step 11
             writeSeat(available);
             freed.add(available.seatId());
+        }
+
+        // Step 11b: give the seats back to the user's allowance (D-005), last in the lock order
+        // (hold, seats, allowance; D-015). Every reason that reaches here frees the seats, so every
+        // one decrements; a CONVERTED hold never gets here, so bought seats keep counting. If the
+        // counter is missing or would go below zero (ck_user_event_allowance_used_nonnegative), it
+        // has drifted from the holds: that is a bug, and the exception rolls the release back rather
+        // than hiding it (the hold stays ACTIVE and the sweeper keeps reporting it).
+        int allowance = jdbc.sql("""
+                        UPDATE user_event_allowance SET used = used - :seats
+                        WHERE event_id = :eventId AND user_id = :userId
+                        """)
+                .param("seats", freed.size())
+                .param("eventId", eventId)
+                .param("userId", hold.get().userId())
+                .update();
+        if (allowance != 1) {
+            throw new IllegalStateException("No allowance row for user " + hold.get().userId() + " in event "
+                    + eventId + " while releasing hold " + holdId);
         }
 
         // Step 12: close the hold. The status depends on why it ended.
@@ -241,10 +284,33 @@ class PessimisticInventoryStrategy implements InventoryStrategy {
                 rs.getLong("version"));
     }
 
+    /**
+     * SEAT_TAKEN only: how long ago the most recently taken of these seats was taken (D-016). The
+     * seats are still locked by this transaction, so their owner pointers can't change. A HELD seat's
+     * owner is its hold, a SOLD seat's its order (D-014); both rows are only read, not locked, so the
+     * lock order (D-015) is untouched. clock_timestamp(), not now(): the owner may have committed
+     * after this transaction started (we waited for its lock), and now() would then be earlier than
+     * its created_at. Never negative.
+     */
+    private long takenAgoMs(UUID eventId, List<UUID> seatIds) {
+        return jdbc.sql("""
+                        SELECT greatest(0, floor(extract(epoch FROM
+                                   clock_timestamp() - max(coalesce(h.created_at, o.created_at))) * 1000))::bigint
+                        FROM event_seats es
+                        LEFT JOIN holds h ON h.id = es.hold_id
+                        LEFT JOIN orders o ON o.id = es.order_id
+                        WHERE es.event_id = :eventId AND es.seat_id IN (:seatIds)
+                        """)
+                .param("eventId", eventId)
+                .param("seatIds", seatIds)
+                .query(Long.class)
+                .single();
+    }
+
     private static List<UUID> uuids(ResultSet rs, String column) throws SQLException {
         return Arrays.asList((UUID[]) rs.getArray(column).getArray());
     }
 
-    private record HoldRow(String status, List<UUID> seatIds, Instant expiresAt, boolean expired) {
+    private record HoldRow(UUID userId, String status, List<UUID> seatIds, Instant expiresAt, boolean expired) {
     }
 }

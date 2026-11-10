@@ -161,6 +161,14 @@ class OpenApiConfig {
                         .description("VALIDATION_FAILED on a request body: one entry per invalid field."))
                 .addProperty("errorId", new StringSchema()
                         .description("INTERNAL_ERROR only: the id the server logged the error under."))
+                .addProperty("seatIds", new ArraySchema()
+                        .items(new StringSchema().format("uuid"))
+                        .description("SEAT_TAKEN and LIMIT_EXCEEDED: the seats that caused the rejection."))
+                .addProperty("takenAgoMs", new IntegerSchema().format("int64")
+                        .description("SEAT_TAKEN only: milliseconds since the most recently taken of seatIds "
+                                + "was taken."))
+                .addProperty("limit", new IntegerSchema().format("int32")
+                        .description("LIMIT_EXCEEDED only: the event's per-user ticket limit."))
                 .required(List.of("title", "status", "code"));
     }
 

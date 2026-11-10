@@ -77,12 +77,31 @@ class OpenApiSpecTest {
     }
 
     @Test
-    void specCoversTheAuthAndEventEndpointsOnly() {
+    void specCoversTheAuthEventAndHoldEndpointsOnly() {
         List<String> paths = fieldNames(generated.path("paths"));
 
         assertThat(paths).containsExactlyInAnyOrder(
                 "/auth/register", "/auth/login", "/auth/refresh", "/auth/logout",
-                "/events", "/events/{id}");
+                "/events", "/events/{id}",
+                "/events/{id}/holds", "/holds/{id}");
+    }
+
+    @Test
+    void holdEndpointsDocumentTheirProblemCodesUnderTheirStatuses() {
+        JsonNode post = generated.path("paths").path("/events/{id}/holds").path("post").path("responses");
+        assertThat(fieldNames(post)).containsExactlyInAnyOrder("200", "201", "400", "401", "404", "409", "500");
+        assertThat(post.path("409").path("description").asText())
+                .contains("SEAT_TAKEN", "LIMIT_EXCEEDED", "SALE_NOT_OPEN");
+
+        JsonNode delete = generated.path("paths").path("/holds/{id}").path("delete").path("responses");
+        assertThat(fieldNames(delete)).containsExactlyInAnyOrder("204", "400", "401", "404", "409", "500");
+        assertThat(delete.path("404").path("description").asText()).isEqualTo("HOLD_NOT_FOUND");
+        assertThat(delete.path("409").path("description").asText()).isEqualTo("HOLD_CONVERTED");
+
+        JsonNode problem = generated.path("components").path("schemas").path("Problem").path("properties");
+        assertThat(problem.path("takenAgoMs").path("format").asText()).isEqualTo("int64");
+        assertThat(problem.path("seatIds").path("items").path("format").asText()).isEqualTo("uuid");
+        assertThat(problem.path("limit").path("type").asText()).isEqualTo("integer");
     }
 
     @Test
@@ -114,7 +133,7 @@ class OpenApiSpecTest {
     void responseFieldsAreRequiredAndJson() {
         JsonNode schemas = generated.path("components").path("schemas");
         for (String name : List.of("EventList", "EventSummary", "EventDetail", "PriceTier", "VenueRef",
-                "TokenResponse", "UserResponse")) {
+                "TokenResponse", "UserResponse", "HoldResponse")) {
             assertThat(StreamSupport.stream(schemas.path(name).path("required").spliterator(), false)
                     .map(JsonNode::asText).toList())
                     .as("required properties of %s", name)

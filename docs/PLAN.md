@@ -54,7 +54,7 @@ Tick a task only when its tests pass and it's committed.
       first ADMIN via the `bootstrap-admin` profile. V2 adds `refresh_token_families` (one lock row
       per login session; fixes a revocation deadlock and a logout race found by the concurrency tests).
       Open: nothing deletes expired refresh token families yet; add a cleanup job (e.g. with the M1.4
-      sweeper) before the table matters.
+      sweeper) before the table matters. Still open after M1.4 (not in its scope).
       Correctness review (RefreshTokenStore): no bug in the code; fixed three test/edge findings
       (a one-refresh-vs-one-logout race test, proven to fail with logout disabled; a tighter
       family-cap assertion; rotate now checks the family's own expiry) plus hardening (guarded
@@ -147,8 +147,7 @@ and gets the seeded demo event from GET /events. Still open in M0: M0.7a (date-g
       ~~Write this one yourself by hand; Claude reviews.~~ Changed during the task: Claude wrote the
       implementation (from the 13-step guide in the session), I reviewed it, plus the
       correctness-reviewer agent. The interface, types and tests came first.
-- [ ] M1.2a `/explain-back M1.2` quiz (skipped at the end of the M1.2 session; do it before M1.4,
-      which builds on this lock order).
+      M1.2a (the `/explain-back M1.2` quiz) was dropped on 2026-11-10 by my choice.
 - [x] M1.3 Concurrency test harness: N threads race for the same seats, exactly one wins, x1000
       Result 2026-11-10 (local, pessimistic, 16 threads, pool 20, the M1 exit evidence):
       singleSeat 1000/1000 in 71.7 s, overlappingSets 1000/1000 in 95.4 s, churn 1000/1000 in
@@ -169,6 +168,24 @@ and gets the seeded demo event from GET /events. Still open in M0: M0.7a (date-g
       Put the allowance UPDATE between the seat decision (step 4) and the hold insert (step 5), so
       LIMIT_EXCEEDED can be a `Rejected` with nothing written; add `LIMIT_EXCEEDED` to `HoldRejection`.
       `release(…, EXPIRED)` already returns `NotExpired` for a hold extended after it was picked.
+      Decisions (D-016, draft): `inventory.api.HoldService` (not @Transactional) picks the strategy via
+      `InventoryStrategies`, new holdId per attempt, 5 min holds; `inventory.holds` has the controller
+      and the sweeper. Cap: one upsert on `user_event_allowance` as step 4b (precedence UNKNOWN_SEAT >
+      SEAT_TAKEN > LIMIT_EXCEEDED), decrement as step 11b on every release reason; a drifted counter
+      throws and rolls back. `takenAgoMs` from the owner's `created_at` (hold, or order if SOLD), read
+      in the strategy's transaction on the rejection path. Sweeper: every instance, fixed delay 5 s,
+      keyset pages of 500, one hold per transaction (`stampede.holds.sweeper.*`). Retry: SEAT_TAKEN on exactly
+      the seats of the caller's own active hold returns that hold with 200. Statuses: SEAT_TAKEN,
+      LIMIT_EXCEEDED, SALE_NOT_OPEN, HOLD_CONVERTED 409; HOLD_NOT_FOUND 404 (also for someone else's
+      hold); DELETE of your own released/expired hold 204; unknown seat ids 400 VALIDATION_FAILED.
+      HOLD_EXPIRED is 410, added to ErrorCode in M1.5 (the first task that returns it). Holds only
+      after the drop while SCHEDULED/LIVE (SALE_NOT_OPEN); dev profile `demo-open-sale` opens the
+      demo sale now. Harness: allowance reset, invariant I8 (allowance = seats of active holds, at
+      most the limit), per-scenario limit (seat count for the M1.3 scenarios), `capRace`; plus
+      `HoldCapConcurrencyTest` (disjoint seats, only the cap decides).
+      Correctness review: no bugs found; fixed a two-sweeper test that could pass without overlap
+      (now forced with a row lock) and sweeper starvation by broken holds (keyset paging). Low items
+      recorded under D-016 "Known limits"; for M1.7: I8's `used > limit` check vs lowered limits.
 - [ ] M1.5 Orders from holds (happy path, synchronous fake payment for now)
       Note (from M0.2): `orders` has no `hold_id`. Decide before starting how an order links to its
       hold (the saga's HoldVerified step needs it), e.g. a V-next migration adding `orders.hold_id`.
@@ -177,16 +194,26 @@ and gets the seeded demo event from GET /events. Still open in M0: M0.7a (date-g
       `sell`, which clears hold_id. If orders attach while still HELD, add a guarded transition and
       tests, and decide what `sell` does when the seat already points to a different order (today
       it overwrites it). Sell on a seat no longer held by this hold maps to HOLD_EXPIRED.
+      Note (from M1.4, D-016): HOLD_EXPIRED is 410 Gone; add it to `ErrorCode` here. Converting a hold
+      (status CONVERTED) must NOT decrement the allowance: bought seats keep counting. Extend I8 to
+      count the seats of the user's active orders too. Booking calls `release(…, SAGA_FAILED)`
+      through inventory's api (`HoldService` has no such method yet; add one).
 - [ ] M1.6 Ticket issuing: Ed25519 signing, QR payload, GET /me/tickets
 - [ ] M1.7 Invariant checker v1 (five checks as SQL) + hard assertion after every integration test
       Note (from M1.3): reuse the hold checks in test `HoldInvariants` (I1 seat in two active
       holds, I2 held seat without its active hold, I3 active hold not owning its seat) instead of
       rewriting them; then make the harness call the M1.7 checker.
+      Note (from M1.4): `HoldInvariants` now also has I8 (allowance = seats of active holds, never
+      over the limit); take it over as well.
       Note (from M0.2): also check that every event_seat's seat belongs to the event's venue.
 - [ ] M1.8 Basic seat map page: Canvas2D render of seats, click to hold, checkout, show ticket QR
       Note (from M0.6): SecurityConfig permits GET `/events/*`, which matches one path segment only,
       so `GET /events/{id}/seatmap` needs its own rule (decide whether it is public). Add the venue
       layout (`layout_json`) for the board silhouette / dot-matrix preview with that endpoint.
+      Note (from M1.4): add `/holds` to the Vite dev proxy (only /auth, /events, /actuator, /v3 are
+      proxied; POST /events/{id}/holds already works through /events). To hold demo seats locally,
+      run the backend with `seed,demo-open-sale` (the demo drop is otherwise always in the future and
+      holds return 409 SALE_NOT_OPEN). Use `serverTime` from the hold response to correct the timer.
 **Exit:** a full purchase works end to end in the browser; concurrency test passes 1000/1000.
 
 ## M2 - Contention lab (weeks 4-5)  <- the heart of the portfolio
@@ -210,6 +237,8 @@ and gets the seeded demo event from GET /events. Still open in M0: M0.7a (date-g
 
 ## M3 - Correct checkout (week 6-7)
 - [ ] M3.1 Idempotency keys (store hash + response; same key/different body -> 422) + retry-storm test
+      Note (from M1.4, D-016): consider accepting `Idempotency-Key` on POST /events/{id}/holds too.
+      M1.4 only recognises a retry by its seats (same seat set as the caller's active hold -> 200).
 - [ ] M3.2 Outbox table + relay to `EventPublisher` (Redis pub/sub impl) + consumer dedupe table
 - [ ] M3.3 Mock payment provider as a separate small service: intents, HMAC-signed webhooks, chaos knobs
 - [ ] M3.4 Persisted saga orchestrator with compensation; resumes after crash
@@ -242,6 +271,9 @@ and gets the seeded demo event from GET /events. Still open in M0: M0.7a (date-g
 
 ## M6 - Resilience and observability (week 11)
 - [ ] M6.1 Three API instances behind Nginx; kill one mid-checkout, saga resumes
+      Note (from M1.4, D-016): every instance runs the expiry sweeper; duplicates are harmless (the
+      hold-row lock serialises them). If the duplicate scans or lock waits show up, claim holds with
+      `FOR UPDATE SKIP LOCKED`, one transaction per hold (amends D-015's "not transactional" wording).
 - [ ] M6.2 Chaos scripts: Redis restart, payment outage, delayed webhooks; invariants after each
 - [ ] M6.3 Prometheus metrics + Grafana dashboards committed as JSON
 - [ ] M6.4 Soak test (1 hour)

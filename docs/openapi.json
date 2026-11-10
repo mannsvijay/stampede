@@ -319,6 +319,173 @@
         },
         "tags" : [ "events" ]
       }
+    },
+    "/events/{id}/holds" : {
+      "post" : {
+        "operationId" : "hold",
+        "parameters" : [ {
+          "in" : "path",
+          "name" : "id",
+          "required" : true,
+          "schema" : {
+            "type" : "string",
+            "format" : "uuid"
+          }
+        } ],
+        "requestBody" : {
+          "content" : {
+            "application/json" : {
+              "schema" : {
+                "$ref" : "#/components/schemas/HoldSeatsRequest"
+              }
+            }
+          },
+          "required" : true
+        },
+        "responses" : {
+          "200" : {
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/HoldResponse"
+                }
+              }
+            },
+            "description" : "You already hold exactly these seats; that hold is returned"
+          },
+          "201" : {
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/HoldResponse"
+                }
+              }
+            },
+            "description" : "Held; Location is /holds/{holdId}"
+          },
+          "400" : {
+            "content" : {
+              "application/problem+json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description" : "VALIDATION_FAILED"
+          },
+          "401" : {
+            "content" : {
+              "application/problem+json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description" : "UNAUTHENTICATED"
+          },
+          "404" : {
+            "content" : {
+              "application/problem+json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description" : "EVENT_NOT_FOUND"
+          },
+          "409" : {
+            "content" : {
+              "application/problem+json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description" : "SEAT_TAKEN, LIMIT_EXCEEDED, SALE_NOT_OPEN"
+          },
+          "500" : {
+            "content" : {
+              "application/problem+json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description" : "INTERNAL_ERROR"
+          }
+        },
+        "tags" : [ "holds" ]
+      }
+    },
+    "/holds/{id}" : {
+      "delete" : {
+        "operationId" : "cancel",
+        "parameters" : [ {
+          "in" : "path",
+          "name" : "id",
+          "required" : true,
+          "schema" : {
+            "type" : "string",
+            "format" : "uuid"
+          }
+        } ],
+        "responses" : {
+          "204" : {
+            "description" : "Released, or had already been released or expired"
+          },
+          "400" : {
+            "content" : {
+              "application/problem+json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description" : "VALIDATION_FAILED"
+          },
+          "401" : {
+            "content" : {
+              "application/problem+json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description" : "UNAUTHENTICATED"
+          },
+          "404" : {
+            "content" : {
+              "application/problem+json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description" : "HOLD_NOT_FOUND"
+          },
+          "409" : {
+            "content" : {
+              "application/problem+json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description" : "HOLD_CONVERTED"
+          },
+          "500" : {
+            "content" : {
+              "application/problem+json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description" : "INTERNAL_ERROR"
+          }
+        },
+        "tags" : [ "holds" ]
+      }
     }
   },
   "components" : {
@@ -425,6 +592,50 @@
         },
         "required" : [ "field", "message" ]
       },
+      "HoldResponse" : {
+        "type" : "object",
+        "properties" : {
+          "eventId" : {
+            "type" : "string",
+            "format" : "uuid"
+          },
+          "expiresAt" : {
+            "type" : "string",
+            "format" : "date-time"
+          },
+          "holdId" : {
+            "type" : "string",
+            "format" : "uuid"
+          },
+          "seatIds" : {
+            "type" : "array",
+            "items" : {
+              "type" : "string",
+              "format" : "uuid"
+            }
+          },
+          "serverTime" : {
+            "type" : "string",
+            "format" : "date-time"
+          }
+        },
+        "required" : [ "eventId", "expiresAt", "holdId", "seatIds", "serverTime" ]
+      },
+      "HoldSeatsRequest" : {
+        "type" : "object",
+        "properties" : {
+          "seatIds" : {
+            "type" : "array",
+            "items" : {
+              "type" : "string",
+              "format" : "uuid"
+            },
+            "maxItems" : 20,
+            "minItems" : 1
+          }
+        },
+        "required" : [ "seatIds" ]
+      },
       "LoginRequest" : {
         "type" : "object",
         "properties" : {
@@ -464,7 +675,7 @@
           "code" : {
             "type" : "string",
             "description" : "Stable error code (PRD section 10). Branch on this, never on title or detail.",
-            "enum" : [ "VALIDATION_FAILED", "UNAUTHENTICATED", "INVALID_CREDENTIALS", "INVALID_REFRESH_TOKEN", "FORBIDDEN", "EMAIL_TAKEN", "EVENT_NOT_FOUND", "NOT_FOUND", "METHOD_NOT_ALLOWED", "UNSUPPORTED_MEDIA_TYPE", "REQUEST_FAILED", "INTERNAL_ERROR" ]
+            "enum" : [ "VALIDATION_FAILED", "UNAUTHENTICATED", "INVALID_CREDENTIALS", "INVALID_REFRESH_TOKEN", "FORBIDDEN", "EMAIL_TAKEN", "EVENT_NOT_FOUND", "NOT_FOUND", "METHOD_NOT_ALLOWED", "UNSUPPORTED_MEDIA_TYPE", "SEAT_TAKEN", "LIMIT_EXCEEDED", "SALE_NOT_OPEN", "HOLD_NOT_FOUND", "HOLD_CONVERTED", "REQUEST_FAILED", "INTERNAL_ERROR" ]
           },
           "detail" : {
             "type" : "string",
@@ -485,9 +696,27 @@
             "type" : "string",
             "description" : "The request path."
           },
+          "limit" : {
+            "type" : "integer",
+            "format" : "int32",
+            "description" : "LIMIT_EXCEEDED only: the event's per-user ticket limit."
+          },
+          "seatIds" : {
+            "type" : "array",
+            "description" : "SEAT_TAKEN and LIMIT_EXCEEDED: the seats that caused the rejection.",
+            "items" : {
+              "type" : "string",
+              "format" : "uuid"
+            }
+          },
           "status" : {
             "type" : "integer",
             "format" : "int32"
+          },
+          "takenAgoMs" : {
+            "type" : "integer",
+            "format" : "int64",
+            "description" : "SEAT_TAKEN only: milliseconds since the most recently taken of seatIds was taken."
           },
           "title" : {
             "type" : "string"

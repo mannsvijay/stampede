@@ -62,6 +62,14 @@ stampede:
     access-token-ttl: 15m
     refresh-token-ttl: 7d
     refresh-family-max-age: 30d
+  holds:
+    sweeper:
+      # Expires holds past their time (D-016). Every instance sweeps; duplicates are harmless.
+      enabled: true
+      # Delay between the end of one sweep and the start of the next (ISO-8601 duration).
+      interval: PT5S
+      # Expired holds read per page; a sweep pages past holds it could not expire (D-016).
+      batch-size: 500
   # Read only under the bootstrap-admin profile (AdminBootstrapRunner).
   bootstrap-admin:
     email: ${STAMPEDE_ADMIN_EMAIL:}

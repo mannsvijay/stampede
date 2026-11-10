@@ -6,7 +6,7 @@ import java.util.UUID;
 import org.springframework.jdbc.core.simple.JdbcClient;
 
 /**
- * Hold-level invariants as SQL (M1.3). Each query returns the rows that BREAK the rule, so an empty
+ * Hold-level invariants as SQL (M1.3; I8 added in M1.4). Each query returns the rows that BREAK the rule, so an empty
  * result means the rule holds. Written to be taken over by the invariant checker in M1.7.
  */
 final class HoldInvariants {
@@ -44,15 +44,40 @@ final class HoldInvariants {
               AND (es.status IS DISTINCT FROM 'HELD' OR es.hold_id IS DISTINCT FROM h.id)
             """;
 
+    /**
+     * I8: each user's allowance counts exactly the seats of their ACTIVE holds, and never exceeds the
+     * event's per_user_limit (D-005). A user with active holds but no allowance row is a violation;
+     * a row at 0 without holds is fine. From M1.5 the seats of the user's active orders count too.
+     */
+    static final String ALLOWANCE_DRIFT = """
+            WITH ev AS (SELECT id, per_user_limit FROM events WHERE id = ?::uuid),
+                 held AS (SELECT h.user_id, sum(cardinality(h.seat_ids)) AS seats
+                          FROM holds h JOIN ev ON h.event_id = ev.id
+                          WHERE h.status = 'ACTIVE'
+                          GROUP BY h.user_id),
+                 counted AS (SELECT a.user_id, a.used
+                             FROM user_event_allowance a JOIN ev ON a.event_id = ev.id)
+            SELECT 'user ' || coalesce(c.user_id, h.user_id)::text || ' has used = '
+                   || coalesce(c.used::text, 'no row') || ' but ' || coalesce(h.seats, 0)
+                   || ' seats in active holds (limit ' || ev.per_user_limit || ')'
+            FROM counted c
+            FULL JOIN held h ON h.user_id = c.user_id
+            CROSS JOIN ev
+            WHERE c.user_id IS NULL
+               OR c.used <> coalesce(h.seats, 0)
+               OR c.used > ev.per_user_limit
+            """;
+
     private HoldInvariants() {
     }
 
-    /** Runs I1 to I3 for one event and returns every violation, prefixed with the rule's name. */
+    /** Runs I1 to I3 and I8 for one event and returns every violation, prefixed with the rule's name. */
     static List<String> check(JdbcClient jdbc, UUID eventId) {
         List<String> violations = new ArrayList<>();
         violations.addAll(run(jdbc, eventId, "I1 seat in two active holds", SEAT_IN_TWO_ACTIVE_HOLDS));
         violations.addAll(run(jdbc, eventId, "I2 held seat without its active hold", HELD_SEAT_WITHOUT_ITS_ACTIVE_HOLD));
         violations.addAll(run(jdbc, eventId, "I3 active hold not owning its seat", ACTIVE_HOLD_NOT_OWNING_ITS_SEAT));
+        violations.addAll(run(jdbc, eventId, "I8 allowance drift", ALLOWANCE_DRIFT));
         return violations;
     }
 

@@ -68,6 +68,7 @@ class PessimisticInventoryStrategyTest {
     static final ExecutorService THREADS = Executors.newFixedThreadPool(2);
 
     static final UUID USER = UUID.fromString("00000000-0000-4000-8000-0000000000a1");
+    static final UUID OTHER_USER = UUID.fromString("00000000-0000-4000-8000-0000000000a2");
     static final UUID VENUE = UUID.fromString("00000000-0000-4000-8000-000000000001");
     static final UUID SECTION = UUID.fromString("00000000-0000-4000-8000-000000000002");
     static final UUID EVENT_A = UUID.fromString("00000000-0000-4000-8000-00000000000a");
@@ -106,6 +107,8 @@ class PessimisticInventoryStrategyTest {
         jdbc.sql("TRUNCATE users, venues CASCADE").update();
         jdbc.sql("INSERT INTO users (id, email, password_hash) VALUES (?, 'buyer@example.test', 'x')")
                 .param(USER).update();
+        jdbc.sql("INSERT INTO users (id, email, password_hash) VALUES (?, 'other@example.test', 'x')")
+                .param(OTHER_USER).update();
         jdbc.sql("INSERT INTO venues (id, name, layout_json) VALUES (?, 'Test venue', '{}')").param(VENUE).update();
         jdbc.sql("INSERT INTO sections (id, venue_id, code, default_tier) VALUES (?, ?, 'A', 'GOLD')")
                 .params(SECTION, VENUE).update();
@@ -176,7 +179,7 @@ class PessimisticInventoryStrategyTest {
 
         HoldOutcome outcome = strategy.hold(request(holdId, EVENT_A, SEAT_1, SEAT_2, SEAT_3));
 
-        assertThat(outcome).isEqualTo(new Rejected(HoldRejection.SEAT_TAKEN, List.of(SEAT_2)));
+        assertSeatTaken(outcome, SEAT_2);
         assertThat(seat(EVENT_A, SEAT_1)).isEqualTo(SeatRow.FRESH);
         assertThat(seat(EVENT_A, SEAT_3)).isEqualTo(SeatRow.FRESH);
         assertThat(seat(EVENT_A, SEAT_2)).as("the other hold keeps its seat")
@@ -191,7 +194,7 @@ class PessimisticInventoryStrategyTest {
 
         HoldOutcome outcome = strategy.hold(request(holdId, EVENT_A, SEAT_4, SEAT_1));
 
-        assertThat(outcome).isEqualTo(new Rejected(HoldRejection.SEAT_TAKEN, List.of(SEAT_4)));
+        assertSeatTaken(outcome, SEAT_4);
         assertThat(seat(EVENT_A, SEAT_4)).isEqualTo(new SeatRow(SeatStatus.SOLD, null, orderId, 1));
         assertThat(seat(EVENT_A, SEAT_1)).isEqualTo(SeatRow.FRESH);
         assertThat(hold(holdId)).isEmpty();
@@ -359,6 +362,250 @@ class PessimisticInventoryStrategyTest {
         assertThat(hold(holdId).orElseThrow().status()).isEqualTo("ACTIVE");
     }
 
+    // --- takenAgoMs (D-016) ----------------------------------------------------------------------
+
+    @Test
+    void takenAgoMsComesFromTheOwningHoldsCreatedAt() {
+        UUID otherHold = UUID.randomUUID();
+        holdDirectly(otherHold, EVENT_A, SEAT_2);
+        jdbc.sql("UPDATE holds SET created_at = now() - interval '90 seconds' WHERE id = ?").param(otherHold).update();
+
+        Rejected rejected = (Rejected) strategy.hold(request(UUID.randomUUID(), EVENT_A, SEAT_2));
+
+        assertThat(rejected.takenAgoMs()).isBetween(90_000L, 100_000L);
+    }
+
+    @Test
+    void takenAgoMsOfASoldSeatComesFromItsOrder() {
+        // A SOLD seat no longer points to its hold (D-014), so the order's created_at is used.
+        UUID orderId = sellDirectly(EVENT_A, SEAT_4);
+        jdbc.sql("UPDATE orders SET created_at = now() - interval '2 minutes' WHERE id = ?").param(orderId).update();
+
+        Rejected rejected = (Rejected) strategy.hold(request(UUID.randomUUID(), EVENT_A, SEAT_4));
+
+        assertThat(rejected.takenAgoMs()).isBetween(120_000L, 130_000L);
+    }
+
+    @Test
+    void takenAgoMsIsTheMostRecentlyTakenSeat() {
+        UUID oldHold = UUID.randomUUID();
+        holdDirectly(oldHold, EVENT_A, SEAT_1);
+        jdbc.sql("UPDATE holds SET created_at = now() - interval '4 minutes' WHERE id = ?").param(oldHold).update();
+        UUID newHold = UUID.randomUUID();
+        holdDirectly(newHold, EVENT_A, SEAT_2);
+        jdbc.sql("UPDATE holds SET created_at = now() - interval '10 seconds' WHERE id = ?").param(newHold).update();
+
+        Rejected rejected = (Rejected) strategy.hold(request(UUID.randomUUID(), EVENT_A, SEAT_1, SEAT_2));
+
+        assertThat(rejected.seatIds()).containsExactlyInAnyOrder(SEAT_1, SEAT_2);
+        assertThat(rejected.takenAgoMs()).isBetween(10_000L, 20_000L);
+    }
+
+    @Test
+    void onlySeatTakenCarriesTakenAgoMs() {
+        assertThatThrownBy(() -> new Rejected(HoldRejection.SEAT_TAKEN, List.of(SEAT_1), null))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new Rejected(HoldRejection.LIMIT_EXCEEDED, List.of(SEAT_1), 5L))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    // --- per-user cap (D-005, M1.4) ------------------------------------------------------------
+
+    @Test
+    void holdAddsItsSeatsToTheUsersAllowance() {
+        assertThat(used(EVENT_A)).as("no row before the first hold").isNull();
+
+        strategy.hold(request(UUID.randomUUID(), EVENT_A, SEAT_1, SEAT_2));
+        assertThat(used(EVENT_A)).isEqualTo(2);
+
+        strategy.hold(request(UUID.randomUUID(), EVENT_A, SEAT_3));
+        assertThat(used(EVENT_A)).isEqualTo(3);
+        assertThat(usedBy(OTHER_USER, EVENT_A)).as("another user's allowance").isNull();
+    }
+
+    @Test
+    void holdUpToExactlyTheLimitSucceeds() {
+        // per_user_limit is 4 in the fixture
+        assertThat(strategy.hold(request(UUID.randomUUID(), EVENT_A, SEAT_1, SEAT_2, SEAT_3, SEAT_4)))
+                .isInstanceOf(Held.class);
+        assertThat(used(EVENT_A)).isEqualTo(4);
+    }
+
+    @Test
+    void holdOverTheLimitIsRejectedAndWritesNothing() {
+        strategy.hold(request(UUID.randomUUID(), EVENT_A, SEAT_1, SEAT_2, SEAT_3));
+        jdbc.sql("UPDATE events SET per_user_limit = 3 WHERE id = ?").param(EVENT_A).update();
+        UUID holdId = UUID.randomUUID();
+
+        HoldOutcome outcome = strategy.hold(request(holdId, EVENT_A, SEAT_4));
+
+        assertThat(outcome).isEqualTo(new Rejected(HoldRejection.LIMIT_EXCEEDED, List.of(SEAT_4)));
+        assertThat(used(EVENT_A)).isEqualTo(3);
+        assertThat(seat(EVENT_A, SEAT_4)).isEqualTo(SeatRow.FRESH);
+        assertThat(hold(holdId)).isEmpty();
+    }
+
+    @Test
+    void firstHoldLargerThanTheLimitIsRejectedWithoutCreatingAnAllowanceRow() {
+        jdbc.sql("UPDATE events SET per_user_limit = 2 WHERE id = ?").param(EVENT_A).update();
+        UUID holdId = UUID.randomUUID();
+
+        HoldOutcome outcome = strategy.hold(request(holdId, EVENT_A, SEAT_1, SEAT_2, SEAT_3));
+
+        assertThat(outcome).isEqualTo(new Rejected(HoldRejection.LIMIT_EXCEEDED, List.of(SEAT_1, SEAT_2, SEAT_3)));
+        assertThat(used(EVENT_A)).isNull();
+        assertThat(seat(EVENT_A, SEAT_1)).isEqualTo(SeatRow.FRESH);
+        assertThat(hold(holdId)).isEmpty();
+    }
+
+    @Test
+    void theCapIsPerUserAndPerEvent() {
+        strategy.hold(request(UUID.randomUUID(), EVENT_A, SEAT_1, SEAT_2, SEAT_3, SEAT_4));
+
+        assertThat(strategy.hold(request(UUID.randomUUID(), EVENT_B, SEAT_B))).as("same user, other event")
+                .isInstanceOf(Held.class);
+        assertThat(used(EVENT_A)).isEqualTo(4);
+        assertThat(used(EVENT_B)).isEqualTo(1);
+    }
+
+    @Test
+    void seatTakenWinsOverLimitExceeded() {
+        // The cap is only checked once every seat could be held (step 4b comes after step 4).
+        UUID holdId = UUID.randomUUID();
+        holdDirectly(holdId, EVENT_A, SEAT_1, SEAT_2, SEAT_3);
+        jdbc.sql("UPDATE events SET per_user_limit = 3 WHERE id = ?").param(EVENT_A).update();  // USER is at it
+
+        assertSeatTaken(strategy.hold(request(UUID.randomUUID(), EVENT_A, SEAT_2)), SEAT_2);
+        assertThat(strategy.hold(request(UUID.randomUUID(), EVENT_A, SEAT_4)))
+                .isEqualTo(new Rejected(HoldRejection.LIMIT_EXCEEDED, List.of(SEAT_4)));
+    }
+
+    @Test
+    void releaseExpiryAndSagaFailureGiveTheSeatsBack() {
+        UUID released = UUID.randomUUID();
+        holdDirectly(released, EVENT_A, SEAT_1);
+        UUID expired = UUID.randomUUID();
+        holdDirectlyExpired(expired, EVENT_A, SEAT_2, SEAT_3);
+        UUID failed = UUID.randomUUID();
+        holdDirectly(failed, EVENT_A, SEAT_4);
+        assertThat(used(EVENT_A)).isEqualTo(4);
+
+        strategy.release(EVENT_A, released, ReleaseReason.RELEASED);
+        assertThat(used(EVENT_A)).isEqualTo(3);
+        strategy.release(EVENT_A, expired, ReleaseReason.EXPIRED);
+        assertThat(used(EVENT_A)).isEqualTo(1);
+        strategy.release(EVENT_A, failed, ReleaseReason.SAGA_FAILED);
+        assertThat(used(EVENT_A)).isEqualTo(0);
+
+        // and the freed allowance can be used again
+        assertThat(strategy.hold(request(UUID.randomUUID(), EVENT_A, SEAT_1, SEAT_2, SEAT_3, SEAT_4)))
+                .isInstanceOf(Held.class);
+    }
+
+    @Test
+    void releaseThatChangesNothingGivesNothingBack() {
+        UUID holdId = UUID.randomUUID();
+        holdDirectly(holdId, EVENT_A, SEAT_1, SEAT_2);
+        strategy.release(EVENT_A, holdId, ReleaseReason.RELEASED);
+
+        assertThat(strategy.release(EVENT_A, holdId, ReleaseReason.RELEASED)).isEqualTo(new NotActive("RELEASED"));
+        assertThat(used(EVENT_A)).as("only the first release decrements").isEqualTo(0);
+
+        UUID notExpired = UUID.randomUUID();
+        holdDirectly(notExpired, EVENT_A, SEAT_3);
+        assertThat(strategy.release(EVENT_A, notExpired, ReleaseReason.EXPIRED)).isInstanceOf(NotExpired.class);
+        assertThat(used(EVENT_A)).isEqualTo(1);
+    }
+
+    @Test
+    void releaseWithADriftedAllowanceThrowsAndRollsBack() {
+        // used is lower than the hold's seats: decrementing would break ck_..._used_nonnegative.
+        UUID holdId = UUID.randomUUID();
+        holdDirectly(holdId, EVENT_A, SEAT_1, SEAT_2);
+        jdbc.sql("UPDATE user_event_allowance SET used = 1 WHERE event_id = ? AND user_id = ?")
+                .params(EVENT_A, USER).update();
+
+        assertThatThrownBy(() -> strategy.release(EVENT_A, holdId, ReleaseReason.RELEASED))
+                .hasStackTraceContaining("ck_user_event_allowance_used_nonnegative");
+
+        assertThat(hold(holdId).orElseThrow().status()).isEqualTo("ACTIVE");
+        assertThat(seat(EVENT_A, SEAT_1)).isEqualTo(new SeatRow(SeatStatus.HELD, holdId, null, 1));
+        assertThat(used(EVENT_A)).isEqualTo(1);
+    }
+
+    @Test
+    void releaseWithoutAnAllowanceRowThrowsAndRollsBack() {
+        UUID holdId = UUID.randomUUID();
+        holdDirectly(holdId, EVENT_A, SEAT_1);
+        jdbc.sql("DELETE FROM user_event_allowance WHERE event_id = ? AND user_id = ?").params(EVENT_A, USER).update();
+
+        assertThatThrownBy(() -> strategy.release(EVENT_A, holdId, ReleaseReason.RELEASED))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("No allowance row");
+
+        assertThat(hold(holdId).orElseThrow().status()).isEqualTo("ACTIVE");
+        assertThat(seat(EVENT_A, SEAT_1)).isEqualTo(new SeatRow(SeatStatus.HELD, holdId, null, 1));
+    }
+
+    @Test
+    void holdLocksTheAllowanceRowAfterTheSeats() throws Exception {
+        // D-015 lock order: seats, then allowance. Another session locks USER's allowance row; hold()
+        // must block on it while ALREADY owning both seat locks. If it locked the allowance first, it
+        // would block before taking any seat, and the NOWAIT probes below would succeed.
+        holdDirectly(UUID.randomUUID(), EVENT_A, SEAT_4);  // gives USER an allowance row to lock
+        try (Connection blocker = openTransaction(); Connection probe = openTransaction()) {
+            exec(blocker, "SELECT 1 FROM user_event_allowance WHERE event_id = ? AND user_id = ? FOR UPDATE",
+                    EVENT_A, USER);
+
+            Future<HoldOutcome> pending = THREADS.submit(
+                    () -> strategy.hold(request(UUID.randomUUID(), EVENT_A, SEAT_1, SEAT_2)));
+            waitUntilOneSessionIsBlockedOnALock();
+
+            for (UUID seat : List.of(SEAT_1, SEAT_2)) {
+                assertThatThrownBy(() -> exec(probe,
+                        "SELECT 1 FROM event_seats WHERE event_id = ? AND seat_id = ? FOR UPDATE NOWAIT", EVENT_A, seat))
+                        .as("seat %s is already locked by hold()", seat)
+                        .hasMessageContaining("could not obtain lock");
+                probe.rollback();
+            }
+            blocker.rollback();
+
+            assertThat(pending.get(30, TimeUnit.SECONDS)).isInstanceOf(Held.class);
+        }
+        assertThat(used(EVENT_A)).isEqualTo(3);
+    }
+
+    @Test
+    void releaseLocksTheAllowanceRowAfterTheHoldAndItsSeats() throws Exception {
+        // Same proof for release: hold row, seats, then allowance.
+        UUID holdId = UUID.randomUUID();
+        holdDirectly(holdId, EVENT_A, SEAT_1, SEAT_2);
+        try (Connection blocker = openTransaction(); Connection probe = openTransaction()) {
+            exec(blocker, "SELECT 1 FROM user_event_allowance WHERE event_id = ? AND user_id = ? FOR UPDATE",
+                    EVENT_A, USER);
+
+            Future<ReleaseOutcome> pending = THREADS.submit(
+                    () -> strategy.release(EVENT_A, holdId, ReleaseReason.RELEASED));
+            waitUntilOneSessionIsBlockedOnALock();
+
+            assertThatThrownBy(() -> exec(probe, "SELECT 1 FROM holds WHERE id = ? FOR UPDATE NOWAIT", holdId))
+                    .as("the hold row is already locked by release()")
+                    .hasMessageContaining("could not obtain lock");
+            probe.rollback();
+            for (UUID seat : List.of(SEAT_1, SEAT_2)) {
+                assertThatThrownBy(() -> exec(probe,
+                        "SELECT 1 FROM event_seats WHERE event_id = ? AND seat_id = ? FOR UPDATE NOWAIT", EVENT_A, seat))
+                        .as("seat %s is already locked by release()", seat)
+                        .hasMessageContaining("could not obtain lock");
+                probe.rollback();
+            }
+            blocker.rollback();
+
+            assertThat(pending.get(30, TimeUnit.SECONDS)).isInstanceOf(Released.class);
+        }
+        assertThat(used(EVENT_A)).isEqualTo(0);
+    }
+
     // --- races (small; the 1000-run harness is M1.3) -----------------------------------------
 
     @Test
@@ -372,7 +619,8 @@ class PessimisticInventoryStrategyTest {
 
         List<Held> winners = outcomes.stream().filter(Held.class::isInstance).map(Held.class::cast).toList();
         assertThat(winners).hasSize(1);
-        assertThat(outcomes).contains(new Rejected(HoldRejection.SEAT_TAKEN, List.of(SEAT_1)));
+        assertThat(outcomes).filteredOn(Rejected.class::isInstance).singleElement()
+                .satisfies(rejected -> assertSeatTaken((HoldOutcome) rejected, SEAT_1));
         UUID winner = winners.get(0).holdId();
         assertThat(seat(EVENT_A, SEAT_1)).isEqualTo(new SeatRow(SeatStatus.HELD, winner, null, 1));
         assertThat(jdbc.sql("SELECT count(*) FROM holds").query(Long.class).single()).isEqualTo(1);
@@ -399,7 +647,7 @@ class PessimisticInventoryStrategyTest {
                     + "WHERE event_id = ? AND seat_id = ?", otherHold, EVENT_A, SEAT_1);
             other.commit();
 
-            assertThat(pending.get(30, TimeUnit.SECONDS)).isEqualTo(new Rejected(HoldRejection.SEAT_TAKEN, List.of(SEAT_1)));
+            assertSeatTaken(pending.get(30, TimeUnit.SECONDS), SEAT_1);
         }
         assertThat(seat(EVENT_A, SEAT_1)).isEqualTo(new SeatRow(SeatStatus.HELD, otherHold, null, 1));
     }
@@ -468,7 +716,30 @@ class PessimisticInventoryStrategyTest {
     // --- helpers ---------------------------------------------------------------------------------
 
     static HoldRequest request(UUID holdId, UUID eventId, UUID... seats) {
-        return new HoldRequest(holdId, eventId, USER, List.of(seats), FIVE_MINUTES);
+        return requestBy(USER, holdId, eventId, seats);
+    }
+
+    static HoldRequest requestBy(UUID user, UUID holdId, UUID eventId, UUID... seats) {
+        return new HoldRequest(holdId, eventId, user, List.of(seats), FIVE_MINUTES);
+    }
+
+    /** SEAT_TAKEN for exactly these seats, with a takenAgoMs (D-016) that is set and not negative. */
+    private static void assertSeatTaken(HoldOutcome outcome, UUID... seats) {
+        assertThat(outcome).isInstanceOfSatisfying(Rejected.class, rejected -> {
+            assertThat(rejected.reason()).isEqualTo(HoldRejection.SEAT_TAKEN);
+            assertThat(rejected.seatIds()).containsExactly(seats);
+            assertThat(rejected.takenAgoMs()).isNotNull().isNotNegative();
+        });
+    }
+
+    /** USER's allowance in this event, or null when USER has no row yet. */
+    private Integer used(UUID eventId) {
+        return usedBy(USER, eventId);
+    }
+
+    private Integer usedBy(UUID user, UUID eventId) {
+        return jdbc.sql("SELECT used FROM user_event_allowance WHERE event_id = ? AND user_id = ?")
+                .params(eventId, user).query(Integer.class).optional().orElse(null);
     }
 
     /**
@@ -532,12 +803,19 @@ class PessimisticInventoryStrategyTest {
                 """).param(holdId).update();
     }
 
-    /** Test setup without the strategy: an ACTIVE hold that owns these seats (version 1). */
+    /**
+     * Test setup without the strategy: an ACTIVE hold of USER that owns these seats (version 1), with
+     * its seats counted in USER's allowance, as the strategy would leave it (D-005).
+     */
     private void holdDirectly(UUID holdId, UUID eventId, UUID... seats) {
         jdbc.sql("""
                 INSERT INTO holds (id, event_id, user_id, seat_ids, expires_at, status)
                 VALUES (?, ?, ?, ?, now() + interval '5 minutes', 'ACTIVE')
                 """).params(holdId, eventId, USER, seats).update();
+        jdbc.sql("""
+                INSERT INTO user_event_allowance (event_id, user_id, used) VALUES (?, ?, ?)
+                ON CONFLICT (event_id, user_id) DO UPDATE SET used = user_event_allowance.used + EXCLUDED.used
+                """).params(eventId, USER, seats.length).update();
         for (UUID seat : seats) {
             jdbc.sql("""
                     UPDATE event_seats SET status = 'HELD', hold_id = ?, version = version + 1

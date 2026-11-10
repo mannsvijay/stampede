@@ -26,7 +26,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
  * browser client would: JSON bodies, the refresh token as a cookie, and the X-Requested-With header
  * on refresh and logout. Cookies are handled by hand so each test controls exactly what it sends.
  */
-@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
+        // No background expiry while HTTP tests set up holds; HoldExpirySweeperTest drives the sweeper.
+        properties = "stampede.holds.sweeper.enabled=false")
 @Import(TestcontainersConfiguration.class)
 public abstract class ApiTestSupport {
 

@@ -18,6 +18,16 @@ public enum ErrorCode {
     NOT_FOUND(HttpStatus.NOT_FOUND, "Not found"),
     METHOD_NOT_ALLOWED(HttpStatus.METHOD_NOT_ALLOWED, "Method not allowed"),
     UNSUPPORTED_MEDIA_TYPE(HttpStatus.UNSUPPORTED_MEDIA_TYPE, "Unsupported media type"),
+    /** A requested seat is HELD or SOLD already. Body: {@code seatIds}, {@code takenAgoMs} (M1.4). */
+    SEAT_TAKEN(HttpStatus.CONFLICT, "Seat taken"),
+    /** The hold would take the user over the event's per-user limit. Body: {@code limit} (M1.4). */
+    LIMIT_EXCEEDED(HttpStatus.CONFLICT, "Ticket limit exceeded"),
+    /** The event's sale hasn't opened (before its drop) or isn't running (M1.4). */
+    SALE_NOT_OPEN(HttpStatus.CONFLICT, "Sale not open"),
+    /** No hold with this id belongs to the caller; someone else's hold looks the same (M1.4). */
+    HOLD_NOT_FOUND(HttpStatus.NOT_FOUND, "Hold not found"),
+    /** The hold became an order, so it can no longer be released (M1.4). */
+    HOLD_CONVERTED(HttpStatus.CONFLICT, "Hold converted to an order"),
     /**
      * Any other client error the framework rejects (e.g. 406). The response keeps the framework's
      * status; {@link #status()} is only a nominal default.

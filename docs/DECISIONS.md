@@ -98,6 +98,9 @@ Write these yourself, in your own words. Each one is an interview answer you've 
 - **How I'd know it was wrong:** The concurrency test shows a user ending up over the cap. Or the
   invariant check finds `used` drifting from the user's real active holds and orders, probably
   because some release path forgot to decrement.
+- **Implemented in M1.4 (D-016):** one upsert inside the strategy's transaction (it also creates the
+  row on a user's first hold); every release reason decrements; harness invariant I8 checks the
+  counter against active holds after every round.
 
 ### D-006 Name-based UUIDs for seed data (an exception to D-002)
 - **Date:** 2026-11-08
@@ -635,3 +638,86 @@ Write these yourself, in your own words. Each one is an interview answer you've 
   rejection the interface can't express (I'd add `CONTENDED` then); or under a drop, buyers queueing
   on one hot seat's lock use up the connection pool and stall other events (then add a bounded
   `lock_timeout` returning a rejection; measured in M2.4).
+
+### D-016 Holds API, per-user cap in the strategy, expiry sweeper (DRAFT)
+- **Date:** 2026-11-10
+- **Context:** M1.4 puts holds behind HTTP: create (all-or-nothing, with the D-005 cap), cancel, and
+  expiry after five minutes (PRD 6.3). PRD 10 names SEAT_TAKEN (with `takenAgoMs`), LIMIT_EXCEEDED
+  and HOLD_EXPIRED but gives no statuses for most of them, the schema records no "taken at" time on
+  a seat, D-015 gives every attempt a new hold id (so a retried POST can't be recognised by id), and
+  the app will run as several instances (M6.1), each of which could sweep.
+- **Options considered:**
+  - `takenAgoMs`: a new `event_seats.status_changed_at` column; the owner's `created_at` read in the
+    strategy's transaction; the same read after the transaction; null until M5.3.
+  - Sweeper with several instances: every instance sweeps and duplicates are tolerated;
+    `FOR UPDATE SKIP LOCKED` claims; ShedLock (new dependency and table); a Postgres advisory lock.
+    Interval 1 s, 5 s or 30 s.
+  - Retried POST after a timeout: accept SEAT_TAKEN; return the caller's existing hold if it covers
+    exactly the requested seats; an `Idempotency-Key` now (pulled forward from M3.1).
+  - Statuses: HOLD_EXPIRED 410 / 409 / 422; someone else's hold 404 / 403; own released or expired
+    hold 204 / 410; own converted hold 409 / 404.
+  - Where the cap is checked: in the hold service before the strategy; inside the strategy's
+    transaction.
+- **Decision:**
+  - The cap lives **inside the strategy's transaction** (CLAUDE.md: enforced in every strategy).
+    Step 4b, after the seat decision and before the hold insert, is one upsert:
+    `INSERT … SELECT … WHERE :n <= per_user_limit ON CONFLICT DO UPDATE SET used = used + n WHERE
+    used + n <= per_user_limit`. Zero rows = `Rejected(LIMIT_EXCEEDED)` with nothing written.
+    Precedence UNKNOWN_SEAT > SEAT_TAKEN > LIMIT_EXCEEDED. The limit is read in that same statement.
+  - Every release reason (RELEASED, EXPIRED, SAGA_FAILED) gives the seats back as step 11b, after
+    the seat writes (lock order hold, seats, allowance; D-015). CONVERTED never reaches release, so
+    bought seats keep counting. A missing row or a decrement below zero throws and rolls back.
+  - `takenAgoMs`: the most recent owner's `created_at` (the hold if HELD, the order if SOLD),
+    computed in SQL against `clock_timestamp()` while the seats are still locked. `Rejected` gains a
+    `takenAgoMs` field, set exactly for SEAT_TAKEN.
+  - Sweeper: **every instance sweeps**, fixed delay 5 s, each expired hold released in its own
+    transaction through `release(…, EXPIRED)`. Candidates are read in pages of 500, oldest first,
+    with keyset paging on `(expires_at, id)`, so holds whose release keeps failing (drift, which
+    release refuses to touch) can't fill every page and starve healthy holds behind them (found by
+    the correctness review). Neither the sweeper nor the hold service is `@Transactional`.
+    `stampede.holds.sweeper.enabled/interval/batch-size`. SKIP LOCKED is the noted optimisation if
+    duplicate work ever shows up (M6.1).
+  - Retry: on SEAT_TAKEN, if the caller has an ACTIVE, unexpired hold on **exactly** the requested
+    seats (array containment both ways), return it with 200 instead. M3.1 considers an
+    `Idempotency-Key` for this endpoint too.
+  - Statuses and codes: SEAT_TAKEN, LIMIT_EXCEEDED (with `limit`), SALE_NOT_OPEN and HOLD_CONVERTED
+    are 409; HOLD_NOT_FOUND 404, for unknown ids and someone else's hold alike (no IDOR, no
+    existence probe); DELETE of your own RELEASED or EXPIRED hold is 204 (idempotent); unknown seat
+    ids are 400 VALIDATION_FAILED with a `seatIds` field error. HOLD_EXPIRED is **410 Gone**, added
+    to `ErrorCode` in M1.5, the first task that returns it.
+  - Sale window: holds only when `drop_at <= now()` and the event is SCHEDULED or LIVE; otherwise
+    409 SALE_NOT_OPEN; DRAFT is 404 like GET /events/{id}. Checked by the service before the
+    strategy, unlocked. Dev-only profile `demo-open-sale` sets the demo drop to one minute ago (and
+    the start to its seed offset from now) so the demo can be held locally and by the M1.8 seat map.
+  - Admission (M4.2): the controller will require an `X-Admission-Token` header verified through
+    `waitingroom::api` (already an allowed dependency) before calling the service; 403 NOT_ADMITTED.
+    Not in the spec until it is enforced.
+- **Why:**
+  - A cap checked outside the strategy's transaction is the race D-005 exists to prevent. The upsert
+    also covers the user's first hold, before any counter row exists: when two first requests race,
+    Postgres makes the second wait for the first insert and then takes the DO UPDATE path with its
+    WHERE re-checked against the committed value.
+  - Reading `created_at` needs no migration and no extra write on the hot path. The read happens only
+    when a hold is rejected, under seat locks that keep the owner pointers stable, and reads (not
+    locks) the hold or order row, so the lock order is untouched. `clock_timestamp()` because the
+    owner may have committed after this transaction's `now()`.
+  - Duplicate sweeping is already proven safe (`cancelAndExpiryOfTheSameHoldTakeTurns`, and
+    `twoSweepersAtOnceExpireEveryHoldExactlyOnce`), costs no code or dependency, and the sweeper is
+    the safety net behind Redis expiry (M2.2), so 5 s of lateness is fine.
+  - Matching on the exact seat set fixes the common retry case with one read on the rejection path
+    and no table. A deliberate duplicate request also gets the existing hold, which is harmless.
+  - 404 for someone else's hold reveals nothing; 204 for an already-ended own hold matches what the
+    caller wanted (not holding the seats); a converted hold is a real conflict the client must see.
+- **Known limits (correctness review, accepted for now):** the sale-window and strategy read is
+  unlocked, so a hold can commit just after an admin pauses the event, and once M2.3 lets an event
+  change strategy, two requests could briefly use different strategies (re-check inside the
+  strategy transaction then, e.g. in the upsert's SELECT on events). `takenAgoMs` for a SOLD seat
+  is the order's creation time, not the moment it was sold. The `limit` in LIMIT_EXCEEDED comes from
+  the unlocked pre-read. I8 treats `used > per_user_limit` as drift, which is wrong if an admin ever
+  lowers a limit below existing holds. The in-flight retry (second POST waiting on the first's seat
+  locks) is correct by reasoning but not tested.
+- **How I'd know it was wrong:** I8 (allowance vs active holds) fires in the harness or the M1.7
+  checker; the sweeper logs the same failed hold every tick (a drifted counter); multi-instance runs
+  (M6.1) show lock waits on hold rows from duplicate sweeps; clients retrying with a *different*
+  seat set double-hold, which needs the M3.1 idempotency key; or the unlocked sale-window check lets
+  holds through on a paused event often enough to matter (move it into the strategy).
