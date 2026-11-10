@@ -9,7 +9,7 @@ import org.springframework.jdbc.core.simple.JdbcClient;
  * Hold-level invariants as SQL (M1.3; I8 added in M1.4). Each query returns the rows that BREAK the rule, so an empty
  * result means the rule holds. Written to be taken over by the invariant checker in M1.7.
  */
-final class HoldInvariants {
+public final class HoldInvariants {
 
     /** I1: a seat is listed by at most one ACTIVE hold. */
     static final String SEAT_IN_TWO_ACTIVE_HOLDS = """
@@ -45,21 +45,24 @@ final class HoldInvariants {
             """;
 
     /**
-     * I8: each user's allowance counts exactly the seats of their ACTIVE holds, and never exceeds the
-     * event's per_user_limit (D-005). A user with active holds but no allowance row is a violation;
-     * a row at 0 without holds is fine. From M1.5 the seats of the user's active orders count too.
+     * I8: each user's allowance counts exactly the seats of their ACTIVE holds plus their bought
+     * seats, and never exceeds the event's per_user_limit (D-005). Bought seats are counted as the
+     * seats of CONVERTED holds (M1.5, D-017): a converted hold's seats are exactly its order's seats,
+     * and counting holds (not order_items) avoids counting a seat twice while its order is PENDING and
+     * its hold still ACTIVE. A user with such holds but no allowance row is a violation; a row at 0
+     * without holds is fine.
      */
     static final String ALLOWANCE_DRIFT = """
             WITH ev AS (SELECT id, per_user_limit FROM events WHERE id = ?::uuid),
                  held AS (SELECT h.user_id, sum(cardinality(h.seat_ids)) AS seats
                           FROM holds h JOIN ev ON h.event_id = ev.id
-                          WHERE h.status = 'ACTIVE'
+                          WHERE h.status IN ('ACTIVE', 'CONVERTED')
                           GROUP BY h.user_id),
                  counted AS (SELECT a.user_id, a.used
                              FROM user_event_allowance a JOIN ev ON a.event_id = ev.id)
             SELECT 'user ' || coalesce(c.user_id, h.user_id)::text || ' has used = '
                    || coalesce(c.used::text, 'no row') || ' but ' || coalesce(h.seats, 0)
-                   || ' seats in active holds (limit ' || ev.per_user_limit || ')'
+                   || ' seats in active or converted holds (limit ' || ev.per_user_limit || ')'
             FROM counted c
             FULL JOIN held h ON h.user_id = c.user_id
             CROSS JOIN ev
@@ -72,7 +75,7 @@ final class HoldInvariants {
     }
 
     /** Runs I1 to I3 and I8 for one event and returns every violation, prefixed with the rule's name. */
-    static List<String> check(JdbcClient jdbc, UUID eventId) {
+    public static List<String> check(JdbcClient jdbc, UUID eventId) {
         List<String> violations = new ArrayList<>();
         violations.addAll(run(jdbc, eventId, "I1 seat in two active holds", SEAT_IN_TWO_ACTIVE_HOLDS));
         violations.addAll(run(jdbc, eventId, "I2 held seat without its active hold", HELD_SEAT_WITHOUT_ITS_ACTIVE_HOLD));

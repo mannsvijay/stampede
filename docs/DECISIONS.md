@@ -721,3 +721,129 @@ Write these yourself, in your own words. Each one is an interview answer you've 
   (M6.1) show lock waits on hold rows from duplicate sweeps; clients retrying with a *different*
   seat set double-hold, which needs the M3.1 idempotency key; or the unlocked sale-window check lets
   holds through on a paused event often enough to matter (move it into the strategy).
+
+### D-017 Orders from holds: synchronous checkout in saga-shaped steps (DRAFT)
+- **Date:** 2026-11-10
+- **Context:** M1.5 turns an ACTIVE hold into a PAID order with a fake payment, before the M3 saga
+  exists. `orders` had no link to its hold (M0.2 note). D-015 says strategy callers must not be
+  `@Transactional`, and the Redis strategy (M2.2) can't join a database transaction anyway. D-014
+  left open when `event_seats.order_id` is set. PRD 10 requires an `Idempotency-Key` on
+  `POST /orders`, but the idempotency mechanism is M3.1. The unique index on active `order_items`
+  means a PENDING order that is never finished blocks its seats from every other order.
+- **Options considered:**
+  - Order to hold link: `orders.hold_id` (NOT NULL, FK, UNIQUE); `holds.order_id` written by
+    inventory; no column, matching `order_items` against `holds.seat_ids`.
+  - Transactions: one per step; one booking transaction around everything; order and payment in one,
+    sale separately.
+  - `event_seats.order_id`: set only on sell; attached at order creation while the seat is HELD.
+  - Idempotency-Key: wait for M3.1 and let the unique hold link make retries safe (loser gets 200
+    with the existing order, or 409); require it now with the full PRD 6.4 semantics.
+  - Fake payment: always succeeds; always succeeds and tests swap the provider bean; a config switch.
+- **Decision:**
+  - **V3 adds `orders.hold_id uuid NOT NULL`**, `fk_orders_hold (hold_id, event_id) → holds (id,
+    event_id)` and `uq_orders_hold UNIQUE (hold_id)`. One hold has at most one order, ever (a
+    cancelled order's hold is never reused: every hold attempt has a new id, D-015).
+  - **One transaction per step**, in the order of the PRD 6.4 saga. The orchestrator
+    `booking.checkout.CheckoutService` is not `@Transactional`:
+
+    | Step | Owner (through its api) | Transaction | What it does |
+    |---|---|---|---|
+    | 0 HoldVerified | `inventory::api` `HoldService.checkoutHold` | none, unlocked read | caller's hold? ACTIVE and `expires_at > now()`? seat prices from the tiers |
+    | 1 OrderCreated | booking `OrderWriter.createPending` | booking's own | PENDING order + active items; `uq_orders_hold` decides a race |
+    | 2 Payment | `payments::api` `PaymentService.charge` | statement-level; provider call outside any transaction | payment row CREATED first, then SUCCEEDED or FAILED |
+    | 3 SeatsSold | `inventory::api` `HoldService.sellForOrder` → `InventoryStrategy.sell` | the strategy's | lock hold row, re-check ACTIVE and not expired, lock seats `ORDER BY seat_id`, `EventSeat.sell`, hold CONVERTED; allowance untouched |
+    | 4 PAID | booking `OrderWriter.markPaid` | booking's own | guarded PENDING → PAID, saga_state SEATS_SOLD; idempotent |
+
+  - **`event_seats.order_id` is set only on sell** (D-014's strict shape stays: the pointer is the
+    current owner). During PENDING the link is `orders.hold_id` plus `order_items`. A HELD seat
+    never carries an order id, so "sell overwrites another order's pointer" can't happen; `sell` of a
+    seat held by another hold is rejected by `EventSeat` (HOLD_MISMATCH).
+  - **No Idempotency-Key until M3.1 (a deliberate deviation from PRD 10).** A concurrent `POST /orders`
+    for the same hold, or a retry after a successful one, gets **200 with the existing order** as it
+    is now (possibly still PENDING), instead of a second order or charge. A retry after a checkout that
+    *failed* gets 410 HOLD_EXPIRED, because the failure released the hold (step 0 sees it RELEASED).
+  - **Fake payment:** `payments.provider.PaymentProvider` (interface), `FakePaymentProvider` always
+    succeeds. Tests use `@MockitoSpyBean` to decline or throw. A decline is 402 PAYMENT_FAILED: order
+    CANCELLED, hold released with reason SAGA_FAILED (new `HoldService.releaseForFailedCheckout`).
+  - **Status guards:** `OrderStatus` (PENDING → PAID/CANCELLED) and `PaymentStatus` (CREATED →
+    SUCCEEDED/FAILED, SUCCEEDED → REFUNDED) are checked in code, and each UPDATE repeats the expected
+    status in its WHERE clause.
+  - **Errors:** HOLD_NOT_FOUND 404 (also for someone else's hold), HOLD_EXPIRED 410, PAYMENT_FAILED
+    402, SEAT_TAKEN 409 (a seat still in another order's active items), ORDER_NOT_FOUND 404 (also for
+    someone else's order). An unexpected failure is 500 INTERNAL_ERROR after compensation.
+  - **Compensation in the orchestrator, best effort.** After step 1 every exit must leave the order
+    PAID or CANCELLED. Compensation releases the hold **first**: that release takes the hold row
+    lock, the same lock the sale takes, so its answer is definitive. If the hold is CONVERTED, the
+    sale committed and the order is finished instead of undone. Then the order is cancelled (items
+    inactive, which unblocks the seats), then the payment refunded. Each step is tried even if
+    another fails; failures are logged with the order id and attached to the original exception.
+
+    | Failure | Order ends | Seats / hold | Money | Response |
+    |---|---|---|---|---|
+    | Step 0 says not found / expired / converted | no new order | unchanged | none | 404 / 410 / 200 existing order |
+    | Step 0 or 1 throws | nothing written (step 1 rolls back) | unchanged | none | 500 |
+    | Step 1 hits `uq_orders_hold` | the other request's order | unchanged | none | 200 existing order |
+    | Step 1 hits `uq_order_items_active_seat` | no new order | unchanged (blocked by another checkout: in flight, or crashed) | none | 409 SEAT_TAKEN ("try again shortly") |
+    | Step 2 declined | CANCELLED | hold RELEASED, seats AVAILABLE, allowance back | payment FAILED | 402 (500 if the compensating release throws: the 402 promises released seats) |
+    | Step 2 throws | CANCELLED | hold RELEASED, seats AVAILABLE, allowance back | payment left CREATED: outcome unknown, for M3 reconciliation | 500 |
+    | Step 3 says hold expired / released | CANCELLED | nothing sold; an ACTIVE-but-expired hold is left to the sweeper | REFUNDED | 410 |
+    | Step 3 throws, sale rolled back | CANCELLED | hold RELEASED, seats AVAILABLE, allowance back | REFUNDED | 500 |
+    | Step 3 throws, sale had committed | PAID (finished) | SOLD, hold CONVERTED | kept | 201 |
+    | Step 4 throws, then succeeds on retry (3 attempts) | PAID | SOLD | kept | 201 |
+    | Step 4 fails every attempt | **PENDING** | SOLD to it, hold CONVERTED | kept | 500 |
+    | The compensating release throws | **PENDING** (not cancelled, not refunded) | unknown | kept | 500 |
+    | A compensating cancel or refund throws | the other steps still run; logged | | | 500 / original |
+
+    Once seats are sold, nothing is ever released or refunded: undoing a sale would refund a buyer
+    who keeps seats, or leave SOLD seats without a PAID order. The two **PENDING** rows are the safe
+    side of an unknown: the seats are not lost (or the order isn't refunded by mistake), only the
+    order status is wrong, and the M1.7 invariant checker reports it.
+  - Invariant I8 now counts the seats of ACTIVE **and CONVERTED** holds: a converted hold's seats
+    are exactly its order's, and counting holds (not order items) avoids counting a seat twice while
+    its order is PENDING and its hold still ACTIVE.
+- **Why:**
+  - A unique constraint is the simplest correct referee for "two requests, one hold": both pass the
+    check in Java, Postgres lets one row commit and fails the other. No lock taken by hand.
+  - Step-per-transaction keeps D-015 (the strategy owns its transaction and the hold → seats lock
+    order), works for Redis, never holds a transaction open across the provider call, and is exactly
+    the step list the M3 saga will persist. Step 1 must commit before step 3 anyway, because
+    `event_seats.order_id` has a foreign key to `orders`.
+  - Setting `order_id` only on sell needs no new transition, no extra inventory call and nothing new
+    in Lua.
+  - The unique hold link already makes a retry safe; building the general idempotency table here
+    would be M3.1 pulled forward.
+  - A provider swapped in tests keeps the main code free of a fail switch that the M3 chaos
+    provider replaces anyway.
+  - `sell` checks `expires_at > now()` under the hold lock, not just `status = 'ACTIVE'`: the sweeper
+    runs every 5 s, so an ACTIVE hold can be past its expiry, and status alone would sell it.
+- **Known limits (until M3):**
+  - **A real process crash between steps** leaves a PENDING order: its active items keep its seats
+    from every other order (409 SEAT_TAKEN), even after the sweeper frees the hold. No code here can
+    run after a crash; M3's persisted saga resumes or compensates it.
+  - The two PENDING rows of the failure table (step 4 never succeeds; the compensating release
+    throws) end the same way.
+  - **An unknown payment outcome stays CREATED** and is never closed here: the provider threw, or it
+    succeeded and recording that failed (money moved, and its `provider_ref` may be lost). Closing it
+    as FAILED could lose a real charge (found by the correctness review). M3's reconciliation asks
+    the provider by payment id, which is the provider's idempotency key.
+  - **An in-flight checkout blocks the seats for its duration.** Step 0 is an unlocked read and step 1
+    doesn't re-check the hold, so a checkout whose hold ends while it pays keeps active items until
+    step 3 cancels it; another buyer who holds those seats meanwhile gets 409 SEAT_TAKEN ("try again
+    shortly"). Seconds with the synchronous fake provider; with M3's asynchronous payment it can be
+    minutes, so M3 should re-check the hold in step 1 or order the seats' release after cancellation.
+  - The step 4 retries are immediate, without backoff. Only `RuntimeException` is compensated; an
+    `Error` (OutOfMemoryError, StackOverflowError) after step 1 ends like a crash.
+  - SEAT_TAKEN on POST /orders lists all the hold's seats, not only the blocked ones. The constraint
+    is recognised by its name in the Postgres message (the driver is runtime-only, so
+    `PSQLException.getServerErrorMessage().getConstraint()` isn't available at compile time).
+  - POST /orders doesn't check the event's status (paused or cancelled), like D-016's unlocked
+    sale-window check.
+  - `DELETE /holds/{id}` during an in-flight checkout still releases the hold; that checkout then
+    refunds and answers 410.
+  - No Idempotency-Key, so a retry that sends a **different** hold id is a new order (it is a
+    different hold, so this is the caller's real intent or a client bug, not a double charge).
+- **How I'd know it was wrong:** the M1.7 checker finds PENDING orders or SOLD seats without a PAID
+  order outside a known crash; buyers see SEAT_TAKEN on seats that look free (crashed checkouts are
+  more common than assumed, so M3 recovery is needed sooner); M2.4 load runs show `uq_orders_hold`
+  violations from something other than double clicks; or M3's saga can't reuse these steps as they
+  are.

@@ -16,8 +16,8 @@ import java.util.UUID;
  *   <li><b>Per-user cap</b> (D-005): a hold adds its seats to {@code user_event_allowance.used} in the
  *       same atomic step that checks {@code events.per_user_limit}, and is rejected with
  *       LIMIT_EXCEEDED (nothing written) if that would exceed it. Every release gives them back.</li>
- *   <li><b>Lock order</b> (D-015): seats are locked in Postgres {@code seat_id} order; a release locks
- *       the hold row before its seats; the per-user allowance row is locked after the seats.</li>
+ *   <li><b>Lock order</b> (D-015): seats are locked in Postgres {@code seat_id} order; a release or a
+ *       sell locks the hold row before its seats; the per-user allowance row is locked after the seats.</li>
  * </ul>
  */
 public interface InventoryStrategy {
@@ -36,4 +36,13 @@ public interface InventoryStrategy {
      * (status RELEASED or EXPIRED, by reason). Only an ACTIVE hold can be released.
      */
     ReleaseOutcome release(UUID eventId, UUID holdId, ReleaseReason reason);
+
+    /**
+     * Sells every seat the hold owns to {@code orderId} (HELD to SOLD) and closes the hold as CONVERTED
+     * (M1.5, D-017). Only an ACTIVE hold whose {@code expires_at} is still in the future by the
+     * strategy's own clock can be sold; anything else changes nothing. The user's allowance is not
+     * touched: bought seats keep counting (D-016). The order row must already be committed, because
+     * {@code event_seats.order_id} has a foreign key to it.
+     */
+    SellOutcome sell(UUID eventId, UUID holdId, UUID orderId);
 }

@@ -417,7 +417,8 @@ The OpenAPI spec is the source of truth, and the TypeScript client is generated 
 | `GET /queue/{ticket}` | Position stream | SSE |
 | `POST /events/{id}/holds` | Hold seats | Requires admission token; all-or-nothing |
 | `DELETE /holds/{id}` | Release hold | |
-| `POST /orders` | Create order from hold | Requires `Idempotency-Key` |
+| `POST /orders` | Create order from hold | Requires `Idempotency-Key` (from M3.1; until then a retry is recognised by its hold, which has at most one order, D-017) |
+| `GET /orders/{id}` | Order | Owner only; anyone else gets 404 like an unknown id (M1.5) |
 | `GET /orders/{id}/saga` | Saga progress | SSE |
 | `POST /payments/webhook` | Provider callbacks | HMAC-verified, deduplicated |
 | `GET /me/tickets`, `POST /tickets/{id}/transfer` | Wallet, transfer | |
@@ -448,6 +449,16 @@ Browse and general request errors (added in M0.6, D-010):
 | `UNSUPPORTED_MEDIA_TYPE` | 415 | The request body's content type isn't accepted (e.g. `text/plain` instead of JSON) |
 | `REQUEST_FAILED` | other 4xx | Any other client error the framework rejects; the response keeps the framework's status |
 | `INTERNAL_ERROR` | 500 | An unexpected server error. The body has a fixed message and an `errorId` that matches the server log; it never contains exception messages, SQL or stack traces |
+
+Checkout errors (added in M1.5, D-017):
+
+| Code | Status | When |
+|---|---|---|
+| `HOLD_NOT_FOUND` | 404 | `POST /orders` for a hold id that is unknown or someone else's (indistinguishable) |
+| `HOLD_EXPIRED` | 410 | The hold expired or was released before it became an order; nothing is sold and any payment taken is refunded |
+| `PAYMENT_FAILED` | 402 | The payment provider declined; the order is cancelled and the hold's seats are released |
+| `SEAT_TAKEN` | 409 | A seat of the hold is still part of another order that hasn't finished (in flight, or crashed before it could clean up); retry shortly; `seatIds`, no `takenAgoMs` |
+| `ORDER_NOT_FOUND` | 404 | `GET /orders/{id}` for an id that is unknown or someone else's order (indistinguishable) |
 
 **Security runs before routing (401 before 404/405).** The security filter checks a request before
 Spring looks for a matching route, and every route that isn't explicitly public requires a token. So

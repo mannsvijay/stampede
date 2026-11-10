@@ -140,18 +140,7 @@ class PessimisticInventoryStrategy implements InventoryStrategy {
         // Step 8: lock the hold row FIRST (lock order, D-015). A buyer's cancel and the expiry
         // sweeper for the same hold now take turns: the second one waits here, then sees the status
         // the first one wrote and returns NotActive.
-        Optional<HoldRow> hold = jdbc.sql("""
-                        SELECT user_id, status, seat_ids, expires_at, expires_at <= now() AS expired
-                        FROM holds
-                        WHERE id = :holdId AND event_id = :eventId
-                        FOR UPDATE
-                        """)
-                .param("holdId", holdId)
-                .param("eventId", eventId)
-                .query((rs, rowNum) -> new HoldRow(rs.getObject("user_id", UUID.class), rs.getString("status"),
-                        uuids(rs, "seat_ids"), rs.getObject("expires_at", OffsetDateTime.class).toInstant(),
-                        rs.getBoolean("expired")))
-                .optional();
+        Optional<HoldRow> hold = lockHold(eventId, holdId);
         if (hold.isEmpty()) {
             return new NotFound();
         }
@@ -166,28 +155,7 @@ class PessimisticInventoryStrategy implements InventoryStrategy {
         }
 
         // Step 9: then its seats, in the same ORDER BY seat_id FOR UPDATE order as hold().
-        // event_seats.hold_id is the authoritative owner; holds.seat_ids is a convenience copy.
-        List<EventSeat> locked = jdbc.sql("""
-                        SELECT event_id, seat_id, status, hold_id, order_id, version
-                        FROM event_seats
-                        WHERE event_id = :eventId AND hold_id = :holdId
-                        ORDER BY seat_id
-                        FOR UPDATE
-                        """)
-                .param("eventId", eventId)
-                .param("holdId", holdId)
-                .query(this::toEventSeat)
-                .list();
-        // An ACTIVE hold must own exactly the seats it lists. If not, the data is already wrong
-        // (invariant broken); stop and roll back instead of releasing half a hold.
-        Set<UUID> owned = new HashSet<>();
-        for (EventSeat seat : locked) {
-            owned.add(seat.seatId());
-        }
-        if (!owned.equals(new HashSet<>(hold.get().seatIds()))) {
-            throw new IllegalStateException("Active hold " + holdId + " lists seats " + hold.get().seatIds()
-                    + " but owns " + owned);
-        }
+        List<EventSeat> locked = lockSeatsOfHold(eventId, holdId, hold.get().seatIds());
 
         // Step 10: the state machine moves each seat. A rejection here would mean corrupt data, so
         // the exception is allowed to propagate and roll everything back.
@@ -230,6 +198,100 @@ class PessimisticInventoryStrategy implements InventoryStrategy {
 
         // Step 13
         return new Released(freed);
+    }
+
+    /**
+     * Same lock order as release (D-015): the hold row, then its seats. The allowance row is not
+     * touched at all, because sold seats keep counting against the user's cap (D-016).
+     */
+    @Override
+    @Transactional
+    public SellOutcome sell(UUID eventId, UUID holdId, UUID orderId) {
+        // Step S1: lock the hold row first. A sell, a cancel and the expiry sweeper for the same hold
+        // take turns here; whoever comes second sees the status the first one wrote.
+        Optional<HoldRow> hold = lockHold(eventId, holdId);
+        if (hold.isEmpty()) {
+            return new SellOutcome.NotFound();
+        }
+        if (!hold.get().status().equals("ACTIVE")) {
+            return new SellOutcome.NotActive(hold.get().status());
+        }
+        // An ACTIVE hold can be past its expiry: the sweeper runs every few seconds, so there is a
+        // window where the status hasn't caught up. Checking status alone would sell an expired hold.
+        // The database clock decides, as for every hold expiry (D-015).
+        if (hold.get().expired()) {
+            return new SellOutcome.HoldExpired(hold.get().expiresAt());
+        }
+
+        // Step S2: its seats, in seat_id order.
+        List<EventSeat> locked = lockSeatsOfHold(eventId, holdId, hold.get().seatIds());
+
+        // Step S3: the state machine moves every seat HELD -> SOLD before anything is written. It
+        // checks the seat is HELD by this hold; we hold all the locks and the ownership check above
+        // passed, so a rejection is corrupt data and rolls everything back.
+        List<EventSeat> soldSeats = new ArrayList<>();
+        for (EventSeat seat : locked) {
+            soldSeats.add(seat.sell(holdId, orderId));
+        }
+        for (EventSeat seat : soldSeats) {
+            writeSeat(seat);
+        }
+
+        // Step S4: close the hold. CONVERTED never reaches release(), so the allowance stays counted.
+        // The status in the WHERE is a safety net like writeSeat's version check: we hold the row
+        // lock and saw ACTIVE, so zero rows means something wrote the hold without the lock (a bug).
+        int converted = jdbc.sql("UPDATE holds SET status = 'CONVERTED' WHERE id = :holdId AND status = 'ACTIVE'")
+                .param("holdId", holdId)
+                .update();
+        if (converted != 1) {
+            throw new IllegalStateException("Hold " + holdId + " changed while locked during sell");
+        }
+
+        return new SellOutcome.Sold(soldSeats.stream().map(EventSeat::seatId).toList());
+    }
+
+    /** Locks the hold row (step 8 / S1), the first lock of every path that starts from a hold. */
+    private Optional<HoldRow> lockHold(UUID eventId, UUID holdId) {
+        return jdbc.sql("""
+                        SELECT user_id, status, seat_ids, expires_at, expires_at <= now() AS expired
+                        FROM holds
+                        WHERE id = :holdId AND event_id = :eventId
+                        FOR UPDATE
+                        """)
+                .param("holdId", holdId)
+                .param("eventId", eventId)
+                .query((rs, rowNum) -> new HoldRow(rs.getObject("user_id", UUID.class), rs.getString("status"),
+                        uuids(rs, "seat_ids"), rs.getObject("expires_at", OffsetDateTime.class).toInstant(),
+                        rs.getBoolean("expired")))
+                .optional();
+    }
+
+    /**
+     * Locks the seats an ACTIVE hold owns (step 9 / S2), in seat_id order. event_seats.hold_id is the
+     * authoritative owner; holds.seat_ids is a convenience copy. If the two disagree, the data is
+     * already wrong (invariant broken): throw and roll back instead of acting on half a hold.
+     */
+    private List<EventSeat> lockSeatsOfHold(UUID eventId, UUID holdId, List<UUID> listedSeats) {
+        List<EventSeat> locked = jdbc.sql("""
+                        SELECT event_id, seat_id, status, hold_id, order_id, version
+                        FROM event_seats
+                        WHERE event_id = :eventId AND hold_id = :holdId
+                        ORDER BY seat_id
+                        FOR UPDATE
+                        """)
+                .param("eventId", eventId)
+                .param("holdId", holdId)
+                .query(this::toEventSeat)
+                .list();
+        Set<UUID> owned = new HashSet<>();
+        for (EventSeat seat : locked) {
+            owned.add(seat.seatId());
+        }
+        if (!owned.equals(new HashSet<>(listedSeats))) {
+            throw new IllegalStateException("Active hold " + holdId + " lists seats " + listedSeats
+                    + " but owns " + owned);
+        }
+        return locked;
     }
 
     /** Locks the event's rows for these seat ids, in Postgres seat_id order (see step 2). */

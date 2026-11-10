@@ -22,7 +22,7 @@ import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
 /**
- * Checks the Flyway schema (V1, V2) against a fresh Postgres container.
+ * Checks the Flyway schema (V1 to V3) against a fresh Postgres container.
  *
  * <p>{@code @JdbcTest} starts only the JDBC + Flyway slice, and wraps each test in a transaction that
  * is rolled back, so every test builds its own fixture and leaves nothing behind. A failed statement
@@ -38,6 +38,8 @@ class SchemaMigrationTest {
 
     private static final String UNIQUE_VIOLATION = "23505";
     private static final String CHECK_VIOLATION = "23514";
+    private static final String NOT_NULL_VIOLATION = "23502";
+    private static final String FOREIGN_KEY_VIOLATION = "23503";
     private static final String RAISE_EXCEPTION = "P0001";
 
     @Container
@@ -57,7 +59,7 @@ class SchemaMigrationTest {
     @Test
     void migrationsApplyCleanlyOnFreshDatabase() {
         MigrationInfo[] applied = flyway.info().applied();
-        assertThat(applied).extracting(m -> m.getVersion().getVersion()).containsExactly("1", "2");
+        assertThat(applied).extracting(m -> m.getVersion().getVersion()).containsExactly("1", "2", "3");
         assertThat(applied).allSatisfy(m -> assertThat(m.getState()).isEqualTo(MigrationState.SUCCESS));
 
         List<String> tables = jdbc.sql("""
@@ -101,6 +103,40 @@ class SchemaMigrationTest {
                 SELECT count(*) FROM order_items WHERE event_id = ? AND seat_id = ? AND active
                 """).params(f.eventId, f.seatId).query(Integer.class).single();
         assertThat(activeForSeat).isEqualTo(1);
+    }
+
+    // -------------------------------------------------------------------------------------------
+    // V3: orders.hold_id (D-017)
+    // -------------------------------------------------------------------------------------------
+
+    @Test
+    void secondOrderForTheSameHoldIsRejected() {
+        Fixture f = fixture();
+        UUID holdId = insertHold(f.userId, f.eventId, f.seatId);
+        insertOrderFor(f, holdId, "CANCELLED");
+
+        // Even after the first order was cancelled: a hold never gets a second order.
+        assertViolates(() -> insertOrderFor(f, holdId, "PENDING"), UNIQUE_VIOLATION, "uq_orders_hold");
+    }
+
+    @Test
+    void orderWithoutAHoldIsRejected() {
+        Fixture f = fixture();
+        // A NOT NULL violation names the column, not a constraint.
+        assertViolates(() -> jdbc.sql("""
+                        INSERT INTO orders (id, user_id, event_id, status, total_paise, saga_state)
+                        VALUES (?, ?, ?, 'PENDING', 250000, 'ORDER_CREATED')
+                        """).params(UUID.randomUUID(), f.userId, f.eventId).update(),
+                NOT_NULL_VIOLATION, "hold_id");
+    }
+
+    @Test
+    void orderWithAHoldOfAnotherEventIsRejected() {
+        Fixture f = fixture();
+        Fixture other = fixture();
+        UUID otherEventsHold = insertHold(other.userId, other.eventId, other.seatId);
+
+        assertViolates(() -> insertOrderFor(f, otherEventsHold, "PENDING"), FOREIGN_KEY_VIOLATION, "fk_orders_hold");
     }
 
     // -------------------------------------------------------------------------------------------
@@ -315,13 +351,28 @@ class SchemaMigrationTest {
         return id;
     }
 
+    /** An order from its own new hold (V3: every order has a hold, and a hold at most one order). */
     private UUID insertOrder(Fixture f, String status) {
+        return insertOrderFor(f, insertHold(f.userId, f.eventId, f.seatId), status);
+    }
+
+    private UUID insertOrderFor(Fixture f, UUID holdId, String status) {
         UUID orderId = UUID.randomUUID();
         jdbc.sql("""
-                INSERT INTO orders (id, user_id, event_id, status, total_paise, saga_state)
-                VALUES (?, ?, ?, ?, 250000, 'ORDER_CREATED')
-                """).params(orderId, f.userId, f.eventId, status).update();
+                INSERT INTO orders (id, user_id, event_id, hold_id, status, total_paise, saga_state)
+                VALUES (?, ?, ?, ?, ?, 250000, 'ORDER_CREATED')
+                """).params(orderId, f.userId, f.eventId, holdId, status).update();
         return orderId;
+    }
+
+    /** A CONVERTED hold row; the seat is left alone (only the orders constraints are under test). */
+    private UUID insertHold(UUID userId, UUID eventId, UUID seatId) {
+        UUID holdId = UUID.randomUUID();
+        jdbc.sql("""
+                INSERT INTO holds (id, event_id, user_id, seat_ids, expires_at, status)
+                VALUES (?, ?, ?, ?, now() + interval '5 minutes', 'CONVERTED')
+                """).params(holdId, eventId, userId, new UUID[] {seatId}).update();
+        return holdId;
     }
 
     private void insertOrderItem(UUID orderId, Fixture f, boolean active) {

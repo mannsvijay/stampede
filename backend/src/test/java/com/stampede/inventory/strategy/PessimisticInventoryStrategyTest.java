@@ -713,7 +713,152 @@ class PessimisticInventoryStrategyTest {
         }
     }
 
+    // --- sell (M1.5, D-017) ----------------------------------------------------------------------
+
+    @Test
+    void sellMovesEverySeatToSoldAndConvertsTheHold() {
+        UUID holdId = UUID.randomUUID();
+        holdDirectly(holdId, EVENT_A, SEAT_1, SEAT_2);
+        UUID orderId = pendingOrder(holdId, EVENT_A);
+
+        SellOutcome outcome = strategy.sell(EVENT_A, holdId, orderId);
+
+        assertThat(outcome).isInstanceOfSatisfying(SellOutcome.Sold.class,
+                sold -> assertThat(sold.seatIds()).containsExactlyInAnyOrder(SEAT_1, SEAT_2));
+        // The order is the owner now; the hold pointer is cleared (D-014); version bumped again.
+        assertThat(seat(EVENT_A, SEAT_1)).isEqualTo(new SeatRow(SeatStatus.SOLD, null, orderId, 2));
+        assertThat(seat(EVENT_A, SEAT_2)).isEqualTo(new SeatRow(SeatStatus.SOLD, null, orderId, 2));
+        assertThat(hold(holdId).orElseThrow().status()).isEqualTo("CONVERTED");
+        assertThat(used(EVENT_A)).as("bought seats keep counting (D-016)").isEqualTo(2);
+    }
+
+    @Test
+    void sellOfAnActiveHoldPastItsExpiryChangesNothing() {
+        // The sweeper hasn't reached it yet: status ACTIVE, expires_at in the past. Must not be sold.
+        UUID holdId = UUID.randomUUID();
+        holdDirectlyExpired(holdId, EVENT_A, SEAT_1);
+        UUID orderId = pendingOrder(holdId, EVENT_A);
+
+        assertThat(strategy.sell(EVENT_A, holdId, orderId)).isInstanceOf(SellOutcome.HoldExpired.class);
+
+        assertThat(seat(EVENT_A, SEAT_1)).isEqualTo(new SeatRow(SeatStatus.HELD, holdId, null, 1));
+        assertThat(hold(holdId).orElseThrow().status()).isEqualTo("ACTIVE");
+        assertThat(used(EVENT_A)).isEqualTo(1);
+    }
+
+    @Test
+    void sellOfAReleasedOrAlreadyConvertedHoldIsNotActive() {
+        UUID released = UUID.randomUUID();
+        holdDirectly(released, EVENT_A, SEAT_1);
+        UUID releasedOrder = pendingOrder(released, EVENT_A);
+        strategy.release(EVENT_A, released, ReleaseReason.RELEASED);
+
+        assertThat(strategy.sell(EVENT_A, released, releasedOrder)).isEqualTo(new SellOutcome.NotActive("RELEASED"));
+        assertThat(seat(EVENT_A, SEAT_1)).isEqualTo(new SeatRow(SeatStatus.AVAILABLE, null, null, 2));
+
+        UUID sold = UUID.randomUUID();
+        holdDirectly(sold, EVENT_A, SEAT_2);
+        UUID soldOrder = pendingOrder(sold, EVENT_A);
+        strategy.sell(EVENT_A, sold, soldOrder);
+
+        assertThat(strategy.sell(EVENT_A, sold, soldOrder)).isEqualTo(new SellOutcome.NotActive("CONVERTED"));
+        assertThat(seat(EVENT_A, SEAT_2)).as("unchanged by the second sell")
+                .isEqualTo(new SeatRow(SeatStatus.SOLD, null, soldOrder, 2));
+    }
+
+    @Test
+    void sellOfAnUnknownHoldOrAHoldOfAnotherEventIsNotFound() {
+        UUID holdId = UUID.randomUUID();
+        holdDirectly(holdId, EVENT_A, SEAT_1);
+        UUID orderId = pendingOrder(holdId, EVENT_A);
+
+        assertThat(strategy.sell(EVENT_A, UUID.randomUUID(), orderId)).isInstanceOf(SellOutcome.NotFound.class);
+        assertThat(strategy.sell(EVENT_B, holdId, orderId)).isInstanceOf(SellOutcome.NotFound.class);
+        assertThat(seat(EVENT_A, SEAT_1)).isEqualTo(new SeatRow(SeatStatus.HELD, holdId, null, 1));
+    }
+
+    @Test
+    void sellOfAnInconsistentHoldThrowsAndRollsBack() {
+        // The hold lists SEAT_1 and SEAT_2 but only owns SEAT_1: never sell half a hold.
+        UUID holdId = UUID.randomUUID();
+        holdDirectly(holdId, EVENT_A, SEAT_1);
+        jdbc.sql("UPDATE holds SET seat_ids = ? WHERE id = ?").params(new UUID[] {SEAT_1, SEAT_2}, holdId).update();
+        UUID orderId = pendingOrder(holdId, EVENT_A);
+
+        assertThatThrownBy(() -> strategy.sell(EVENT_A, holdId, orderId))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("lists seats");
+
+        assertThat(seat(EVENT_A, SEAT_1)).isEqualTo(new SeatRow(SeatStatus.HELD, holdId, null, 1));
+        assertThat(hold(holdId).orElseThrow().status()).isEqualTo("ACTIVE");
+    }
+
+    @Test
+    void sellLocksTheHoldRowBeforeItsSeats() throws Exception {
+        // D-015 lock order for paths that start from a hold: the hold row, then the seats. Another
+        // session locks the hold row; sell() must block there WITHOUT owning any seat lock yet.
+        UUID holdId = UUID.randomUUID();
+        holdDirectly(holdId, EVENT_A, SEAT_1, SEAT_2);
+        UUID orderId = pendingOrder(holdId, EVENT_A);
+        try (Connection blocker = openTransaction(); Connection probe = openTransaction()) {
+            exec(blocker, "SELECT 1 FROM holds WHERE id = ? FOR UPDATE", holdId);
+
+            Future<SellOutcome> pending = THREADS.submit(() -> strategy.sell(EVENT_A, holdId, orderId));
+            waitUntilOneSessionIsBlockedOnALock();
+
+            for (UUID seat : List.of(SEAT_1, SEAT_2)) {
+                exec(probe, "SELECT 1 FROM event_seats WHERE event_id = ? AND seat_id = ? FOR UPDATE NOWAIT",
+                        EVENT_A, seat);  // throws "could not obtain lock" if sell() already locked a seat
+            }
+            probe.rollback();
+            blocker.rollback();
+
+            assertThat(pending.get(30, TimeUnit.SECONDS)).isInstanceOf(SellOutcome.Sold.class);
+        }
+    }
+
+    @Test
+    void sellAndCancelOfTheSameHoldTakeTurns() throws Exception {
+        // Both lock the hold row first, so whichever comes second sees the first one's status. Each
+        // round ends either sold (cancel says CONVERTED) or released (sell says RELEASED), never both.
+        for (int round = 0; round < 20; round++) {
+            insertFixture();
+            UUID holdId = UUID.randomUUID();
+            holdDirectly(holdId, EVENT_A, SEAT_1, SEAT_2);
+            UUID orderId = pendingOrder(holdId, EVENT_A);
+
+            List<Object> outcomes = race(
+                    () -> strategy.sell(EVENT_A, holdId, orderId),
+                    () -> strategy.release(EVENT_A, holdId, ReleaseReason.RELEASED));
+
+            Object sell = outcomes.get(0);
+            Object release = outcomes.get(1);
+            if (sell instanceof SellOutcome.Sold) {
+                assertThat(release).as("round %d", round).isEqualTo(new NotActive("CONVERTED"));
+                assertThat(seat(EVENT_A, SEAT_1).status()).isEqualTo(SeatStatus.SOLD);
+                assertThat(seat(EVENT_A, SEAT_2).status()).isEqualTo(SeatStatus.SOLD);
+                assertThat(used(EVENT_A)).isEqualTo(2);
+            } else {
+                assertThat(sell).as("round %d", round).isEqualTo(new SellOutcome.NotActive("RELEASED"));
+                assertThat(release).isInstanceOf(Released.class);
+                assertThat(seat(EVENT_A, SEAT_1)).isEqualTo(new SeatRow(SeatStatus.AVAILABLE, null, null, 2));
+                assertThat(seat(EVENT_A, SEAT_2)).isEqualTo(new SeatRow(SeatStatus.AVAILABLE, null, null, 2));
+                assertThat(used(EVENT_A)).isEqualTo(0);
+            }
+        }
+    }
+
     // --- helpers ---------------------------------------------------------------------------------
+
+    /** A PENDING order of USER for this hold, as booking's step 1 commits it before the sale. */
+    private UUID pendingOrder(UUID holdId, UUID eventId) {
+        UUID orderId = UUID.randomUUID();
+        jdbc.sql("""
+                INSERT INTO orders (id, user_id, event_id, hold_id, status, total_paise, saga_state)
+                VALUES (?, ?, ?, ?, 'PENDING', 150000, 'ORDER_CREATED')
+                """).params(orderId, USER, eventId, holdId).update();
+        return orderId;
+    }
 
     static HoldRequest request(UUID holdId, UUID eventId, UUID... seats) {
         return requestBy(USER, holdId, eventId, seats);
@@ -824,13 +969,21 @@ class PessimisticInventoryStrategyTest {
         }
     }
 
-    /** Test setup without the strategy: a SOLD seat owned by a new PAID order (version 1). */
+    /**
+     * Test setup without the strategy: a SOLD seat owned by a new PAID order (version 1). Since V3
+     * every order has a hold, so this adds the CONVERTED hold the order came from.
+     */
     private UUID sellDirectly(UUID eventId, UUID seat) {
+        UUID holdId = UUID.randomUUID();
+        jdbc.sql("""
+                INSERT INTO holds (id, event_id, user_id, seat_ids, expires_at, status)
+                VALUES (?, ?, ?, ?, now() + interval '5 minutes', 'CONVERTED')
+                """).params(holdId, eventId, USER, new UUID[] {seat}).update();
         UUID orderId = UUID.randomUUID();
         jdbc.sql("""
-                INSERT INTO orders (id, user_id, event_id, status, total_paise, saga_state)
-                VALUES (?, ?, ?, 'PAID', 150000, 'SEATS_SOLD')
-                """).params(orderId, USER, eventId).update();
+                INSERT INTO orders (id, user_id, event_id, hold_id, status, total_paise, saga_state)
+                VALUES (?, ?, ?, ?, 'PAID', 150000, 'SEATS_SOLD')
+                """).params(orderId, USER, eventId, holdId).update();
         jdbc.sql("""
                 UPDATE event_seats SET status = 'SOLD', order_id = ?, version = version + 1
                 WHERE event_id = ? AND seat_id = ?

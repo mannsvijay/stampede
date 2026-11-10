@@ -29,6 +29,15 @@ public enum ErrorCode {
     /** The hold became an order, so it can no longer be released (M1.4). */
     HOLD_CONVERTED(HttpStatus.CONFLICT, "Hold converted to an order"),
     /**
+     * The hold expired or was released before it could become an order; nothing was sold and any
+     * payment taken was refunded (M1.5, D-016 chose 410 Gone).
+     */
+    HOLD_EXPIRED(HttpStatus.GONE, "Hold expired"),
+    /** The payment provider declined the charge; the order is cancelled and the seats are released (M1.5). */
+    PAYMENT_FAILED(HttpStatus.PAYMENT_REQUIRED, "Payment failed"),
+    /** No order with this id belongs to the caller; someone else's order looks the same (M1.5). */
+    ORDER_NOT_FOUND(HttpStatus.NOT_FOUND, "Order not found"),
+    /**
      * Any other client error the framework rejects (e.g. 406). The response keeps the framework's
      * status; {@link #status()} is only a nominal default.
      */

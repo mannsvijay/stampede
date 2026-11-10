@@ -204,6 +204,28 @@ and gets the seeded demo event from GET /events. Still open in M0: M0.7a (date-g
       (status CONVERTED) must NOT decrement the allowance: bought seats keep counting. Extend I8 to
       count the seats of the user's active orders too. Booking calls `release(…, SAGA_FAILED)`
       through inventory's api (`HoldService` has no such method yet; add one).
+      Decisions (D-017, draft): V3 adds `orders.hold_id` NOT NULL + FK (hold_id, event_id) + UNIQUE.
+      `booking.checkout.CheckoutService` (not @Transactional) runs one transaction per saga step:
+      0 `HoldService.checkoutHold` (unlocked, prices from tiers), 1 `OrderWriter.createPending`
+      (PENDING + active items; `uq_orders_hold` decides races), 2 `PaymentService.charge`
+      (payments row before the provider call), 3 `HoldService.sellForOrder` -> new
+      `InventoryStrategy.sell` (hold row, then seats ORDER BY seat_id; ACTIVE and `expires_at > now()`;
+      hold CONVERTED; allowance untouched), 4 `OrderWriter.markPaid` (idempotent, 3 attempts).
+      `event_seats.order_id` only on sell. No Idempotency-Key until M3.1 (PRD 10 deviation): a
+      concurrent/repeated POST gets 200 with the existing order. `PaymentProvider` interface +
+      `FakePaymentProvider` (always succeeds; tests spy it). Best-effort compensation after step 1:
+      release the hold first (definitive under its lock; CONVERTED -> finish instead), then cancel
+      the order (items inactive), then refund; failure table in D-017. New codes HOLD_EXPIRED 410,
+      PAYMENT_FAILED 402, ORDER_NOT_FOUND 404; SEAT_TAKEN 409 for a seat in another order's active
+      items. I8 counts ACTIVE + CONVERTED holds. GET /orders/{id} owner-only (404 otherwise).
+      Correctness review: no invariant bug. Fixed: concurrency test now forces the overlap (barrier
+      after step 0, counts 7 duplicate-key losers per round); an unknown payment outcome stays
+      CREATED instead of FAILED; a decline whose compensation fails is 500, not 402; SEAT_TAKEN
+      wording ("try again shortly"); guarded CONVERTED update; tests for "release throws -> nothing
+      cancelled or refunded" and SEAT_TAKEN. Rest recorded under D-017 "Known limits".
+      Unrelated, noted not fixed: `JwtFilterTest.tamperedSignatureIs401` is flaky (~4/64). Flipping
+      the last base64url char of a 32-byte signature between A and B/C/D changes only padding bits,
+      so the "tampered" token can still verify. Failed once in the first M1.5 full run.
 - [ ] M1.6 Ticket issuing: Ed25519 signing, QR payload, GET /me/tickets
 - [ ] M1.7 Invariant checker v1 (five checks as SQL) + hard assertion after every integration test
       Note (from M1.3): reuse the hold checks in test `HoldInvariants` (I1 seat in two active
@@ -212,6 +234,11 @@ and gets the seeded demo event from GET /events. Still open in M0: M0.7a (date-g
       Note (from M1.4): `HoldInvariants` now also has I8 (allowance = seats of active holds, never
       over the limit); take it over as well.
       Note (from M0.2): also check that every event_seat's seat belongs to the event's venue.
+      Note (from M1.5, D-017): take over the order rules O1-O5 in test `CheckoutTestSupport` (sold
+      seat has exactly one active item in its PAID order; PAID order's seats SOLD to it; no active
+      items in CANCELLED orders; money matches; CONVERTED hold <-> PAID order), and report PENDING
+      orders older than a checkout takes (the known stuck-checkout cases). `HoldInvariants` is now
+      public and its I8 counts ACTIVE + CONVERTED holds.
 - [ ] M1.8 Basic seat map page: Canvas2D render of seats, click to hold, checkout, show ticket QR
       Note (from M0.6): SecurityConfig permits GET `/events/*`, which matches one path segment only,
       so `GET /events/{id}/seatmap` needs its own rule (decide whether it is public). Add the venue
@@ -220,6 +247,8 @@ and gets the seeded demo event from GET /events. Still open in M0: M0.7a (date-g
       proxied; POST /events/{id}/holds already works through /events). To hold demo seats locally,
       run the backend with `seed,demo-open-sale` (the demo drop is otherwise always in the future and
       holds return 409 SALE_NOT_OPEN). Use `serverTime` from the hold response to correct the timer.
+      Note (from M1.5): add `/orders` to the Vite dev proxy too. POST /orders returns the PAID order
+      (201) or the existing one (200); 410 means pick seats again; 409 SEAT_TAKEN means retry shortly.
 **Exit:** a full purchase works end to end in the browser; concurrency test passes 1000/1000.
 
 ## M2 - Contention lab (weeks 4-5)  <- the heart of the portfolio
@@ -245,10 +274,21 @@ and gets the seeded demo event from GET /events. Still open in M0: M0.7a (date-g
 - [ ] M3.1 Idempotency keys (store hash + response; same key/different body -> 422) + retry-storm test
       Note (from M1.4, D-016): consider accepting `Idempotency-Key` on POST /events/{id}/holds too.
       M1.4 only recognises a retry by its seats (same seat set as the caller's active hold -> 200).
+      Note (from M1.5, D-017): POST /orders has no Idempotency-Key yet (PRD 10 deviation); a retry
+      is recognised by its hold (`uq_orders_hold`). Making the header required changes the API the
+      M1.8 checkout uses.
 - [ ] M3.2 Outbox table + relay to `EventPublisher` (Redis pub/sub impl) + consumer dedupe table
 - [ ] M3.3 Mock payment provider as a separate small service: intents, HMAC-signed webhooks, chaos knobs
+      Note (from M1.5): replace `payments.provider.FakePaymentProvider` behind `PaymentProvider`.
 - [ ] M3.4 Persisted saga orchestrator with compensation; resumes after crash
+      Note (from M1.5, D-017): reuse the five steps and the compensation rules of
+      `booking.checkout.CheckoutService` (release the hold first; never undo after CONVERTED). Must
+      recover PENDING orders left by a crash, by step 4 failing every retry, or by a failed release.
+      Re-check the hold in step 1 so an in-flight checkout on an ended hold can't block other buyers
+      for the length of an async payment. Add backoff to the step 4 retries.
 - [ ] M3.5 Webhook ingestion: signature check, dedupe, out-of-order handling, reconciliation poller
+      Note (from M1.5): the poller must resolve payments left CREATED (unknown outcome) by asking the
+      provider by payment id.
 - [ ] M3.6 Hold extension on payment start; late-success-after-expiry -> automatic refund path
 - [ ] M3.7 Checkout UI shows real saga steps over SSE
 **Exit:** retry storm, duplicate and out-of-order webhooks: no duplicate orders, invariants pass.

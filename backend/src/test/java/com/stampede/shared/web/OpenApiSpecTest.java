@@ -77,13 +77,32 @@ class OpenApiSpecTest {
     }
 
     @Test
-    void specCoversTheAuthEventAndHoldEndpointsOnly() {
+    void specCoversTheAuthEventHoldAndOrderEndpointsOnly() {
         List<String> paths = fieldNames(generated.path("paths"));
 
         assertThat(paths).containsExactlyInAnyOrder(
                 "/auth/register", "/auth/login", "/auth/refresh", "/auth/logout",
                 "/events", "/events/{id}",
-                "/events/{id}/holds", "/holds/{id}");
+                "/events/{id}/holds", "/holds/{id}",
+                "/orders", "/orders/{id}");
+    }
+
+    @Test
+    void orderEndpointsDocumentTheirProblemCodesUnderTheirStatuses() {
+        JsonNode post = generated.path("paths").path("/orders").path("post");
+        assertThat(post.path("operationId").asText()).isEqualTo("placeOrder");
+        JsonNode postResponses = post.path("responses");
+        assertThat(fieldNames(postResponses))
+                .containsExactlyInAnyOrder("200", "201", "400", "401", "402", "404", "409", "410", "500");
+        assertThat(postResponses.path("402").path("description").asText()).isEqualTo("PAYMENT_FAILED");
+        assertThat(postResponses.path("404").path("description").asText()).isEqualTo("HOLD_NOT_FOUND");
+        assertThat(postResponses.path("409").path("description").asText()).isEqualTo("SEAT_TAKEN");
+        assertThat(postResponses.path("410").path("description").asText()).isEqualTo("HOLD_EXPIRED");
+
+        JsonNode get = generated.path("paths").path("/orders/{id}").path("get");
+        assertThat(get.path("operationId").asText()).isEqualTo("getOrder");
+        assertThat(fieldNames(get.path("responses"))).containsExactlyInAnyOrder("200", "400", "401", "404", "500");
+        assertThat(get.path("responses").path("404").path("description").asText()).isEqualTo("ORDER_NOT_FOUND");
     }
 
     @Test
