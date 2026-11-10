@@ -255,10 +255,10 @@ and gets the seeded demo event from GET /events. Still open in M0: M0.7a (date-g
       items in CANCELLED orders; money matches; CONVERTED hold <-> PAID order), and report PENDING
       orders older than a checkout takes (the known stuck-checkout cases). `HoldInvariants` is now
       public and its I8 counts ACTIVE + CONVERTED holds.
-      Note (from M1.6, D-018): take over the ticket rules T1-T2 in `CheckoutTestSupport` (a live
+      Note (from M1.6, D-018): take over the ticket rules T1-T3 in `CheckoutTestSupport` (a live
       ticket's seat is SOLD to its PAID order and its holder is the buyer; an order at TICKETS_ISSUED
-      has exactly one live ticket per active item), and report PAID orders still at saga state
-      SEATS_SOLD (tickets not issued yet: step 5 failed and nobody retried).
+      has exactly one live ticket per active item; a PAID order is at TICKETS_ISSUED, i.e. PRD 6.10
+      invariant 3). The checker needs a grace period for T3 (checkouts still in step 5).
 - [ ] M1.8 Basic seat map page: Canvas2D render of seats, click to hold, checkout, show ticket QR
       Note (from M0.6): SecurityConfig permits GET `/events/*`, which matches one path segment only,
       so `GET /events/{id}/seatmap` needs its own rule (decide whether it is public). Add the venue

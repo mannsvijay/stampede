@@ -270,7 +270,10 @@ class CheckoutFailureTest extends CheckoutTestSupport {
         assertThat(sagaState(orderId)).as("saga stays at SEATS_SOLD").isEqualTo("SEATS_SOLD");
         assertThat(paymentStatuses(orderId)).as("not refunded").containsExactly("SUCCEEDED");
         assertThat(seatOrder(seats.get(0))).isEqualTo(orderId);
-        assertInvariants();
+        // Every rule holds except PRD 6.10's "every paid order has issued tickets": the documented
+        // state until a retry or M3 recovery (D-018 known limits), which the M1.7 checker must report.
+        assertThat(invariantViolations()).singleElement().asString()
+                .startsWith("T3 PAID order whose tickets aren't issued: order " + orderId);
         assertNoPendingOrders();
 
         // Ticketing is back; the buyer retries the same checkout.

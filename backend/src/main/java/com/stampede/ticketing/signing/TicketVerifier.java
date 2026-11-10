@@ -19,6 +19,7 @@ import java.util.Optional;
 public final class TicketVerifier {
 
     private static final int SIGNATURE_LENGTH = 64;
+    private static final Base64.Encoder BASE64URL = Base64.getUrlEncoder().withoutPadding();
 
     private final Map<String, PublicKey> keys;
 
@@ -48,6 +49,14 @@ public final class TicketVerifier {
         }
         if (payload.length != TicketPayload.LENGTH || payload[0] != TicketPayload.FORMAT
                 || signature.length != SIGNATURE_LENGTH) {
+            return Optional.empty();
+        }
+        // One ticket, one string: Java's decoder also accepts "=" padding and non-zero unused bits in
+        // the last character, which would give each ticket many strings that verify. Only the
+        // canonical encoding (unpadded, unused bits zero) is accepted, so anything keyed on the raw
+        // string (a scanner's dedupe, a cache) sees each ticket once.
+        if (!BASE64URL.encodeToString(payload).equals(qr.substring(0, dot))
+                || !BASE64URL.encodeToString(signature).equals(qr.substring(dot + 1))) {
             return Optional.empty();
         }
         PublicKey key = keys.get(TicketPayload.keyIdOf(payload));

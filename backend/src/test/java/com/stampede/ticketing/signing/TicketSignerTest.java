@@ -141,6 +141,25 @@ class TicketSignerTest {
     }
 
     @Test
+    void onlyTheCanonicalEncodingOfATicketVerifies() {
+        TicketPayload payload = payload();
+        String qr = TicketSigner.qr(payload, signer.sign(payload));
+        TicketVerifier verifier = signer.verifier();
+        assertThat(verifier.verify(qr)).isPresent();
+
+        // 64 signature bytes take 86 characters, whose last one has 4 unused low bits. Setting one of
+        // them decodes to the very same bytes, but is a different string: it must be rejected.
+        String alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+        char last = qr.charAt(qr.length() - 1);
+        String unusedBitSet = qr.substring(0, qr.length() - 1) + alphabet.charAt(alphabet.indexOf(last) ^ 1);
+        assertThat(B64URL_DECODER.decode(unusedBitSet.substring(unusedBitSet.indexOf('.') + 1)))
+                .as("same signature bytes").isEqualTo(signer.sign(payload));
+
+        assertThat(verifier.verify(unusedBitSet)).as("non-zero unused bits").isEmpty();
+        assertThat(verifier.verify(qr + "==")).as("padded signature").isEmpty();
+    }
+
+    @Test
     void refusesToSignAPayloadNamingAnotherKey() {
         TicketPayload payload = new TicketPayload("00000000", UUID.randomUUID(), UUID.randomUUID(),
                 UUID.randomUUID(), UUID.randomUUID(), Instant.parse("2026-11-10T12:00:00Z"), 1);

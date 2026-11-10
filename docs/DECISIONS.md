@@ -875,13 +875,17 @@ Write these yourself, in your own words. Each one is an interview answer you've 
   - **Compact binary payload, format 1:** format byte, 4-byte key id, ticket, event, seat and holder
     UUIDs, issue time in epoch seconds, version: 81 bytes, signed, then
     `base64url(payload).base64url(signature)`, 195 characters. Specified in docs/ticket-format.md
-    with a test vector.
+    with a test vector. The verifier accepts only the canonical text (no padding, unused bits zero),
+    so each ticket has exactly one valid string.
   - **Key id derived, not configured:** the first 4 bytes of SHA-256 over the raw public key. Stored
     on each ticket (V4 `tickets.key_id`) and published as `kid` by `GET /tickets/keys` (public, a
     JWKS with one OKP key today), so rotation can later publish several keys.
-  - **Step 5 after step 4.** `CheckoutService` calls `ticketing::api` `TicketIssuer.issueForOrder`
-    with the order, event, buyer and labelled seats, then records saga state TICKETS_ISSUED (guarded:
-    only from PAID/SEATS_SOLD). Three attempts. If all fail, the order stays **PAID at SEATS_SOLD**,
+  - **Step 5 after step 4, as one booking transaction** (`booking.checkout.TicketStep`): lock the
+    order row (`FOR NO KEY UPDATE`), require PAID/SEATS_SOLD (TICKETS_ISSUED means done), require the
+    seats to be exactly the order's active items, call `ticketing::api` `TicketIssuer.issueForOrder`
+    (its transaction joins), then record saga state TICKETS_ISSUED. The check, the tickets and the
+    saga state commit together, so no refund (M3) can slip in between "still PAID?" and "issue",
+    and TICKETS_ISSUED never exists without tickets. Three attempts. If all fail, the order stays **PAID at SEATS_SOLD**,
     the answer is still **201**, and an error is logged; nothing is released or refunded. A retried
     `POST /orders` for the same hold (hold CONVERTED) re-runs issuing before answering 200.
   - **Idempotent by the database:** each insert is `ON CONFLICT (event_id, seat_id) WHERE status <>
@@ -905,9 +909,28 @@ Write these yourself, in your own words. Each one is an interview answer you've 
     transaction would widen D-017's stuck-PENDING case for a failure that loses nothing.
   - The unique index already says "one live ticket per seat"; letting it decide races needs no lock
     taken by hand and keeps the guarantee even for callers that skip the Java checks.
+- **Correctness review (2026-11-11):** no live bug found. Fixed from it: step 5 checked "PAID?" and
+  issued in separate transactions (now one, under the order lock, with the seats checked against
+  the order's items); the verifier accepted padded or non-canonical strings; the concurrency tests
+  didn't prove two transactions overlapped (now one holds its transaction open and the second is
+  seen waiting in `pg_locks`), didn't race two orders for one seat, and ignored
+  `-Dstampede.harness.rounds`; the test invariants didn't check PRD 6.10's "every paid order has
+  issued tickets" (now rule T3, which the step-5 failure test expects to be violated).
 - **Known limits:**
   - A PAID order can be without tickets until its buyer retries or M3 recovery runs; the wallet is
-    empty meanwhile. The M1.7 checker should report PAID orders still at SEATS_SOLD.
+    empty meanwhile, against PRD 6.10 invariant 3 ("every paid order has issued tickets") and the
+    success metric "paid orders without issued tickets: 0". Nothing recovers it automatically before
+    M3, and nothing tells the buyer: the 201 response carries no ticket or saga field, so a client
+    that got 201 has no reason to retry. The M1.7 checker must report PAID orders still at
+    SEATS_SOLD (T3, with a grace period for checkouts still in step 5).
+  - **Trust boundary:** `TicketIssuer` (ticketing's api) checks only that no other order holds a
+    live ticket for a seat. It cannot check that the order is PAID or that the seats are sold to it:
+    those live in booking's `orders` and inventory's `event_seats`, which ticketing may not read
+    (D-007). `TicketStep` makes those checks for the checkout; any future caller of `TicketIssuer`
+    (control, M5) must make them too, or it can sign a valid ticket for an unsold seat, whose real
+    buyer's step 5 would then fail every attempt.
+  - The concurrency tests have no randomness, so `-Dstampede.harness.seed` doesn't apply to them;
+    the two-order race alternates a 5 ms head start to make both orders win.
   - One key, no rotation yet: changing `STAMPEDE_TICKET_SIGNING_KEY` makes earlier tickets fail to
     verify. Rotation means keeping old public keys in the key set (and in `TicketVerifier`).
   - The signing key is a plain environment variable, like the JWT secret; no HSM or KMS.

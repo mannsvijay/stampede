@@ -52,6 +52,9 @@ Today there is one key; after a rotation the set lists more, and old tickets nam
 
 1. Split the string at the single `.`. Exactly two parts, or reject.
 2. base64url-decode both. The payload must be 81 bytes, the signature 64 bytes, or reject.
+   Accept only the canonical text: no `=` padding, and the unused low bits of the signature's last
+   character must be zero (re-encode the bytes and compare). Otherwise one ticket has many valid
+   strings.
 3. Byte 0 must be `0x01`, or reject.
 4. Read bytes 1 to 4 as the key id (8 lowercase hex characters). No key with that `kid`: reject.
 5. Verify the Ed25519 signature over all 81 payload bytes with that key. Invalid: reject.

@@ -64,32 +64,6 @@ class OrderWriter {
     }
 
     /**
-     * Step 5 recorded: a PAID order's saga moves from SEATS_SOLD to TICKETS_ISSUED (D-018). The order
-     * status doesn't change. Guarded like {@link #move}: the WHERE clause repeats the expected state, and
-     * zero rows updated is fine only if an earlier attempt (or a concurrent retry) already recorded it.
-     */
-    @Transactional
-    void markTicketsIssued(UUID orderId) {
-        int updated = jdbc.sql("""
-                        UPDATE orders SET saga_state = 'TICKETS_ISSUED'
-                        WHERE id = ? AND status = 'PAID' AND saga_state = 'SEATS_SOLD'
-                        """)
-                .param(orderId)
-                .update();
-        if (updated == 1) {
-            return;
-        }
-        String current = jdbc.sql("SELECT status || '/' || saga_state FROM orders WHERE id = ?")
-                .param(orderId)
-                .query(String.class)
-                .optional()
-                .orElseThrow(() -> new IllegalStateException("No order " + orderId));
-        if (!current.equals("PAID/TICKETS_ISSUED")) {
-            throw new IllegalStateException("Order " + orderId + " is " + current + ", cannot record TICKETS_ISSUED");
-        }
-    }
-
-    /**
      * Compensation: PENDING to CANCELLED, and its items inactive, so the unique index on active
      * order_items no longer blocks the seats from being ordered again. Idempotent like markPaid.
      */

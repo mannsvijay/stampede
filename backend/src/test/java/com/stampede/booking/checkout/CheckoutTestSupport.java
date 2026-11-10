@@ -192,6 +192,11 @@ abstract class CheckoutTestSupport extends ApiTestSupport {
      * returns the rows that break its rule, so empty means it holds. Candidates for the M1.7 checker.
      */
     void assertInvariants() {
+        assertThat(invariantViolations()).as("invariant violations").isEmpty();
+    }
+
+    /** Every rule's violations, each prefixed with its rule; empty when all hold. */
+    List<String> invariantViolations() {
         List<String> violations = new ArrayList<>(HoldInvariants.check(jdbc, event));
         violations.addAll(run("O1 sold seat without exactly one active item in its PAID order", """
                 SELECT es.seat_id::text || ' is SOLD to ' || es.order_id::text || ' with '
@@ -277,7 +282,16 @@ abstract class CheckoutTestSupport extends ApiTestSupport {
                     OR (SELECT count(*) FROM tickets t WHERE t.order_id = o.id AND t.status <> 'REVOKED')
                        <> (SELECT count(*) FROM order_items oi WHERE oi.order_id = o.id AND oi.active))
                 """));
-        assertThat(violations).as("invariant violations").isEmpty();
+        // PRD 6.10 invariant 3, "every paid order has issued tickets". Tests check it as soon as the
+        // request returned; the M1.7 checker needs a grace period for checkouts still in step 5.
+        violations.addAll(run("T3 PAID order whose tickets aren't issued", """
+                SELECT 'order ' || o.id::text || ' is PAID at saga state ' || o.saga_state || ' with '
+                       || (SELECT count(*) FROM tickets t WHERE t.order_id = o.id AND t.status <> 'REVOKED')
+                       || ' live tickets'
+                FROM orders o
+                WHERE o.event_id = ? AND o.status = 'PAID' AND o.saga_state <> 'TICKETS_ISSUED'
+                """));
+        return violations;
     }
 
     /** No checkout left anything half-done: every order ended PAID or CANCELLED. */

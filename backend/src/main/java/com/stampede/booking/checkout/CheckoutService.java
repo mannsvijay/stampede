@@ -7,7 +7,6 @@ import com.stampede.inventory.api.SellResult;
 import com.stampede.payments.api.ChargeResult;
 import com.stampede.payments.api.PaymentService;
 import com.stampede.ticketing.api.IssueTickets;
-import com.stampede.ticketing.api.TicketIssuer;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -25,8 +24,8 @@ import org.springframework.stereotype.Service;
  *   <li>Payment: {@link PaymentService#charge}.</li>
  *   <li>SeatsSold: {@link HoldService#sellForOrder}, in the inventory strategy's transaction.</li>
  *   <li>PAID: {@link OrderWriter#markPaid}.</li>
- *   <li>TicketsIssued: {@link TicketIssuer#issueForOrder}, then {@link OrderWriter#markTicketsIssued}
- *       (M1.6, D-018). The order is already PAID, so a failure here never undoes anything: the order
+ *   <li>TicketsIssued: {@link TicketStep#issue}, one booking transaction that locks the order, issues
+ *       through {@code ticketing::api} and records TICKETS_ISSUED (M1.6, D-018). The order is already PAID, so a failure here never undoes anything: the order
  *       stays PAID at saga state SEATS_SOLD, and a retried POST /orders for the hold issues the tickets.</li>
  * </ol>
  * <b>Deliberately not {@code @Transactional}</b> (D-015): the strategy must run in its own transaction,
@@ -58,10 +57,10 @@ class CheckoutService {
     private final PaymentService payments;
     private final OrderWriter writer;
     private final OrderQueries queries;
-    private final TicketIssuer tickets;
+    private final TicketStep tickets;
 
     CheckoutService(HoldService holds, PaymentService payments, OrderWriter writer, OrderQueries queries,
-                    TicketIssuer tickets) {
+                    TicketStep tickets) {
         this.holds = holds;
         this.payments = payments;
         this.writer = writer;
@@ -243,10 +242,9 @@ class CheckoutService {
     private void issueTickets(UUID orderId, UUID userId, UUID eventId, List<CheckoutHold.CheckoutSeat> seats) {
         for (int attempt = 1; attempt <= TICKET_ATTEMPTS; attempt++) {
             try {
-                tickets.issueForOrder(new IssueTickets(orderId, eventId, userId, seats.stream()
+                tickets.issue(new IssueTickets(orderId, eventId, userId, seats.stream()
                         .map(seat -> new IssueTickets.Seat(seat.seatId(), seat.section(), seat.row(), seat.number()))
                         .toList()));
-                writer.markTicketsIssued(orderId);
                 return;
             } catch (RuntimeException e) {
                 log.warn("Order {}: issuing tickets failed (attempt {}/{})", orderId, attempt, TICKET_ATTEMPTS, e);
@@ -259,7 +257,8 @@ class CheckoutService {
     /**
      * POST /orders for a hold that is already CONVERTED: its order exists and its seats are sold. If
      * that checkout's step 5 failed (or is running right now in another request), issue the tickets
-     * now; issuing is idempotent, so racing the original request is harmless. Then 200 with the order.
+     * now. {@code awaitsTickets} is only a cheap pre-check: {@link TicketStep#issue} re-checks the order
+     * under its row lock, so racing the original request is harmless. Then 200 with the order.
      */
     private PlaceOrderResult retriedAfterSale(UUID userId, UUID holdId, CheckoutHold.Converted converted) {
         PlaceOrderResult.Existing existing = existingOrder(userId, holdId);

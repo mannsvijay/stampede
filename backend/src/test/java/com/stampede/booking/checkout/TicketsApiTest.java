@@ -69,6 +69,50 @@ class TicketsApiTest extends CheckoutTestSupport {
         assertInvariants();
     }
 
+    @Autowired
+    TicketStep step;
+
+    @Test
+    void stepFiveIssuesOnlyTheOrdersOwnSeats() {
+        UUID orderId = orderId(postOrder(alice, hold(alice, seats.get(0))));
+        forgetTickets(orderId);
+
+        // seats.get(5) was never sold to this order: rejected, and nothing written (not even seat 0's).
+        assertThatThrownBy(() -> step.issue(command(orderId, aliceId, seats.get(0), seats.get(5))))
+                .hasMessageContaining("not exactly its active items");
+        assertThatThrownBy(() -> step.issue(command(orderId, aliceId)))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThat(ticketsOfOrder(orderId)).isZero();
+        assertThat(sagaState(orderId)).isEqualTo("SEATS_SOLD");
+
+        step.issue(command(orderId, aliceId, seats.get(0)));
+        assertThat(ticketsOfOrder(orderId)).isEqualTo(1);
+        assertInvariants();
+    }
+
+    @Test
+    void stepFiveIssuesNothingForAnOrderThatIsNoLongerPaid() {
+        UUID orderId = orderId(postOrder(alice, hold(alice, seats.get(0))));
+        forgetTickets(orderId);
+        // What an M3 refund would leave behind; nothing moves a PAID order today.
+        jdbc.sql("UPDATE orders SET status = 'REFUNDED', saga_state = 'REFUNDED' WHERE id = ?").param(orderId).update();
+
+        assertThatThrownBy(() -> step.issue(command(orderId, aliceId, seats.get(0))))
+                .hasMessageContaining("is REFUNDED/REFUNDED, cannot issue tickets");
+        assertThat(ticketsOfOrder(orderId)).isZero();
+    }
+
+    @Test
+    void stepFiveOnAnOrderWhoseTicketsAreIssuedDoesNothing() {
+        UUID orderId = orderId(postOrder(alice, hold(alice, seats.get(0))));
+        List<UUID> before = ticketIds(orderId);
+
+        step.issue(command(orderId, aliceId, seats.get(0)));
+
+        assertThat(ticketIds(orderId)).isEqualTo(before);
+        assertThat(sagaState(orderId)).isEqualTo("TICKETS_ISSUED");
+    }
+
     @Test
     void myTicketsShowsOnlyTheCallersTicketsWithTheirSeatLabels() {
         UUID aliceOrder = orderId(postOrder(alice, hold(alice, seats.get(2), seats.get(3))));
@@ -140,6 +184,12 @@ class TicketsApiTest extends CheckoutTestSupport {
     private static Set<String> field(JsonNode items, String name) {
         return StreamSupport.stream(items.spliterator(), false).map(t -> t.path(name).asText())
                 .collect(Collectors.toSet());
+    }
+
+    /** As if step 5 had never succeeded: no tickets, saga back at SEATS_SOLD. */
+    private void forgetTickets(UUID orderId) {
+        jdbc.sql("DELETE FROM tickets WHERE order_id = ?").param(orderId).update();
+        jdbc.sql("UPDATE orders SET saga_state = 'SEATS_SOLD' WHERE id = ?").param(orderId).update();
     }
 
     private List<UUID> ticketIds(UUID orderId) {
