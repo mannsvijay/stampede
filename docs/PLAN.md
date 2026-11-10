@@ -265,6 +265,22 @@ and gets the seeded demo event from GET /events. Still open in M0: M0.7a (date-g
       ticket's seat is SOLD to its PAID order and its holder is the buyer; an order at TICKETS_ISSUED
       has exactly one live ticket per active item; a PAID order is at TICKETS_ISSUED, i.e. PRD 6.10
       invariant 3). The checker needs a grace period for T3 (checkouts still in step 5).
+      Decisions (D-019, draft): `control.invariants.InvariantChecker` runs 16 SQL rules per event
+      (I1-I3, I8, V1, O1-O7, C1, T1-T3; existing queries moved word for word, `HoldInvariants`
+      deleted) in one read-only REPEATABLE READ snapshot. Grace (from `orders.created_at`) excuses
+      a running checkout's in-between states in O1, O4, O5, O7, T3; tests are strict (zero).
+      `testsupport.InvariantAssertionListener` (spring.factories) checks every event's committed
+      state after every Spring test: before `@AfterEach`, or after the rollback for tests in a test
+      transaction (checking earlier deadlocked on the TRUNCATE locks of an open test transaction).
+      `@ExpectInvariantViolations(rules, reason)` must match the fired rules exactly; 16 tests carry
+      it, 5 half-built setups were fixed instead. `InvariantMonitor` runs every 30 s with 30 s grace
+      on non-DRAFT/ENDED events: ERROR log + gauge `stampede.invariants.violations{rule}`. The
+      harness calls the checker. I8's `used > limit` stays strict: a limit change must refuse to go
+      below current use. The O6 test drops `uq_order_items_active_seat` inside a rolled-back
+      transaction in its own container: the one exception to CLAUDE.md's rule (D-019).
+      Measured: full check of a sold-out 2,000-seat event, median 83 ms.
+      Follow-up rule (not done in M1.7): "ACTIVE hold expired longer ago than the grace period"
+      (the sweeper is stuck or keeps failing a hold); see the M2.2 note.
 - [ ] M1.8 Basic seat map page: Canvas2D render of seats, click to hold, checkout, show ticket QR
       Note (from M1.6, D-018): tickets come from GET /me/tickets (`qr` is the string to draw, byte
       mode, 195 chars; labels in section/row/seatNumber). A 201 order can briefly have no tickets
@@ -285,7 +301,14 @@ and gets the seeded demo event from GET /events. Still open in M0: M0.7a (date-g
 - [ ] M2.1 Optimistic strategy (version column, bounded retries with jitter)
 - [ ] M2.2 Redis-first strategy (Lua: all-or-nothing hold keys with TTL, per-user cap inside Lua,
       async persistence + reconciler)
+      Note (from M1.7, D-019): add PRD 6.10 #5 ("Redis hold state is consistent with Postgres") as an
+      `InvariantCheck` in `InvariantChecker`'s list (the after-test listener, harness and monitor
+      then run it). Add the stuck-sweeper rule then too: ACTIVE holds whose `expires_at` is older
+      than the grace period, since the sweeper becomes the safety net behind Redis expiry.
 - [ ] M2.3 Strategy selectable per event (admin endpoint); concurrency test parameterised over all three
+      Note (from M1.7, D-019): if an admin endpoint ever changes `per_user_limit`, it must refuse
+      (409) a limit below any user's current `used`, checked under the allowance row locks; I8
+      treats `used > limit` as a violation.
 - [ ] M2.4 k6 scenarios: seat-collision, mixed-realistic; `scripts/k6.sh` runs k6 in Docker
       Note (from M0.5): log in during k6 `setup()`, not in the measured phase; bcrypt (cost 12) is
       deliberately slow and would dominate the numbers.
@@ -319,6 +342,11 @@ and gets the seeded demo event from GET /events. Still open in M0: M0.7a (date-g
       Note (from M1.6, D-018): also recover PAID orders still at SEATS_SOLD (step 5 failed every
       attempt) by running `booking.checkout.TicketStep` again (idempotent, locks the order row). Any
       step that moves an order out of PAID (refund) must take the same order row lock.
+      Note (from M1.7, D-019): once refunds define their end state (items inactive? seats released?
+      hold?), revisit `TicketsApiTest.stepFiveIssuesNothingForAnOrderThatIsNoLongerPaid`: its refund
+      is simulated by SQL and annotated `@ExpectInvariantViolations({O1, O3, O5})`. Build the real
+      refund state instead, and give the rules a REFUNDED case. Also check the monitor's 30 s grace
+      (measured from order creation) against asynchronous payment times.
 - [ ] M3.5 Webhook ingestion: signature check, dedupe, out-of-order handling, reconciliation poller
       Note (from M1.5): the poller must resolve payments left CREATED (unknown outcome) by asking the
       provider by payment id.
@@ -347,6 +375,9 @@ and gets the seeded demo event from GET /events. Still open in M0: M0.7a (date-g
 - [ ] M5.3 Seat map v2: pan/zoom, semantic zoom, "Taken N ms ago", keyboard navigation
 - [ ] M5.4 Hold timer bar + tab-title countdown; waiting room screen (simple version first)
 - [ ] M5.5 Control room: queue depth, admission rate, holds/s, p95, errors, invariant lights, pause
+      Note (from M1.7, D-019): the invariant lights read `InvariantChecker` (graced) or the gauge
+      `stampede.invariants.violations{rule}` from `InvariantMonitor`. `/actuator/metrics` isn't
+      exposed yet; expose it ADMIN-only or add an admin endpoint.
 
 ## M6 - Resilience and observability (week 11)
 - [ ] M6.1 Three API instances behind Nginx; kill one mid-checkout, saga resumes

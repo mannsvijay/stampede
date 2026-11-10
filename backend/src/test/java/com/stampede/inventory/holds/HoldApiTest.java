@@ -69,7 +69,12 @@ class HoldApiTest extends ApiTestSupport {
     /** Other tests share this database (and GET /events must only list the demo event there). */
     @AfterEach
     void deleteEvent() {
+        jdbc.sql("DELETE FROM tickets WHERE event_id = ?").param(EVENT).update();
+        jdbc.sql("DELETE FROM payments WHERE order_id IN (SELECT id FROM orders WHERE event_id = ?)")
+                .param(EVENT).update();
+        jdbc.sql("DELETE FROM order_items WHERE event_id = ?").param(EVENT).update();
         jdbc.sql("DELETE FROM event_seats WHERE event_id = ?").param(EVENT).update();
+        jdbc.sql("DELETE FROM orders WHERE event_id = ?").param(EVENT).update();
         jdbc.sql("DELETE FROM holds WHERE event_id = ?").param(EVENT).update();
         jdbc.sql("DELETE FROM user_event_allowance WHERE event_id = ?").param(EVENT).update();
         jdbc.sql("DELETE FROM price_tiers WHERE event_id = ?").param(EVENT).update();
@@ -264,6 +269,9 @@ class HoldApiTest extends ApiTestSupport {
         UUID holdId = holdId(postHold(EVENT, alice, SEATS.get(0)));
         jdbc.sql("UPDATE event_seats SET status = 'AVAILABLE', hold_id = NULL WHERE event_id = ?").param(EVENT).update();
         jdbc.sql("UPDATE holds SET status = 'EXPIRED' WHERE id = ?").param(holdId).update();
+        // An expiry gives the seat back to the allowance (D-016), as the real release does.
+        jdbc.sql("UPDATE user_event_allowance SET used = used - 1 WHERE event_id = ? AND user_id = ?")
+                .params(EVENT, aliceId).update();
 
         assertThat(request(HttpMethod.DELETE, "/holds/" + holdId, alice).status()).isEqualTo(204);
     }
@@ -288,7 +296,10 @@ class HoldApiTest extends ApiTestSupport {
     @Test
     void deletingYourConvertedHoldIs409HoldConverted() {
         UUID holdId = holdId(postHold(EVENT, alice, SEATS.get(0)));
-        jdbc.sql("UPDATE holds SET status = 'CONVERTED' WHERE id = ?").param(holdId).update();
+        // Converted the real way, by a checkout, so the hold has its PAID order and the seat is SOLD.
+        Response order = exchange(HttpMethod.POST, "/orders",
+                new HttpEntity<>(Map.of("holdId", holdId), jsonHeaders(alice)));
+        assertThat(order.status()).as("checkout: %s", order.body()).isEqualTo(201);
 
         Response response = request(HttpMethod.DELETE, "/holds/" + holdId, alice);
 

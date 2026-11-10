@@ -945,3 +945,104 @@ Write these yourself, in your own words. Each one is an interview answer you've 
   base45 in alphanumeric mode); the checker often finds PAID orders without tickets (then issue
   asynchronously from an outbox event, M3); or a scanner vendor needs a standard format (then JWS
   or CWT).
+
+### D-019 Invariant checker v1: SQL rules in control, strict after every test, graced while running (DRAFT)
+- **Date:** 2026-11-11
+- **Context:** PRD 6.10 asks for an invariant checker that "runs continuously during operation and
+  as a hard assertion after every test". By M1.6 the rules lived only in tests (`HoldInvariants`,
+  `CheckoutTestSupport`) and ran only where a test remembered to call them. The checkout runs one
+  transaction per step (D-017), so some impossible-looking states are briefly legitimate while it
+  runs. Several tests leave broken data on purpose. Every rule joins tables owned by different
+  modules, which D-007's table-ownership convention forbids.
+- **Options considered:**
+  - After-test wiring: a Spring `TestExecutionListener` registered in `META-INF/spring.factories`;
+    a JUnit extension auto-detected for every test; a base class or `@ExtendWith` per test class.
+  - Opting out: an annotation that names the exact rules expected to fire; a plain skip.
+  - Exposure: tests only until M5.5; plus a scheduled run (log + gauge); plus an admin endpoint.
+  - Scope: rules per event (all events = a loop); one global query per rule.
+  - I8 when an admin lowers a limit: keep `used > limit` strict and forbid lowering below current
+    use; split I8 into a violation and a warning; drop the limit half (a weakened check, rejected).
+  - O6, which the unique index makes impossible: drop the index in a rolled-back test transaction
+    to show the rule fires; only show that the index refuses the state.
+- **Decision:**
+  - **`control.invariants.InvariantChecker`** runs a list of `InvariantCheck`s per event and returns
+    `Violation(ruleId, ruleName, eventId, detail)`. Today they are the 16 `SqlRules`: I1-I3, I8
+    (holds), V1 (venue match, M0.2 note), O1-O7 (orders), C1 (capacity), T1-T3 (tickets). PRD
+    6.10's five rules are O6 and O1 (#1), C1 (#2), T3 (#3), O1 (#4); #5 (Redis) is an
+    `InvariantCheck` that M2.2 adds to the list. Existing queries moved word for word; O1, O4, O5
+    and T3 gained grace conditions, and V1, O6, O7 and C1 are new.
+  - **One snapshot per event:** an event's rules run in one READ ONLY transaction at REPEATABLE READ,
+    so all rules see the same committed moment and the checker can't write. Called inside an
+    existing transaction, it joins it.
+  - **Grace:** with a positive grace, the in-between states of a running checkout are excused while
+    the order is younger than it: seats SOLD and hold CONVERTED with the order still PENDING (O1,
+    O5), any PENDING order (O7), PAID without tickets (T3), CANCELLED with the charge not yet
+    refunded (O4). Grace zero is strict and used by every test. Age is measured from
+    `orders.created_at`, the only timestamp on orders.
+  - **After every Spring test:** `testsupport.InvariantAssertionListener`, registered in
+    `src/test/resources/META-INF/spring.factories`, runs every rule over every event, strictly, on
+    the **committed** database, and fails the test on any violation. Without a test transaction it
+    runs right after the test method, before the `@AfterEach` cleanup. Inside one, it runs after
+    Spring rolls it back (listener order 3000, below `TransactionalTestExecutionListener`'s 4000;
+    "after" callbacks run in reverse order). Checking earlier waits forever on the locks the open
+    test transaction holds (found the hard way: a TRUNCATE in a test transaction deadlocked the
+    suite), and joining it fails when the test aborted it on purpose. Every check sets a 10 s
+    `lock_timeout`. `-Dstampede.invariants.after-test=report` writes
+    `build/reports/invariants/after-test.txt` instead of failing.
+  - **Opt-out:** `@ExpectInvariantViolations(rules, reason)` on the test method. The rules that fire
+    must be exactly the listed ones; a blank reason, an unknown rule or a stale annotation (nothing
+    fires) fails the test. 16 tests carry it: 3 documented D-017 PENDING outcomes
+    (`CheckoutFailureTest`), 6 tests with deliberate drift that the code must refuse to touch, 6
+    strategy unit tests that test step 3 alone (a bare PENDING order that step 4 never finishes),
+    and `TicketsApiTest`'s simulated refund (revisit in M3). Five other flagged tests had
+    half-built setups and were fixed instead.
+  - **Scheduled run:** `InvariantMonitor` runs `stampede.invariants.monitor.interval` (30 s) after
+    the previous check finished, on events that are neither DRAFT nor ENDED, with
+    `stampede.invariants.monitor.grace` (30 s, must be positive). It logs violations at ERROR (the
+    first 20 in detail) and sets the gauge `stampede.invariants.violations{rule}` to the latest
+    count. Off in tests. No endpoint until M5.5.
+  - **Table ownership:** the checker is the one recorded exception to D-007's convention. It reads
+    inventory's, booking's, payments' and ticketing's tables directly, only in a read-only
+    transaction, because its rules are joins across modules that no single module's API can answer.
+    `control`'s package-info lists the tables it reads.
+  - **I8 stays strict:** `used > per_user_limit` is always a violation. Any future way to change a
+    limit (none exists: nothing writes `per_user_limit` after insert) must refuse to go below any
+    user's current `used` (409), checked under the allowance row locks.
+  - **The one exception to CLAUDE.md's "never drop or relax" rule for `uq_order_items_active_seat`:**
+    `InvariantCheckerTest.o6SeatInTwoActiveOrdersWithTheUniqueIndexBypassed` drops it inside a
+    transaction that is always rolled back, in that class's own throwaway container, and then
+    asserts the index is back. Nowhere else: never in a migration or a shared test database.
+    Why: O6 is PRD 6.10's first invariant, and a rule that has never been seen to fire may be a
+    query that can't fire. The index makes the state impossible otherwise. Postgres DDL is
+    transactional, so the rollback restores the index exactly.
+  - The concurrency harness calls the checker (strict) after every round instead of its own copy;
+    its outcome-based checks I4-I7 stay in the harness.
+- **Why:**
+  - A listener registered once can't be forgotten by a new test class. An exact-rules annotation
+    documents a known broken state without hiding an unrelated one.
+  - Strict in tests, graced at runtime: a test's requests have all returned, so nothing may be
+    mid-checkout; a running app always has checkouts in flight.
+  - Rules per event use the `event_id` indexes, cost nothing for other events' history, and group
+    the way the control room will show them. Measured: a full check of a sold-out 2,000-seat event
+    (500 PAID orders, 2,000 tickets) takes a median 83 ms; the slowest rule (T2) takes 12 ms.
+  - Refusing to lower a limit below current use keeps I8 one simple rule instead of grandfathering.
+- **Known limits:**
+  - For a test inside a test transaction, the listener sees only what it left committed (nothing,
+    after the rollback), not its in-transaction state; such tests (InvariantCheckerTest,
+    InvariantMonitorTest) assert their own. The listener's test calls it with a mocked
+    `TestContext`; no dedicated test shows that the after-rollback path catches something, only that
+    the suite doesn't hang and the step-3 report found violations in such classes.
+  - Grace is measured from order creation: a healthy checkout slower than 30 s (M3's asynchronous
+    payment) would be reported; raise the grace or add an `updated_at` to orders then.
+  - `/actuator/metrics` isn't exposed (only health), so today the gauge is visible only inside the
+    app; the ERROR log repeats every 30 s while a violation lasts.
+  - Not checked yet: ACTIVE holds long past their expiry, i.e. a stuck sweeper (PLAN.md, M1.7).
+  - O6 and C1 are tripwires behind constraints and V1: C1 can't fire unless V1 or an index breaks
+    first. O5 filters a FULL JOIN by `coalesce(event_id)`, which no index serves; fine at today's
+    sizes (3 ms on the 2,000-seat event).
+  - Modulith can't see that the checker only reads; the read-only transaction is what enforces it.
+- **How I'd know it was wrong:** the monitor reports violations nobody can explain as a crash or a
+  known limit (a rule is wrong, or the grace is too short); a test fails the after-test check only
+  when run after another class (a leak between tests); the check takes long enough on a real event
+  to matter (time it per event, then consider spreading rules over ticks); or the annotation list
+  keeps growing (tests are building fake states instead of using the real paths).

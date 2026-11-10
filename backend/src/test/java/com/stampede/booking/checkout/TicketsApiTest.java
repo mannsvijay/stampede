@@ -8,6 +8,7 @@ import com.stampede.ticketing.api.IssueTickets;
 import com.stampede.ticketing.api.TicketIssuer;
 import com.stampede.ticketing.signing.TicketPayload;
 import com.stampede.ticketing.signing.TicketVerifier;
+import com.stampede.testsupport.ExpectInvariantViolations;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
@@ -91,6 +92,8 @@ class TicketsApiTest extends CheckoutTestSupport {
     }
 
     @Test
+    @ExpectInvariantViolations(rules = {"O1", "O3", "O5"},
+            reason = "Refund simulated by SQL: what a refund leaves (items, seats, hold) is undefined until M3; revisit when M3 defines it (PLAN.md M3 note)")
     void stepFiveIssuesNothingForAnOrderThatIsNoLongerPaid() {
         UUID orderId = orderId(postOrder(alice, hold(alice, seats.get(0))));
         forgetTickets(orderId);

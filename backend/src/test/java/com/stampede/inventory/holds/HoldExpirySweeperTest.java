@@ -7,6 +7,7 @@ import com.stampede.inventory.strategy.HoldOutcome;
 import com.stampede.inventory.strategy.HoldRequest;
 import com.stampede.inventory.strategy.InventoryStrategies;
 import com.stampede.inventory.strategy.InventoryStrategy;
+import com.stampede.testsupport.ExpectInvariantViolations;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
@@ -181,6 +182,8 @@ class HoldExpirySweeperTest {
     }
 
     @Test
+    @ExpectInvariantViolations(rules = {"I8"},
+            reason = "Deliberate drift: the allowance row is deleted so the sweeper's release must refuse this hold")
     void oneBrokenHoldDoesNotStopTheOthers() {
         UUID broken = hold(USERS.get(0), SEATS.get(0));
         UUID fine = hold(USERS.get(1), SEATS.get(1));
@@ -198,6 +201,8 @@ class HoldExpirySweeperTest {
     }
 
     @Test
+    @ExpectInvariantViolations(rules = {"I8"},
+            reason = "Deliberate drift: the allowance row is deleted so the sweeper's release must refuse these holds")
     void brokenHoldsDoNotStarveHealthyOnesBehindThem() {
         // Three holds that can't be released are the OLDEST, so they fill the first page (size 2)
         // and half the second on every sweep. Keyset paging must still reach the healthy ones.

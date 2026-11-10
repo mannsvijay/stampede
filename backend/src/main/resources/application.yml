@@ -74,6 +74,16 @@ stampede:
       interval: PT5S
       # Expired holds read per page; a sweep pages past holds it could not expire (D-016).
       batch-size: 500
+  invariants:
+    monitor:
+      # Runs the invariant checker (PRD 6.10, D-019) over every event that is neither DRAFT nor ENDED;
+      # logs violations at ERROR and sets the gauge stampede.invariants.violations{rule}.
+      enabled: true
+      # Delay between the end of one check and the start of the next (ISO-8601 duration).
+      interval: PT30S
+      # In-between states of a checkout (PENDING order, PAID without tickets yet, ...) are excused
+      # while the order is younger than this. Must be positive; tests check strictly (zero).
+      grace: PT30S
   # Read only under the bootstrap-admin profile (AdminBootstrapRunner).
   bootstrap-admin:
     email: ${STAMPEDE_ADMIN_EMAIL:}

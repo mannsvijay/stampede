@@ -12,6 +12,7 @@ import static org.mockito.Mockito.verify;
 import com.stampede.inventory.api.HoldService;
 import com.stampede.payments.provider.PaymentProvider;
 import com.stampede.ticketing.api.TicketIssuer;
+import com.stampede.testsupport.ExpectInvariantViolations;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
 import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
@@ -110,6 +111,8 @@ class CheckoutFailureTest extends CheckoutTestSupport {
     }
 
     @Test
+    @ExpectInvariantViolations(rules = {"O1", "O5", "O7"},
+            reason = "D-017 known limit: step 4 fails every attempt, so the order stays PENDING with its seats SOLD and its hold CONVERTED until M3 recovery")
     void aFinishThatKeepsFailingLeavesTheSaleInPlaceAndThe500ForM3() {
         // Seats are sold; undoing that would refund a buyer who has seats. The order stays PENDING
         // with SOLD seats (only its status is wrong) until M3 recovery: the documented known limit.
@@ -126,11 +129,12 @@ class CheckoutFailureTest extends CheckoutTestSupport {
         assertThat(seatOrder(seats.get(0))).isEqualTo(orderId);
         assertThat(holdStatus(holdId)).isEqualTo("CONVERTED");
         assertThat(paymentStatuses(orderId)).as("not refunded").containsExactly("SUCCEEDED");
-        // Invariants deliberately not asserted: O1 (sold seat in a PAID order) is the violation the
-        // M1.7 checker must report here.
+        // The after-test check asserts that exactly O1, O5 and O7 report this (the annotation above).
     }
 
     @Test
+    @ExpectInvariantViolations(rules = {"O7"},
+            reason = "D-017 known limit: the compensating release threw, so nothing is cancelled or refunded and the order stays PENDING for M3 recovery")
     void whenTheCompensatingReleaseFailsNothingIsCancelledOrRefunded() {
         // The sell step throws, and so does the release that would tell us whether the sale
         // committed. Not knowing, the checkout must NOT cancel or refund (that could refund a buyer
@@ -147,10 +151,12 @@ class CheckoutFailureTest extends CheckoutTestSupport {
         assertThat(paymentStatuses(orderId)).as("not refunded").containsExactly("SUCCEEDED");
         assertThat(count("SELECT count(*) FROM order_items WHERE order_id = ? AND active", orderId)).isEqualTo(1);
         verify(writer, times(0)).cancel(any());
-        // Invariants deliberately not asserted: this is the documented PENDING outcome (D-017).
+        // The documented PENDING outcome (D-017): the after-test check asserts that exactly O7 reports it.
     }
 
     @Test
+    @ExpectInvariantViolations(rules = {"O7"},
+            reason = "D-017 known limit: a decline whose compensating release threw leaves the order PENDING and the hold ACTIVE for M3 recovery")
     void aDeclineWhoseCompensationFailsIsA500NotA402() {
         // The 402 says "your seats have been released"; if that didn't happen, don't claim it.
         UUID holdId = hold(alice, seats.get(0));

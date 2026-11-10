@@ -10,6 +10,7 @@ import com.stampede.inventory.strategy.ReleaseOutcome.NotActive;
 import com.stampede.inventory.strategy.ReleaseOutcome.NotFound;
 import com.stampede.inventory.strategy.ReleaseOutcome.Released;
 import com.stampede.inventory.strategy.ReleaseOutcome.NotExpired;
+import com.stampede.testsupport.ExpectInvariantViolations;
 import java.sql.Array;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
@@ -337,6 +338,8 @@ class PessimisticInventoryStrategyTest {
     }
 
     @Test
+    @ExpectInvariantViolations(rules = {"I3", "I8"},
+            reason = "Deliberate drift: the hold lists a seat it doesn't own (and isn't counted) so release must refuse")
     void releaseOfAnInconsistentHoldThrowsAndRollsBack() {
         // Broken data on purpose: the hold lists SEAT_2 but owns only SEAT_1. Release must refuse
         // (exception) and leave everything as it was, not free half the hold.
@@ -518,6 +521,8 @@ class PessimisticInventoryStrategyTest {
     }
 
     @Test
+    @ExpectInvariantViolations(rules = {"I8"},
+            reason = "Deliberate drift: used is set below the hold's seats so release must throw and roll back")
     void releaseWithADriftedAllowanceThrowsAndRollsBack() {
         // used is lower than the hold's seats: decrementing would break ck_..._used_nonnegative.
         UUID holdId = UUID.randomUUID();
@@ -534,6 +539,8 @@ class PessimisticInventoryStrategyTest {
     }
 
     @Test
+    @ExpectInvariantViolations(rules = {"I8"},
+            reason = "Deliberate drift: the allowance row is deleted so release must throw and roll back")
     void releaseWithoutAnAllowanceRowThrowsAndRollsBack() {
         UUID holdId = UUID.randomUUID();
         holdDirectly(holdId, EVENT_A, SEAT_1);
@@ -643,6 +650,8 @@ class PessimisticInventoryStrategyTest {
             exec(other, "INSERT INTO holds (id, event_id, user_id, seat_ids, expires_at, status) "
                     + "VALUES (?, ?, ?, ?, now() + interval '5 minutes', 'ACTIVE')",
                     otherHold, EVENT_A, USER, new UUID[] {SEAT_1});
+            // The allowance row the strategy would write in the same transaction (D-016).
+            exec(other, "INSERT INTO user_event_allowance (event_id, user_id, used) VALUES (?, ?, 1)", EVENT_A, USER);
             exec(other, "UPDATE event_seats SET status = 'HELD', hold_id = ?, version = version + 1 "
                     + "WHERE event_id = ? AND seat_id = ?", otherHold, EVENT_A, SEAT_1);
             other.commit();
@@ -716,6 +725,8 @@ class PessimisticInventoryStrategyTest {
     // --- sell (M1.5, D-017) ----------------------------------------------------------------------
 
     @Test
+    @ExpectInvariantViolations(rules = {"O1", "O5", "O7"},
+            reason = "Strategy unit test of step 3 only (D-017): the order is a bare PENDING row and step 4 (booking marks it PAID) never runs, so its seats are SOLD to a PENDING order")
     void sellMovesEverySeatToSoldAndConvertsTheHold() {
         UUID holdId = UUID.randomUUID();
         holdDirectly(holdId, EVENT_A, SEAT_1, SEAT_2);
@@ -733,6 +744,8 @@ class PessimisticInventoryStrategyTest {
     }
 
     @Test
+    @ExpectInvariantViolations(rules = {"O7"},
+            reason = "The refused sale leaves the bare PENDING order this strategy unit test inserted; step 4 is booking's and never runs")
     void sellOfAnActiveHoldPastItsExpiryChangesNothing() {
         // The sweeper hasn't reached it yet: status ACTIVE, expires_at in the past. Must not be sold.
         UUID holdId = UUID.randomUUID();
@@ -747,6 +760,8 @@ class PessimisticInventoryStrategyTest {
     }
 
     @Test
+    @ExpectInvariantViolations(rules = {"O1", "O5", "O7"},
+            reason = "Strategy unit test of step 3 only (D-017): the order is a bare PENDING row and step 4 (booking marks it PAID) never runs, so its seats are SOLD to a PENDING order")
     void sellOfAReleasedOrAlreadyConvertedHoldIsNotActive() {
         UUID released = UUID.randomUUID();
         holdDirectly(released, EVENT_A, SEAT_1);
@@ -767,6 +782,8 @@ class PessimisticInventoryStrategyTest {
     }
 
     @Test
+    @ExpectInvariantViolations(rules = {"O7"},
+            reason = "The refused sale leaves the bare PENDING order this strategy unit test inserted; step 4 is booking's and never runs")
     void sellOfAnUnknownHoldOrAHoldOfAnotherEventIsNotFound() {
         UUID holdId = UUID.randomUUID();
         holdDirectly(holdId, EVENT_A, SEAT_1);
@@ -778,6 +795,8 @@ class PessimisticInventoryStrategyTest {
     }
 
     @Test
+    @ExpectInvariantViolations(rules = {"I3", "I8", "O7"},
+            reason = "Deliberate drift: the hold lists a seat it doesn't own (and isn't counted) so sell must refuse; O7 is the bare PENDING order of this unit test")
     void sellOfAnInconsistentHoldThrowsAndRollsBack() {
         // The hold lists SEAT_1 and SEAT_2 but only owns SEAT_1: never sell half a hold.
         UUID holdId = UUID.randomUUID();
@@ -794,6 +813,8 @@ class PessimisticInventoryStrategyTest {
     }
 
     @Test
+    @ExpectInvariantViolations(rules = {"O1", "O5", "O7"},
+            reason = "Strategy unit test of step 3 only (D-017): the order is a bare PENDING row and step 4 (booking marks it PAID) never runs, so its seats are SOLD to a PENDING order")
     void sellLocksTheHoldRowBeforeItsSeats() throws Exception {
         // D-015 lock order for paths that start from a hold: the hold row, then the seats. Another
         // session locks the hold row; sell() must block there WITHOUT owning any seat lock yet.
@@ -818,6 +839,8 @@ class PessimisticInventoryStrategyTest {
     }
 
     @Test
+    @ExpectInvariantViolations(rules = {"O1", "O5", "O7"},
+            reason = "Strategy unit test of step 3 only (D-017): the order is a bare PENDING row and step 4 (booking marks it PAID) never runs, so its seats are SOLD to a PENDING order")
     void sellAndCancelOfTheSameHoldTakeTurns() throws Exception {
         // Both lock the hold row first, so whichever comes second sees the first one's status. Each
         // round ends either sold (cancel says CONVERTED) or released (sell says RELEASED), never both.
@@ -971,7 +994,9 @@ class PessimisticInventoryStrategyTest {
 
     /**
      * Test setup without the strategy: a SOLD seat owned by a new PAID order (version 1). Since V3
-     * every order has a hold, so this adds the CONVERTED hold the order came from.
+     * every order has a hold, so this adds the CONVERTED hold the order came from. The rest is what a
+     * finished checkout leaves (M1.7: the after-test invariant check sees it): the order's active item,
+     * its SUCCEEDED payment, its ticket (saga TICKETS_ISSUED) and the seat counted in USER's allowance.
      */
     private UUID sellDirectly(UUID eventId, UUID seat) {
         UUID holdId = UUID.randomUUID();
@@ -982,12 +1007,25 @@ class PessimisticInventoryStrategyTest {
         UUID orderId = UUID.randomUUID();
         jdbc.sql("""
                 INSERT INTO orders (id, user_id, event_id, hold_id, status, total_paise, saga_state)
-                VALUES (?, ?, ?, ?, 'PAID', 150000, 'SEATS_SOLD')
+                VALUES (?, ?, ?, ?, 'PAID', 150000, 'TICKETS_ISSUED')
                 """).params(orderId, USER, eventId, holdId).update();
         jdbc.sql("""
                 UPDATE event_seats SET status = 'SOLD', order_id = ?, version = version + 1
                 WHERE event_id = ? AND seat_id = ?
                 """).params(orderId, eventId, seat).update();
+        jdbc.sql("INSERT INTO order_items (order_id, event_id, seat_id, price_paise) VALUES (?, ?, ?, 150000)")
+                .params(orderId, eventId, seat).update();
+        jdbc.sql("INSERT INTO payments (order_id, status, amount_paise) VALUES (?, 'SUCCEEDED', 150000)")
+                .param(orderId).update();
+        jdbc.sql("""
+                INSERT INTO tickets (order_id, event_id, seat_id, holder_user_id, signature, status, key_id,
+                                     section_code, row_label, seat_number)
+                VALUES (?, ?, ?, ?, decode(repeat('00', 64), 'hex'), 'ISSUED', '0123abcd', 'A', 'A', 1)
+                """).params(orderId, eventId, seat, USER).update();
+        jdbc.sql("""
+                INSERT INTO user_event_allowance (event_id, user_id, used) VALUES (?, ?, 1)
+                ON CONFLICT (event_id, user_id) DO UPDATE SET used = user_event_allowance.used + 1
+                """).params(eventId, USER).update();
         return orderId;
     }
 
