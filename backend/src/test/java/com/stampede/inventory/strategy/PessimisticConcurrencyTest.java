@@ -15,6 +15,7 @@ import javax.sql.DataSource;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import com.stampede.control.invariants.InvariantChecker;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.jdbc.AutoConfigureTestDatabase;
 import org.springframework.boot.test.autoconfigure.jdbc.JdbcTest;
@@ -38,7 +39,7 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 @JdbcTest(properties = "spring.datasource.hikari.maximum-pool-size=" + PessimisticConcurrencyTest.POOL_SIZE)
 @AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
 @Testcontainers
-@Import(PessimisticInventoryStrategy.class)
+@Import({PessimisticInventoryStrategy.class, InvariantChecker.class})
 @Transactional(propagation = Propagation.NOT_SUPPORTED)
 class PessimisticConcurrencyTest {
 
@@ -71,6 +72,9 @@ class PessimisticConcurrencyTest {
 
     @Autowired
     JdbcClient jdbc;
+
+    @Autowired
+    InvariantChecker invariants;
 
     @Autowired
     DataSource dataSource;
@@ -126,7 +130,7 @@ class PessimisticConcurrencyTest {
     }
 
     private void run(Scenario scenario) {
-        ConcurrencyHarness harness = new ConcurrencyHarness(strategy, jdbc, FIXTURE,
+        ConcurrencyHarness harness = new ConcurrencyHarness(strategy, jdbc, invariants, FIXTURE,
                 Config.fromSystemProperties(THREADS), RACERS);
 
         HarnessReport report = harness.run(scenario);

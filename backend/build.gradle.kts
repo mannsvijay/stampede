@@ -61,10 +61,11 @@ dependencies {
 
 tasks.withType<Test> {
     useJUnitPlatform()
-    // Forward -Dstampede.harness.rounds / .seed from the Gradle command line to the test JVM (M1.3).
-    // They become task inputs, so a run with a different value is never skipped as UP-TO-DATE.
+    // Forward -Dstampede.harness.rounds / .seed (M1.3) and -Dstampede.invariants.after-test (M1.7)
+    // from the Gradle command line to the test JVM. They become task inputs, so a run with a
+    // different value is never skipped as UP-TO-DATE.
     System.getProperties().stringPropertyNames()
-        .filter { it.startsWith("stampede.harness.") }
+        .filter { it.startsWith("stampede.harness.") || it.startsWith("stampede.invariants.") }
         .forEach { systemProperty(it, System.getProperty(it)) }
 }
 

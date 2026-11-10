@@ -1,0 +1,3 @@
+# The hard invariant assertion after every Spring integration test (M1.7, D-019). Listed here, it is
+# added to Spring's default listeners for every test class, so a new test class can't forget it.
+org.springframework.test.context.TestExecutionListener=com.stampede.testsupport.InvariantAssertionListener

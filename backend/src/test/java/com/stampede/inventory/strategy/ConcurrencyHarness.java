@@ -1,9 +1,12 @@
 package com.stampede.inventory.strategy;
 
+import com.stampede.control.invariants.InvariantChecker;
+import com.stampede.control.invariants.Violation;
 import com.stampede.inventory.strategy.HoldOutcome.Held;
 import com.stampede.inventory.strategy.ReleaseOutcome.Released;
 import java.security.SecureRandom;
 import java.sql.SQLException;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -98,14 +101,16 @@ final class ConcurrencyHarness {
 
     private final InventoryStrategy strategy;
     private final JdbcClient jdbc;
+    private final InvariantChecker invariants;
     private final Fixture fixture;
     private final Config config;
     private final ExecutorService threads;
 
-    ConcurrencyHarness(InventoryStrategy strategy, JdbcClient jdbc, Fixture fixture, Config config,
-            ExecutorService threads) {
+    ConcurrencyHarness(InventoryStrategy strategy, JdbcClient jdbc, InvariantChecker invariants, Fixture fixture,
+            Config config, ExecutorService threads) {
         this.strategy = strategy;
         this.jdbc = jdbc;
+        this.invariants = invariants;
         this.fixture = fixture;
         this.config = config;
         this.threads = threads;
@@ -274,8 +279,9 @@ final class ConcurrencyHarness {
                     }
                 });
 
-        // I1-I3 and I8 in SQL, then the scenario's own checks.
-        violations.addAll(HoldInvariants.check(jdbc, fixture.eventId()));
+        // Every rule of the invariant checker (M1.7: I1-I3 and I8, plus the order, ticket and venue rules),
+        // strictly; then the scenario's own checks.
+        invariants.check(fixture.eventId(), Duration.ZERO).stream().map(Violation::toString).forEach(violations::add);
         violations.addAll(scenario.checkRace(race));
         return violations;
     }

@@ -3,8 +3,10 @@ package com.stampede.booking.checkout;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.fasterxml.jackson.databind.JsonNode;
-import com.stampede.inventory.strategy.HoldInvariants;
+import com.stampede.control.invariants.InvariantChecker;
+import com.stampede.control.invariants.Violation;
 import com.stampede.testsupport.ApiTestSupport;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -12,6 +14,7 @@ import java.util.UUID;
 import java.util.stream.StreamSupport;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
@@ -28,6 +31,9 @@ abstract class CheckoutTestSupport extends ApiTestSupport {
     static final int PER_USER_LIMIT = 4;
     static final long GOLD_PAISE = 150_000;
     static final long SILVER_PAISE = 90_000;
+
+    @Autowired
+    InvariantChecker invariants;
 
     UUID venue;
     UUID section;
@@ -187,122 +193,22 @@ abstract class CheckoutTestSupport extends ApiTestSupport {
 
     // --- invariants ------------------------------------------------------------------------------
 
-    /**
-     * The hold invariants (I1-I3, I8 counting bought seats) plus the order and ticket rules below. Each query
-     * returns the rows that break its rule, so empty means it holds. Candidates for the M1.7 checker.
-     */
+    /** Every rule of the invariant checker (M1.7) holds for this test's event, strictly. */
     void assertInvariants() {
         assertThat(invariantViolations()).as("invariant violations").isEmpty();
     }
 
-    /** Every rule's violations, each prefixed with its rule; empty when all hold. */
+    /**
+     * Every rule's violations for this test's event, each prefixed with its rule; empty when all hold.
+     * Strict (no grace): the request under test has returned, so nothing may be mid-checkout.
+     */
     List<String> invariantViolations() {
-        List<String> violations = new ArrayList<>(HoldInvariants.check(jdbc, event));
-        violations.addAll(run("O1 sold seat without exactly one active item in its PAID order", """
-                SELECT es.seat_id::text || ' is SOLD to ' || es.order_id::text || ' with '
-                       || count(oi.order_id) FILTER (WHERE oi.active) || ' active items, '
-                       || count(oi.order_id) FILTER (WHERE oi.active AND o.status = 'PAID' AND o.id = es.order_id)
-                       || ' of them in its PAID order'
-                FROM event_seats es
-                LEFT JOIN order_items oi ON oi.event_id = es.event_id AND oi.seat_id = es.seat_id
-                LEFT JOIN orders o ON o.id = oi.order_id
-                WHERE es.event_id = ? AND es.status = 'SOLD'
-                GROUP BY es.seat_id, es.order_id
-                HAVING count(oi.order_id) FILTER (WHERE oi.active) <> 1
-                    OR count(oi.order_id) FILTER (WHERE oi.active AND o.status = 'PAID' AND o.id = es.order_id) <> 1
-                """));
-        violations.addAll(run("O2 PAID order whose seat isn't SOLD to it", """
-                SELECT 'order ' || o.id::text || ' is PAID but seat ' || oi.seat_id::text || ' is ' || es.status
-                       || ' owned by ' || coalesce(es.order_id::text, 'no order')
-                       || CASE WHEN oi.active THEN '' ELSE ' (item inactive)' END
-                FROM orders o
-                JOIN order_items oi ON oi.order_id = o.id
-                JOIN event_seats es ON es.event_id = oi.event_id AND es.seat_id = oi.seat_id
-                WHERE o.event_id = ? AND o.status = 'PAID'
-                  AND (es.status <> 'SOLD' OR es.order_id IS DISTINCT FROM o.id OR NOT oi.active)
-                """));
-        violations.addAll(run("O3 active item in an order that isn't PENDING or PAID", """
-                SELECT 'order ' || o.id::text || ' is ' || o.status || ' but seat ' || oi.seat_id::text
-                       || ' is still active'
-                FROM orders o JOIN order_items oi ON oi.order_id = o.id
-                WHERE o.event_id = ? AND oi.active AND o.status NOT IN ('PENDING', 'PAID')
-                """));
-        violations.addAll(run("O4 money: PAID needs one SUCCEEDED payment of its total, CANCELLED none", """
-                SELECT 'order ' || o.id::text || ' is ' || o.status || ' (total ' || o.total_paise || ', items '
-                       || (SELECT coalesce(sum(price_paise), 0) FROM order_items WHERE order_id = o.id)
-                       || ') with succeeded payments ' || coalesce(array_agg(p.amount_paise)
-                              FILTER (WHERE p.status = 'SUCCEEDED')::text, '{}')
-                FROM orders o
-                LEFT JOIN payments p ON p.order_id = o.id
-                WHERE o.event_id = ?
-                GROUP BY o.id, o.status, o.total_paise
-                HAVING (o.status = 'PAID' AND (count(p.id) FILTER (WHERE p.status = 'SUCCEEDED') <> 1
-                            OR min(p.amount_paise) FILTER (WHERE p.status = 'SUCCEEDED') <> o.total_paise
-                            OR o.total_paise <> (SELECT coalesce(sum(price_paise), 0) FROM order_items
-                                                 WHERE order_id = o.id)))
-                    OR (o.status = 'CANCELLED' AND count(p.id) FILTER (WHERE p.status = 'SUCCEEDED') > 0)
-                """));
-        violations.addAll(run("O5 CONVERTED hold without a PAID order, or PAID order whose hold isn't CONVERTED", """
-                SELECT 'hold ' || h.id::text || ' is ' || h.status || ', its order is '
-                       || coalesce(o.status, 'missing')
-                FROM holds h
-                FULL JOIN orders o ON o.hold_id = h.id
-                WHERE coalesce(h.event_id, o.event_id) = ?
-                  AND ((h.status = 'CONVERTED' AND o.status IS DISTINCT FROM 'PAID')
-                    OR (o.status = 'PAID' AND h.status IS DISTINCT FROM 'CONVERTED'))
-                """));
-        violations.addAll(run("T1 live ticket whose seat isn't SOLD to its PAID order, or held by someone else", """
-                SELECT 'ticket ' || t.id::text || ' for seat ' || t.seat_id::text || ' is in order '
-                       || t.order_id::text || ' (' || o.status || '), seat is ' || es.status || ' owned by '
-                       || coalesce(es.order_id::text, 'no order')
-                       || CASE WHEN t.holder_user_id = o.user_id THEN '' ELSE ', holder is not the buyer' END
-                FROM tickets t
-                JOIN orders o ON o.id = t.order_id
-                JOIN event_seats es ON es.event_id = t.event_id AND es.seat_id = t.seat_id
-                WHERE t.event_id = ? AND t.status <> 'REVOKED'
-                  AND (o.status <> 'PAID' OR es.status <> 'SOLD' OR es.order_id IS DISTINCT FROM t.order_id
-                       OR t.holder_user_id <> o.user_id)
-                """));
-        violations.addAll(run("T2 order at TICKETS_ISSUED without exactly one live ticket per active item", """
-                SELECT 'order ' || o.id::text || ' (' || o.status || '/' || o.saga_state || ') has '
-                       || (SELECT count(*) FROM order_items oi WHERE oi.order_id = o.id AND oi.active)
-                       || ' active items and live tickets for '
-                       || (SELECT count(*) FROM order_items oi JOIN tickets t ON t.order_id = o.id
-                               AND t.event_id = oi.event_id AND t.seat_id = oi.seat_id AND t.status <> 'REVOKED'
-                           WHERE oi.order_id = o.id AND oi.active)
-                       || ' of them, ' || (SELECT count(*) FROM tickets t WHERE t.order_id = o.id
-                                              AND t.status <> 'REVOKED') || ' in all'
-                FROM orders o
-                WHERE o.event_id = ? AND o.saga_state = 'TICKETS_ISSUED'
-                  AND (o.status <> 'PAID'
-                    OR (SELECT count(*) FROM order_items oi WHERE oi.order_id = o.id AND oi.active)
-                       <> (SELECT count(*) FROM order_items oi JOIN tickets t ON t.order_id = o.id
-                               AND t.event_id = oi.event_id AND t.seat_id = oi.seat_id AND t.status <> 'REVOKED'
-                           WHERE oi.order_id = o.id AND oi.active)
-                    OR (SELECT count(*) FROM tickets t WHERE t.order_id = o.id AND t.status <> 'REVOKED')
-                       <> (SELECT count(*) FROM order_items oi WHERE oi.order_id = o.id AND oi.active))
-                """));
-        // PRD 6.10 invariant 3, "every paid order has issued tickets". Tests check it as soon as the
-        // request returned; the M1.7 checker needs a grace period for checkouts still in step 5.
-        violations.addAll(run("T3 PAID order whose tickets aren't issued", """
-                SELECT 'order ' || o.id::text || ' is PAID at saga state ' || o.saga_state || ' with '
-                       || (SELECT count(*) FROM tickets t WHERE t.order_id = o.id AND t.status <> 'REVOKED')
-                       || ' live tickets'
-                FROM orders o
-                WHERE o.event_id = ? AND o.status = 'PAID' AND o.saga_state <> 'TICKETS_ISSUED'
-                """));
-        return violations;
+        return invariants.check(event, Duration.ZERO).stream().map(Violation::toString).toList();
     }
 
     /** No checkout left anything half-done: every order ended PAID or CANCELLED. */
     void assertNoPendingOrders() {
         assertThat(count("SELECT count(*) FROM orders WHERE event_id = ? AND status = 'PENDING'", event))
                 .as("PENDING orders").isZero();
-    }
-
-    private List<String> run(String rule, String sql) {
-        return jdbc.sql(sql).param(event).query(String.class).list().stream()
-                .map(detail -> rule + ": " + detail)
-                .toList();
     }
 }

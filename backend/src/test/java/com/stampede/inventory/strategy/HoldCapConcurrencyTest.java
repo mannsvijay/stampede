@@ -21,6 +21,7 @@ import java.util.concurrent.Executors;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import com.stampede.control.invariants.InvariantChecker;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.jdbc.AutoConfigureTestDatabase;
 import org.springframework.boot.test.autoconfigure.jdbc.JdbcTest;
@@ -43,7 +44,7 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 @JdbcTest(properties = "spring.datasource.hikari.maximum-pool-size=" + HoldCapConcurrencyTest.POOL_SIZE)
 @AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
 @Testcontainers
-@Import(PessimisticInventoryStrategy.class)
+@Import({PessimisticInventoryStrategy.class, InvariantChecker.class})
 @Transactional(propagation = Propagation.NOT_SUPPORTED)
 class HoldCapConcurrencyTest {
 
@@ -70,6 +71,9 @@ class HoldCapConcurrencyTest {
 
     @Autowired
     JdbcClient jdbc;
+
+    @Autowired
+    InvariantChecker invariants;
 
     @AfterAll
     static void stopThreads() {
@@ -189,7 +193,7 @@ class HoldCapConcurrencyTest {
     }
 
     private void run(Scenario scenario) {
-        ConcurrencyHarness harness = new ConcurrencyHarness(strategy, jdbc, new Fixture(EVENT, USER, SEATS),
+        ConcurrencyHarness harness = new ConcurrencyHarness(strategy, jdbc, invariants, new Fixture(EVENT, USER, SEATS),
                 Config.fromSystemProperties(THREADS), RACERS);
 
         HarnessReport report = harness.run(scenario);
