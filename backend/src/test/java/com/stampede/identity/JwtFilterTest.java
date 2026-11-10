@@ -109,8 +109,15 @@ class JwtFilterTest extends ApiTestSupport {
     @Test
     void tamperedSignatureIs401() {
         String token = registerAndLogin(uniqueEmail()).accessToken();
-        char last = token.charAt(token.length() - 1);
-        String tampered = token.substring(0, token.length() - 1) + (last == 'A' ? 'B' : 'A');
+        // Change a character in the MIDDLE of the signature. Every base64url character there carries
+        // 6 real bits, so the decoded signature always changes. The last character is no good: a
+        // 32-byte HS256 signature is 43 characters, and the last one's 2 low bits are padding, so
+        // swapping e.g. 'A' and 'B' there decodes to the same bytes and the token still verifies.
+        int signatureStart = token.lastIndexOf('.') + 1;
+        int middle = signatureStart + (token.length() - signatureStart) / 2;
+        char original = token.charAt(middle);
+        String tampered = token.substring(0, middle) + (original == 'A' ? 'B' : 'A') + token.substring(middle + 1);
+        assertThat(tampered).isNotEqualTo(token);
 
         assertUnauthenticated(tampered);
     }

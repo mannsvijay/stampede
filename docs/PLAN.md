@@ -192,7 +192,7 @@ and gets the seeded demo event from GET /events. Still open in M0: M0.7a (date-g
       Correctness review: no bugs found; fixed a two-sweeper test that could pass without overlap
       (now forced with a row lock) and sweeper starvation by broken holds (keyset paging). Low items
       recorded under D-016 "Known limits"; for M1.7: I8's `used > limit` check vs lowered limits.
-- [ ] M1.5 Orders from holds (happy path, synchronous fake payment for now)
+- [x] M1.5 Orders from holds (happy path, synchronous fake payment for now)
       Note (from M0.2): `orders` has no `hold_id`. Decide before starting how an order links to its
       hold (the saga's HoldVerified step needs it), e.g. a V-next migration adding `orders.hold_id`.
       Note (from M1.1, D-014): decide when `event_seats.order_id` is set. The CHECK allows HELD with an
@@ -223,9 +223,16 @@ and gets the seeded demo event from GET /events. Still open in M0: M0.7a (date-g
       CREATED instead of FAILED; a decline whose compensation fails is 500, not 402; SEAT_TAKEN
       wording ("try again shortly"); guarded CONVERTED update; tests for "release throws -> nothing
       cancelled or refunded" and SEAT_TAKEN. Rest recorded under D-017 "Known limits".
-      Unrelated, noted not fixed: `JwtFilterTest.tamperedSignatureIs401` is flaky (~4/64). Flipping
-      the last base64url char of a 32-byte signature between A and B/C/D changes only padding bits,
-      so the "tampered" token can still verify. Failed once in the first M1.5 full run.
+      Also fixed (asked for separately): `JwtFilterTest.tamperedSignatureIs401` was flaky (~4/64).
+      It flipped the last base64url char of the 32-byte signature, whose 2 low bits are padding, so
+      A <-> B/C/D left the signature unchanged and the token still verified (failed once in the first
+      M1.5 full run). It now flips a char in the middle of the signature and asserts the token changed;
+      50/50 passes as a temporary @RepeatedTest(50).
+      Verified 2026-11-10: full suite 326 tests, 0 failures/errors/skipped (100 harness rounds,
+      5 min 30 s); 1000-round proof `*ConcurrencyTest`: 75 tests green, all six harness scenarios
+      1000/1000 rounds clean, 0 invariant violations, 0 exceptions (9 min 40 s; OrderConcurrencyTest
+      runs its own fixed 10 forced-overlap rounds); frontend typecheck, lint, test (33), check:api,
+      build green.
 - [ ] M1.6 Ticket issuing: Ed25519 signing, QR payload, GET /me/tickets
 - [ ] M1.7 Invariant checker v1 (five checks as SQL) + hard assertion after every integration test
       Note (from M1.3): reuse the hold checks in test `HoldInvariants` (I1 seat in two active

@@ -457,3 +457,50 @@ HOLD_EXPIRED 410; CONVERTED keeps the allowance; I8 counts orders).
 - I8 treats `used > per_user_limit` as drift; wrong if a limit is ever lowered (M1.7).
 - In-flight retry (second POST waiting on the first's locks) untested.
 - `/holds` not in the Vite proxy yet (M1.8). Refresh-token family cleanup still open (M0.5).
+
+## 2026-11-10 - M1.5 Orders from holds (synchronous fake payment)
+
+**Changed**
+- Flyway V3: `orders.hold_id` NOT NULL, FK (hold_id, event_id) -> holds, `uq_orders_hold` UNIQUE.
+- `booking.checkout`: `CheckoutService` (not @Transactional) runs the saga steps one transaction
+  each: hold check, PENDING order + items (`OrderWriter`), payment, sell, PAID (3 attempts).
+  `OrderController`: POST /orders (201 new, 200 existing order for the same hold), GET /orders/{id}
+  (owner only). `OrderStatus` guard; `OrderQueries` scoped to the caller.
+- Best-effort compensation after step 1: release the hold first (definitive under its lock; a
+  CONVERTED hold means finish instead), then cancel the order (items inactive), then refund. Never
+  undoes a sale. Failure table and known limits in D-017.
+- `payments`: `PaymentService` (row before the provider call; unknown outcome stays CREATED),
+  `PaymentStatus` guard, `PaymentProvider` interface + `FakePaymentProvider` (always succeeds).
+- `inventory`: `InventoryStrategy.sell` (hold row, then seats ORDER BY seat_id; ACTIVE and
+  `expires_at > now()`; hold CONVERTED; allowance untouched) in the pessimistic strategy;
+  `HoldService.checkoutHold` / `sellForOrder` / `releaseForFailedCheckout`.
+- Errors: HOLD_EXPIRED 410, PAYMENT_FAILED 402, ORDER_NOT_FOUND 404; SEAT_TAKEN 409 on POST
+  /orders for a seat still in another order's active items.
+- Tests: OrderApiTest, CheckoutFailureTest (spies: sell throws -> no seat stuck; sell committed
+  then threw -> PAID; finish retried; release throws -> nothing cancelled or refunded; decline;
+  provider outage; expiry during payment), OrderConcurrencyTest (overlap forced by a barrier,
+  7 duplicate-key losers per round), sell tests in PessimisticInventoryStrategyTest, V3 schema
+  tests. I8 counts ACTIVE + CONVERTED holds; `HoldInvariants` public; order rules O1-O5.
+- Fixed flaky `JwtFilterTest.tamperedSignatureIs401` (it flipped padding bits of the last char).
+- docs: D-017 (draft), PRD 10 checkout errors and the Idempotency-Key deviation, openapi.json
+  and frontend `schema.d.ts` regenerated, PLAN follow-ups. No new dependency.
+
+**Verified**
+- `./gradlew test --rerun` (100 rounds): 326 tests, 0 failures/errors/skipped, 5 min 30 s.
+- `*ConcurrencyTest` with 1000 rounds: 75 tests green; every harness scenario 1000/1000 clean,
+  0 invariant violations, 0 exceptions (9 min 40 s).
+- JwtFilterTest fix: 50/50 as a temporary @RepeatedTest(50).
+- Mutation: duplicate-hold branch disabled -> OrderConcurrencyTest failed; restored.
+- Correctness-reviewer agent: no invariant bug; six findings fixed, the rest in D-017.
+- Frontend: typecheck, lint, test (33), check:api, build green.
+
+**Next**: M0.7a (minimatch override, date-gated); M1.6 ticket issuing (Ed25519, QR, GET
+/me/tickets): add a step after SEATS_SOLD, keeping the step-per-transaction shape.
+
+**Open problems**
+- A process crash between checkout steps leaves a PENDING order whose active items block its seats
+  (409 SEAT_TAKEN) until M3.4 recovery; same for "PAID never recorded" and "release throws".
+- A checkout still paying on an ended hold blocks other buyers' orders for those seats until its
+  step 3 (seconds now, minutes with async payment in M3).
+- Payments with an unknown outcome stay CREATED until the M3.5 reconciliation poller.
+- POST /orders has no Idempotency-Key (M3.1); `/orders` and `/holds` not in the Vite proxy (M1.8).
