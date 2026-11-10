@@ -418,3 +418,42 @@ written by hand, Claude reviews).
 **Open problems**
 - A seed replays a round's inputs, not its interleaving.
 - The full suite now includes ~4.4 min of harness locally (default 1000 rounds).
+
+## 2026-11-10 - M1.4 Holds: create, release, expiry sweeper (and M1.2a dropped)
+
+**Changed**
+- M1.2a (explain-back quiz) removed from PLAN by my choice.
+- Strategy: per-user cap as step 4b (one `user_event_allowance` upsert inside the hold transaction;
+  `LIMIT_EXCEEDED` added to `HoldRejection`), allowance given back as step 11b on every release
+  reason, `takenAgoMs` on `Rejected` (owner's `created_at`, read while the seats are locked).
+- `inventory.api.HoldService` + `HoldResult`/`CancelResult`; `InventoryStrategies` (strategy by
+  `events.strategy`); `inventory.holds`: `HoldController` (POST /events/{id}/holds, DELETE
+  /holds/{id}), `HoldExpirySweeper` (keyset pages, one hold per transaction), `HoldSweeperSchedule`
+  (5 s fixed delay, `stampede.holds.sweeper.*`).
+- Errors: SEAT_TAKEN, LIMIT_EXCEEDED, SALE_NOT_OPEN, HOLD_CONVERTED (409), HOLD_NOT_FOUND (404);
+  `ApiException` carries extra problem properties (`seatIds`, `takenAgoMs`, `limit`).
+- Dev profile `demo-open-sale` (demo drop one minute ago), documented in CLAUDE.md, DEVELOPING.md,
+  `.env.example`.
+- Harness: allowance rows reset, invariant I8, per-scenario limit, `capRace`; new
+  `HoldCapConcurrencyTest`; default rounds now 100 (as CI), full proof with
+  `-Dstampede.harness.rounds=1000` (CLAUDE.md, DEVELOPING.md, ci.yml comment).
+- docs/openapi.json and frontend `schema.d.ts` regenerated. D-016 drafted; D-005 cross-reference.
+  No new dependency.
+
+**Verified**
+- Final `./gradlew test --rerun` (17 min 33 s, 1000 harness rounds): 293 tests, 0 failures,
+  errors, skipped. Every harness scenario 1000/1000 clean (times in PLAN M1.3).
+- Mutation: cap's limit check removed -> capRace failed 20/20 rounds (I8, I9); restored.
+- Correctness-reviewer agent: no bugs; fixed a vacuous two-sweeper test (overlap now forced) and
+  sweeper starvation by broken holds (keyset paging).
+- After the default change: `*ConcurrencyTest` at 100 rounds green (6 scenarios clean); actionlint
+  clean. Frontend: typecheck, lint, test (33), check:api, build green.
+
+**Next**: M0.7a (minimatch override, after 2026-11-10T22:26Z); M1.5 orders from holds (add
+HOLD_EXPIRED 410; CONVERTED keeps the allowance; I8 counts orders).
+
+**Open problems**
+- Sale-window/strategy read is unlocked (a hold can land just after a pause); D-016 Known limits.
+- I8 treats `used > per_user_limit` as drift; wrong if a limit is ever lowered (M1.7).
+- In-flight retry (second POST waiting on the first's locks) untested.
+- `/holds` not in the Vite proxy yet (M1.8). Refresh-token family cleanup still open (M0.5).

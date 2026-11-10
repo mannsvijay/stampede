@@ -77,6 +77,15 @@ cd backend
 .\gradlew.bat test --rerun                           # all tests; --rerun avoids "UP-TO-DATE" no-op runs
 .\gradlew.bat test --rerun --tests "AuthFlowTest"    # one test class
 ```
+The concurrency harness (`PessimisticConcurrencyTest`, `HoldCapConcurrencyTest`) runs 100 rounds per
+scenario by default, as CI does. The full proof (the M1 exit criterion) is 1000 rounds, about 11
+minutes locally; reports land in `backend\build\reports\concurrency\`. PowerShell needs the
+`-D` arguments quoted:
+```powershell
+.\gradlew.bat test --rerun --tests "*ConcurrencyTest" "-Dstampede.harness.rounds=1000"
+# replay one round from a report's seed:
+.\gradlew.bat test --rerun --tests "PessimisticConcurrencyTest" "-Dstampede.harness.seed=<seed>" "-Dstampede.harness.rounds=1"
+```
 
 Run the app (http://localhost:8080). Profiles are comma-separated:
 

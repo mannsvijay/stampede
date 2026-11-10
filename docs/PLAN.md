@@ -154,7 +154,11 @@ and gets the seeded demo event from GET /events. Still open in M0: M0.7a (date-g
       94.4 s (261.5 s total); 0 invariant violations, 0 exceptions. CI runs 100 rounds per scenario
       (`-Dstampede.harness.rounds=100`, about 26 s). Run: `PessimisticConcurrencyTest`; reports in
       `backend/build/reports/concurrency/`.
-- [ ] M1.4 Holds: create (all-or-nothing, per-user cap), release, 5-min expiry sweeper
+      Changed in M1.4: the default is now 100 rounds (as CI); the full proof passes
+      `-Dstampede.harness.rounds=1000`. 1000-round times after M1.4 (allowance + I8 on every round):
+      singleSeat 106.7 s, overlappingSets 132.5 s, churn 124.3 s, capRace 76.6 s;
+      HoldCapConcurrencyTest 96.1 s + 125.8 s; 662 s in all.
+- [x] M1.4 Holds: create (all-or-nothing, per-user cap), release, 5-min expiry sweeper
       Note (from M0.2): reject duplicate seat IDs in a hold request in code; `holds.seat_ids` has no
       DB-level uniqueness (a CHECK can't contain a subquery).
       Note (from M1.1, D-014): map `IllegalSeatTransitionException` to API errors here. Hold on a
@@ -183,6 +187,8 @@ and gets the seeded demo event from GET /events. Still open in M0: M0.7a (date-g
       demo sale now. Harness: allowance reset, invariant I8 (allowance = seats of active holds, at
       most the limit), per-scenario limit (seat count for the M1.3 scenarios), `capRace`; plus
       `HoldCapConcurrencyTest` (disjoint seats, only the cap decides).
+      Verified 2026-11-10: full suite 293 tests, 0 failures/errors/skipped (1000 harness rounds,
+      17 min 33 s); frontend typecheck, lint, test (33), check:api, build green.
       Correctness review: no bugs found; fixed a two-sweeper test that could pass without overlap
       (now forced with a row lock) and sweeper starvation by broken holds (keyset paging). Low items
       recorded under D-016 "Known limits"; for M1.7: I8's `used > limit` check vs lowered limits.

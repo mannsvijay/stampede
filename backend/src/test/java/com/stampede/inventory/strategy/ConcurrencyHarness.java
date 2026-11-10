@@ -39,13 +39,14 @@ final class ConcurrencyHarness {
     }
 
     /**
-     * @param rounds   {@code -Dstampede.harness.rounds}, default 1000 (CI passes 100)
+     * @param rounds   {@code -Dstampede.harness.rounds}, default 100 (as in CI); the full proof
+     *                 (the M1 exit criterion) passes 1000
      * @param baseSeed {@code -Dstampede.harness.seed}; round r uses seed {@code baseSeed + r}, so
      *                 {@code -Dstampede.harness.seed=<round seed> -Dstampede.harness.rounds=1} replays it
      */
     record Config(int threads, int rounds, long baseSeed) {
         static Config fromSystemProperties(int threads) {
-            int rounds = Integer.getInteger("stampede.harness.rounds", 1000);
+            int rounds = Integer.getInteger("stampede.harness.rounds", 100);
             String seed = System.getProperty("stampede.harness.seed");
             long baseSeed = seed != null ? Long.parseLong(seed) : new SecureRandom().nextLong();
             return new Config(threads, rounds, baseSeed);

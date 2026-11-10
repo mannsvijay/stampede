@@ -28,8 +28,9 @@ import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
 /**
- * M1.3: the concurrency harness against the pessimistic strategy. 1000 rounds per scenario by default;
- * CI passes {@code -Dstampede.harness.rounds=100}. Reports land in build/reports/concurrency/.
+ * M1.3: the concurrency harness against the pessimistic strategy. 100 rounds per scenario by default
+ * (as in CI); the full proof passes {@code -Dstampede.harness.rounds=1000}. Reports land in
+ * build/reports/concurrency/.
  * <p>
  * 16 threads with a pool of 20: every racing thread gets its own connection, so all contention happens
  * in Postgres (not in the pool's queue), and the round's own reset and checks never wait for one.

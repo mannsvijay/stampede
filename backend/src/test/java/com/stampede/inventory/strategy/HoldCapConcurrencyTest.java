@@ -38,7 +38,7 @@ import org.testcontainers.junit.jupiter.Testcontainers;
  * for its OWN seats (no two threads share a seat), so seat collisions can't happen and only the
  * allowance counter decides. Runs on the M1.3 harness, so every round also gets I1-I8 (I8: the
  * counter equals the seats of the user's active holds and is never over the limit) and I7 (no
- * exceptions, so no deadlocks). Rounds: {@code -Dstampede.harness.rounds}, as for the harness.
+ * exceptions, so no deadlocks). Rounds: {@code -Dstampede.harness.rounds} (default 100), as for the harness.
  */
 @JdbcTest(properties = "spring.datasource.hikari.maximum-pool-size=" + HoldCapConcurrencyTest.POOL_SIZE)
 @AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
