@@ -8,6 +8,7 @@ import { getAccessToken, getSessionStatus, restoreSession } from '../api/auth'
 import { api } from '../api/client'
 import { ApiError } from '../api/problem'
 import { saveHold } from '../booking/holdStore'
+import { loadLastOrder, saveLastOrder } from '../booking/lastOrderStore'
 import { Layout } from '../pages/Layout'
 import { NotFoundPage } from '../pages/NotFoundPage'
 import { appPages } from '../routes'
@@ -118,6 +119,10 @@ function storeHold() {
   })
 }
 
+function storeLastOrder() {
+  saveLastOrder({ orderId: 'order-1', holdId: 'hold-0', eventId: 'event-1', itemCount: 2 })
+}
+
 const where = (router: ReturnType<typeof renderAt>['router']) =>
   router.state.location.pathname + router.state.location.search
 
@@ -208,8 +213,9 @@ describe('RequireAuth and ?next=', () => {
 })
 
 describe('logout', () => {
-  it('calls POST /auth/logout, clears the token, cached data and the stored hold, and shows Log in', async () => {
+  it('calls POST /auth/logout, clears the token, cached data, the stored hold and last order, and shows Log in', async () => {
     storeHold()
+    storeLastOrder()
     serveRefresh('token-1')
     serveTickets('token-1')
     const board = serveEmptyBoard()
@@ -229,13 +235,15 @@ describe('logout', () => {
     expect(logoutHeader).toBe('stampede-web')
     expect(getAccessToken()).toBeNull()
     expect(queryClient.getQueryData(['me', 'tickets', 'first'])).toBeUndefined()
-    expect(sessionStorage.length).toBe(0) // the hold, on a possibly shared computer
+    expect(sessionStorage.length).toBe(0) // the hold and the last order, on a possibly shared computer
+    expect(loadLastOrder()).toBeNull()
     expect(where(router)).toBe('/')
     await board.loaded()
   })
 
-  it('if the server cannot be reached, still forgets the token and the stored hold, and warns', async () => {
+  it('if the server cannot be reached, still forgets the token, the stored hold and last order, and warns', async () => {
     storeHold()
+    storeLastOrder()
     serveRefresh('token-1')
     serveTickets('token-1')
     const board = serveEmptyBoard()
@@ -248,13 +256,15 @@ describe('logout', () => {
     expect(await screen.findByText(/You may still be logged in after a reload/)).toBeInTheDocument()
     expect(getAccessToken()).toBeNull()
     expect(sessionStorage.length).toBe(0)
+    expect(loadLastOrder()).toBeNull()
     await board.loaded()
   })
 })
 
 describe('the stored hold and who is logged in', () => {
-  it('a new login drops a hold stored before it (this tab may now be someone else)', async () => {
+  it('a new login drops a hold and last order stored before it (this tab may now be someone else)', async () => {
     storeHold()
+    storeLastOrder()
     serveLogin('token-1')
     const board = serveEmptyBoard()
     renderAt('/login', testRoutes)

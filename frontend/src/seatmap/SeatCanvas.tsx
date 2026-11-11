@@ -2,9 +2,7 @@ import { type MouseEvent, type RefObject, useEffect, useMemo, useRef, useState }
 
 import type { EventLayout } from '../api/client'
 import { drawVenue, readPalette, type SeatState } from './draw'
-import { fitTransform, hitRadius, seatAt, toVenue } from './geometry'
-
-const PADDING = 8 // CSS px kept free around the venue
+import { CANVAS_PADDING as PADDING, fitTransform, hitRadius, seatAt, toVenue } from './geometry'
 
 interface SeatCanvasProps {
   layout: EventLayout

@@ -8,6 +8,7 @@ import { LoginPage } from './pages/LoginPage'
 import { NotFoundPage } from './pages/NotFoundPage'
 import { RegisterPage } from './pages/RegisterPage'
 import { SeatsPage } from './pages/SeatsPage'
+import { WalletPage } from './pages/WalletPage'
 
 /**
  * App pages. They deliberately don't share prefixes with the API (/auth, /events, /holds, /orders,
@@ -21,7 +22,13 @@ export const appPages: RouteObject[] = [
   { path: '/drops/:id', element: <EventPage /> },
   { path: '/login', element: <LoginPage /> },
   { path: '/register', element: <RegisterPage /> },
-  { element: <RequireAuth />, children: [{ path: '/drops/:id/seats', element: <SeatsPage /> }] },
+  {
+    element: <RequireAuth />,
+    children: [
+      { path: '/drops/:id/seats', element: <SeatsPage /> },
+      { path: '/wallet', element: <WalletPage /> },
+    ],
+  },
 ]
 
 export const routes: RouteObject[] = [

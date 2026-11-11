@@ -1,5 +1,6 @@
+import { useQueryClient } from '@tanstack/react-query'
 import { useEffect, useMemo, useState } from 'react'
-import { Link, useParams } from 'react-router'
+import { Link, useNavigate, useParams } from 'react-router'
 
 import {
   type EventDetail,
@@ -12,14 +13,18 @@ import {
   type WithClock,
 } from '../api/client'
 import { createHold, releaseHold } from '../api/holds'
+import { MY_TICKETS_KEY, placeOrder } from '../api/orders'
 import { ApiError } from '../api/problem'
 import { clearHold, loadHold, saveHold, type StoredHold } from '../booking/holdStore'
+import { saveLastOrder } from '../booking/lastOrderStore'
 import { formatPaise } from '../format/money'
 import { decodeAvailability } from '../seatmap/availability'
 import type { SeatState } from '../seatmap/draw'
 import { SeatCanvas } from '../seatmap/SeatCanvas'
 import { seatName, sectionNames } from '../seatmap/seatNames'
 import { formatCountdown, remainingMs, useNow } from '../time/serverClock'
+import { CheckoutReceipt, type ReceiptLine } from './CheckoutReceipt'
+import { checkoutErrorText, isRetryableCheckoutError } from './checkoutErrorText'
 import { ErrorMessage } from './ErrorMessage'
 import { holdErrorText } from './holdErrorText'
 import { SeatPicker } from './SeatPicker'
@@ -69,10 +74,15 @@ function SeatsView({ event, layout, seatMap, refetchSeatMap }: SeatsViewProps) {
   const eventId = event.id
   const seats = layout.seats
   const now = useNow()
+  const navigate = useNavigate()
+  const queryClient = useQueryClient()
 
   const [pickedIds, setPickedIds] = useState<string[]>([])
   const [hold, setHold] = useState<StoredHold | null>(() => loadHold(eventId))
   const [error, setError] = useState<unknown>(null)
+  /** Which request the error came from: checkout explains some codes differently. */
+  const [errorDuring, setErrorDuring] = useState<'hold' | 'checkout'>('hold')
+  const [checkingOut, setCheckingOut] = useState(false)
   const [notice, setNotice] = useState('')
   const [busy, setBusy] = useState(false)
 
@@ -150,6 +160,7 @@ function SeatsView({ event, layout, seatMap, refetchSeatMap }: SeatsViewProps) {
   async function holdSeats() {
     setBusy(true)
     setError(null)
+    setErrorDuring('hold')
     setNotice('')
     try {
       const made = await createHold(eventId, picked)
@@ -162,6 +173,7 @@ function SeatsView({ event, layout, seatMap, refetchSeatMap }: SeatsViewProps) {
       }
       saveHold(stored)
       setHold(stored)
+      setCheckingOut(false)
       setPickedIds([])
     } catch (cause) {
       setError(cause)
@@ -182,6 +194,7 @@ function SeatsView({ event, layout, seatMap, refetchSeatMap }: SeatsViewProps) {
     }
     setBusy(true)
     setError(null)
+    setErrorDuring('hold')
     try {
       await releaseHold(hold.holdId)
       clearHold(eventId)
@@ -199,7 +212,64 @@ function SeatsView({ event, layout, seatMap, refetchSeatMap }: SeatsViewProps) {
     void refetchSeatMap()
   }
 
+  /** The hold is over (expired, released by a failed checkout, or not found): forget it, show the map as it is. */
+  function dropHold(message = '') {
+    clearHold(eventId)
+    setHold(null)
+    setCheckingOut(false)
+    setNotice(message)
+    void refetchSeatMap()
+  }
+
+  /**
+   * POST /orders for the current hold (D-017). Success (201 new, or 200 for an order this hold
+   * already has) goes to the wallet, which shows "tickets on the way" if they aren't issued yet.
+   */
+  async function pay() {
+    if (!hold) {
+      return
+    }
+    setBusy(true)
+    setError(null)
+    setErrorDuring('checkout')
+    setNotice('')
+    try {
+      const order = await placeOrder(hold.holdId)
+      if (order.status === 'CANCELLED' || order.status === 'REFUNDED') {
+        // A 200 for an earlier attempt on this hold that failed meanwhile: its seats were released.
+        dropHold('That checkout was cancelled and your seats were released. Pick again.')
+        return
+      }
+      clearHold(eventId) // CONVERTED into this order: nothing left to release
+      saveLastOrder({ orderId: order.orderId, holdId: order.holdId, eventId, itemCount: order.items.length })
+      void queryClient.invalidateQueries({ queryKey: MY_TICKETS_KEY })
+      await navigate('/wallet')
+    } catch (cause) {
+      setError(cause)
+      if (cause instanceof ApiError) {
+        switch (cause.code) {
+          case 'HOLD_EXPIRED': // the hold ended before it became an order
+          case 'PAYMENT_FAILED': // the server cancelled the order and released the hold
+          case 'HOLD_NOT_FOUND': // not ours, or gone
+            dropHold()
+            break
+        }
+      }
+      // SEAT_TAKEN and NETWORK_ERROR keep the hold: paying again for it is safe (Retry).
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const receiptLines: ReceiptLine[] = hold
+    ? hold.seatIds.map((seatId) => {
+        const tier = tiers.get(seatById.get(seatId)?.tierId ?? '')
+        return { seatId, name: nameOf(seatId), tierName: tier?.name ?? '', pricePaise: tier?.pricePaise ?? 0 }
+      })
+    : []
+
   const msUntilDrop = remainingMs(event.dropAt, event.clockOffsetMs, now)
+  const errorContext = { seatName: nameOf, msUntilDrop }
 
   return (
     <article className={styles.page}>
@@ -217,7 +287,11 @@ function SeatsView({ event, layout, seatMap, refetchSeatMap }: SeatsViewProps) {
 
       <div className={styles.panel}>
         <p role="alert" className={styles.error}>
-          {error ? holdErrorText(error, { seatName: nameOf, msUntilDrop }) : ''}
+          {error
+            ? errorDuring === 'checkout'
+              ? checkoutErrorText(error, errorContext)
+              : holdErrorText(error, errorContext)
+            : ''}
         </p>
         <p role="status" className={styles.notice}>
           {notice}
@@ -234,22 +308,34 @@ function SeatsView({ event, layout, seatMap, refetchSeatMap }: SeatsViewProps) {
               </span>{' '}
               left to check out
             </p>
-            <ul className={styles.seatList} aria-label="Held seats">
-              {hold.seatIds.map((id) => (
-                <li key={id}>{nameOf(id)}</li>
-              ))}
-            </ul>
-            <div className={styles.actions}>
-              <button type="button" onClick={release} disabled={busy}>
-                Release
-              </button>
-              <button type="button" disabled aria-describedby="checkout-note">
-                Continue to checkout
-              </button>
-            </div>
-            <p id="checkout-note" className={styles.hint}>
-              Checkout isn't built yet. It arrives in the next update.
-            </p>
+            {checkingOut ? (
+              <CheckoutReceipt
+                lines={receiptLines}
+                busy={busy}
+                retry={isRetryableCheckoutError(error)}
+                onPay={pay}
+                onBack={() => {
+                  setCheckingOut(false)
+                  setError(null)
+                }}
+              />
+            ) : (
+              <>
+                <ul className={styles.seatList} aria-label="Held seats">
+                  {hold.seatIds.map((id) => (
+                    <li key={id}>{nameOf(id)}</li>
+                  ))}
+                </ul>
+                <div className={styles.actions}>
+                  <button type="button" onClick={release} disabled={busy}>
+                    Release
+                  </button>
+                  <button type="button" onClick={() => setCheckingOut(true)} disabled={busy}>
+                    Continue to checkout
+                  </button>
+                </div>
+              </>
+            )}
           </section>
         ) : (
           <>

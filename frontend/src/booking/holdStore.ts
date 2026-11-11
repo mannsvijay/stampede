@@ -17,7 +17,8 @@ export interface StoredHold {
   clockOffsetMs: number
 }
 
-const PREFIX = 'stampede:'
+/** Every sessionStorage key of this app starts with this (see lastOrderStore.ts too). */
+export const PREFIX = 'stampede:'
 const holdKey = (eventId: string) => `${PREFIX}hold:${eventId}`
 
 export function saveHold(hold: StoredHold): void {
@@ -59,7 +60,7 @@ export function clearHold(eventId: string): void {
   }
 }
 
-/** Removes everything this app keeps in sessionStorage (holds now; the last order in M1.8c part 2). */
+/** Removes everything this app keeps in sessionStorage: every hold and the last order. */
 export function clearBookingState(): void {
   try {
     const keys: string[] = []

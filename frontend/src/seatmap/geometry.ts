@@ -4,6 +4,9 @@
  * (docs/venue-format.md), so fitting needs only a uniform scale and an offset.
  */
 
+/** CSS px the seat canvas keeps free around the venue (exported for the Playwright test's clicks). */
+export const CANVAS_PADDING = 8
+
 /** Maps venue units to CSS pixels: `css = venue * scale + offset`. */
 export interface Transform {
   scale: number

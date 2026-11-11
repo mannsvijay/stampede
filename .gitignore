@@ -20,6 +20,9 @@ bin/
 # Frontend
 node_modules/
 dist/
+# Playwright output (npm run e2e)
+playwright-report/
+test-results/
 *.tsbuildinfo
 
 # Logs

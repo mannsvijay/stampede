@@ -48,7 +48,7 @@ function SessionControls() {
       setLogoutFailed(true)
     }
     // Whether or not the server answered: nothing of this user's stays on this (maybe shared)
-    // computer, neither fetched data nor the current hold kept in sessionStorage.
+    // computer: neither fetched data nor the hold and last order kept in sessionStorage.
     queryClient.clear()
     clearBookingState()
     await navigate('/')
@@ -59,9 +59,12 @@ function SessionControls() {
   }
   if (status === 'loggedIn') {
     return (
-      <button type="button" onClick={onLogout} className={styles.linkButton}>
-        Log out
-      </button>
+      <>
+        <Link to="/wallet">Wallet</Link>
+        <button type="button" onClick={onLogout} className={styles.linkButton}>
+          Log out
+        </button>
+      </>
     )
   }
   const onAuthPage = location.pathname === '/login' || location.pathname === '/register'
