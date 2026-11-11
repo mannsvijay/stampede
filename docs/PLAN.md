@@ -328,7 +328,7 @@ and gets the seeded demo event from GET /events. Still open in M0: M0.7a (date-g
       `queryClient.clear()` in Layout's logout handler (outside the try), with a test for both cases.
       Note (from M1.8b): the account email isn't shown in the header (no `GET /me` for the user, and
       TokenResponse carries none). Add one if a page needs it.
-      M1.8c part 1 done, not committed: /drops/:id/seats under RequireAuth ("Pick seats" on the event
+      M1.8c part 1 done, committed a69e2d9: /drops/:id/seats under RequireAuth ("Pick seats" on the event
       page for SCHEDULED/LIVE). Canvas2D venue (`seatmap/draw.ts`, `SeatCanvas.tsx`): fitted to the
       container width, drawn in device pixels (sharp on high-DPI), outlines, stage, seats coloured
       free / taken / yours. Pure maths in `seatmap/geometry.ts` (fit, inverse, nearest seat with an

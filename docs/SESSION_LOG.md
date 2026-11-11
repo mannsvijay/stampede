@@ -660,3 +660,37 @@ test locally, the 1000-round proof.
 - Two test flakes this session came from requests outliving their test; tests that end on a page
   that fetches must wait for it to load.
 - Still open: D-020 draft to rewrite; the 1000-round proof (end of M1.8c).
+
+## 2026-11-12 - M1.8c part 1 Seat map page: canvas, picking, hold, countdown, release
+
+**What changed**
+- /drops/:id/seats under RequireAuth; "Pick seats" on the event page (SCHEDULED/LIVE).
+- Canvas2D venue: `seatmap/geometry.ts` (fit, inverse, nearest seat, 8 CSS px minimum hit radius,
+  pure and tested), `draw.ts` (outlines, stage, seats free/taken/yours; device pixels for
+  high-DPI), `SeatCanvas.tsx` (ResizeObserver width, DPR change listener, click → seat).
+- Keyboard picker (row → free seat → Add) and a selected-seats list with prices and total;
+  cap = min(perUserLimit, 20). Picked seats a newer seat map shows taken drop out (computed).
+- `api/holds.ts`: createHold (with clock offset from serverTime), releaseHold. Countdown follows
+  the server clock; timer clears the hold at expiry; "Continue to checkout" is a disabled stub.
+- `booking/holdStore.ts`: hold in sessionStorage (`stampede:hold:<eventId>`); `clearBookingState()`
+  on logout (even if the request fails) and inside `login()` before the token is set (covers
+  register; a refresh/reload keeps it; a failed login keeps it).
+- `ApiError` carries `seatIds`, `takenAgoMs`, `limit`. `pages/holdErrorText.ts`: every hold and
+  checkout code in plain words. Every hold attempt refetches the seat map.
+- Tests: setup stubs canvas `getContext` (null) and clears sessionStorage; LAYOUT/seatMapOf fixtures.
+
+**Verified**
+- `./gradlew test --rerun`: 417 tests, 0 failures/errors/skipped (11 min 18 s).
+- Frontend: 131 tests (4 consecutive green runs), typecheck, lint, check:api, build green;
+  bundle 120.55 KB gzipped.
+- Mutation checks: removing logout/login clearing, the serverTime offset, the cap, or the refetch
+  each fails the matching tests.
+
+**Next**: M1.8c part 2: checkout (POST /orders), wallet with QR, Playwright purchase test locally,
+the 1000-round proof.
+
+**Open problems**
+- The canvas hasn't been seen in a real browser yet (jsdom only fakes its size).
+- Full redraw and linear hit test won't scale to 20,000 seats (M5).
+- docs/DEVELOPING.md line 157 lists the old proxy prefixes (missing /holds, /orders, /me, /tickets).
+- Still open: D-020 draft to rewrite; the 1000-round proof.
