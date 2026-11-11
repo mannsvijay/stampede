@@ -589,3 +589,35 @@ PENDING orders), then M1.8 seat map with the ticket QR.
 - Not done this session: a correctness-reviewer pass and the stuck-sweeper rule (moved to M2.2).
 - Stale `backend/build/reports/invariants/after-test.txt` from the report run (build output, safe
   to delete).
+
+## 2026-11-11 - M1.8a Seat map API (layout + availability bitset), proxy entries
+
+**What changed**
+- M1.8 split agreed: M1.8a seat map API; M1.8b login/register UI; M1.8c seat map page, hold,
+  checkout, wallet, Playwright (local only), 1000-round proof. Decisions: layout and status split,
+  both public; qrcode-generator 2.0.4; Playwright 1.64.1 locally, CI job considered in M7.
+- New in `inventory.catalog`: `SeatMapController`, `SeatMapQueries`, `SeatMapViews`.
+  `GET /events/{id}/layout` (venue from `layout_json` + seats ORDER BY seat_id, i.e. byte-wise uuid
+  order) and `GET /events/{id}/seatmap` (`{eventId, seatCount, available, asOf}`: 1 bit per seat,
+  MSB first, base64; one statement). 404 for unknown/DRAFT, 400 malformed id, 500 for a broken layout.
+- SecurityConfig permits exactly `GET /events/*/layout` and `/events/*/seatmap` (not `/events/**`).
+- Spec: two paths, seven schemas (`LayoutRect`/`LayoutPoint` prefixed), additive only; schema.d.ts
+  regenerated.
+- Frontend: Vite proxy adds /holds, /orders, /me, /tickets; `fetchLayout`/`fetchSeatMap`/`useLayout`/
+  `useSeatMap`; `seatmap/availability.ts` decoder with tests.
+- Docs: D-020 (draft; no `seq` until M5.1 = PRD 10 deviation), PRD 10 table, venue-format.md
+  "Over the API", PLAN notes on M1.8, M2.4, M5.1, M7. No new dependency.
+
+**Verified**
+- `./gradlew test --rerun`: 417 tests, 0 failures/errors/skipped (9 min 25 s); SeatMapApiTest 9/9,
+  OpenApiSpecTest 9/9, ModularityTest green.
+- Frontend: typecheck, lint, test (40), check:api, build green.
+
+**Next**: M1.8b login and register screens, session restore on load, RequireAuth.
+
+**Open problems**
+- D-020 is a draft for me to rewrite in my own words.
+- Layout payload size is an estimate (~240 KB raw); measure in M2.4.
+- The seat map can be polled anonymously without limits until M4 (rate limits, admission).
+- No correctness-reviewer pass (read-only endpoints, no locking code).
+- Still open from M1.7: the 1000-round proof (planned at the end of M1.8c).

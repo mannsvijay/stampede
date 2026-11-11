@@ -327,6 +327,9 @@ and gets the seeded demo event from GET /events. Still open in M0: M0.7a (date-g
       (409) a limit below any user's current `used`, checked under the allowance row locks; I8
       treats `used > limit` as a violation.
 - [ ] M2.4 k6 scenarios: seat-collision, mixed-realistic; `scripts/k6.sh` runs k6 in Docker
+      Note (from M1.8a, D-020): measure GET /events/{id}/layout (size raw and gzipped, latency) and
+      GET /events/{id}/seatmap under polling load; the layout size (~240 KB raw) is only an estimate.
+      If it matters, add gzip/ETag or a compact encoding.
       Note (from M0.5): log in during k6 `setup()`, not in the measured phase; bcrypt (cost 12) is
       deliberately slow and would dominate the numbers.
       Note (from M1.2 review, D-015): the pessimistic strategy has no `lock_timeout`, so buyers

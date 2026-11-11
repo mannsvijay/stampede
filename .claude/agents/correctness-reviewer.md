@@ -1,3 +1,4 @@
+
 ---
 name: correctness-reviewer
 description: Reviews diffs for concurrency bugs, race conditions, broken invariants and missing failure handling. Use after any change to inventory, booking, payments, waiting room or ticketing.
