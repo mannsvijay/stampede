@@ -1,5 +1,6 @@
 import createClient from 'openapi-fetch'
 
+import { clearBookingState } from '../booking/holdStore'
 import { ApiError } from './problem'
 import type { paths } from './schema'
 
@@ -99,6 +100,10 @@ export async function login(email: string, password: string): Promise<void> {
   if (error !== undefined || data === undefined) {
     throw ApiError.fromBody(response.status, error)
   }
+  // A login in this tab may be a different person from whoever used it before (a shared computer):
+  // drop the previous person's hold before the new session starts, so no page can show it. A
+  // session restored by refresh is the same person and keeps it. Register logs in through here too.
+  clearBookingState()
   setAccessToken(data.accessToken)
 }
 

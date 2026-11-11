@@ -44,6 +44,14 @@ export function EventPage() {
         <dd className="mono">{e.perUserLimit} tickets per person</dd>
       </dl>
 
+      {(e.status === 'SCHEDULED' || e.status === 'LIVE') && (
+        <p>
+          <Link to={`/drops/${e.id}/seats`} className={styles.pick}>
+            Pick seats
+          </Link>
+        </p>
+      )}
+
       <table className={styles.tiers} aria-label="Price tiers">
         <tbody>
           {e.tiers.map((tier) => (

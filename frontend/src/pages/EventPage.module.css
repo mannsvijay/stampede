@@ -28,3 +28,9 @@
 .price {
   text-align: right;
 }
+
+.pick {
+  display: inline-block;
+  font-weight: 700;
+  margin-bottom: var(--space-4);
+}

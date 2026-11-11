@@ -25,6 +25,7 @@ afterEach(() => {
   server.resetHandlers()
   cleanup()
   resetSession() // a fresh page load: no token, status 'restoring'
+  sessionStorage.clear() // the stored hold
   const requests = unhandled.splice(0)
   if (requests.length > 0) {
     throw new Error(`Unexpected API request(s) with no MSW handler: ${requests.join(', ')}`)
@@ -32,3 +33,7 @@ afterEach(() => {
 })
 
 afterAll(() => server.close())
+
+// jsdom has no canvas: getContext would log "Not implemented" on every draw. Returning null is what
+// a browser without canvas support does, and the seat map handles it (the picker still works).
+HTMLCanvasElement.prototype.getContext = (() => null) as typeof HTMLCanvasElement.prototype.getContext

@@ -7,6 +7,7 @@ import { describe, expect, it } from 'vitest'
 import { getAccessToken, getSessionStatus, restoreSession } from '../api/auth'
 import { api } from '../api/client'
 import { ApiError } from '../api/problem'
+import { saveHold } from '../booking/holdStore'
 import { Layout } from '../pages/Layout'
 import { NotFoundPage } from '../pages/NotFoundPage'
 import { appPages } from '../routes'
@@ -106,6 +107,17 @@ async function logIn() {
   fireEvent.click(screen.getByRole('button', { name: 'Log in' }))
 }
 
+/** A hold as the seats page stores it (sessionStorage), still valid for 3 minutes. */
+function storeHold() {
+  saveHold({
+    holdId: 'hold-1',
+    eventId: 'event-1',
+    seatIds: ['seat-1'],
+    expiresAt: new Date(Date.now() + 3 * 60_000).toISOString(),
+    clockOffsetMs: 0,
+  })
+}
+
 const where = (router: ReturnType<typeof renderAt>['router']) =>
   router.state.location.pathname + router.state.location.search
 
@@ -196,7 +208,8 @@ describe('RequireAuth and ?next=', () => {
 })
 
 describe('logout', () => {
-  it('calls POST /auth/logout, clears the in-memory token and cached data, and shows Log in', async () => {
+  it('calls POST /auth/logout, clears the token, cached data and the stored hold, and shows Log in', async () => {
+    storeHold()
     serveRefresh('token-1')
     serveTickets('token-1')
     const board = serveEmptyBoard()
@@ -216,11 +229,13 @@ describe('logout', () => {
     expect(logoutHeader).toBe('stampede-web')
     expect(getAccessToken()).toBeNull()
     expect(queryClient.getQueryData(['me', 'tickets', 'first'])).toBeUndefined()
+    expect(sessionStorage.length).toBe(0) // the hold, on a possibly shared computer
     expect(where(router)).toBe('/')
     await board.loaded()
   })
 
-  it('if the server cannot be reached, still forgets the token and warns the session may come back', async () => {
+  it('if the server cannot be reached, still forgets the token and the stored hold, and warns', async () => {
+    storeHold()
     serveRefresh('token-1')
     serveTickets('token-1')
     const board = serveEmptyBoard()
@@ -232,7 +247,45 @@ describe('logout', () => {
 
     expect(await screen.findByText(/You may still be logged in after a reload/)).toBeInTheDocument()
     expect(getAccessToken()).toBeNull()
+    expect(sessionStorage.length).toBe(0)
     await board.loaded()
+  })
+})
+
+describe('the stored hold and who is logged in', () => {
+  it('a new login drops a hold stored before it (this tab may now be someone else)', async () => {
+    storeHold()
+    serveLogin('token-1')
+    const board = serveEmptyBoard()
+    renderAt('/login', testRoutes)
+
+    await logIn()
+
+    expect(await screen.findByRole('button', { name: 'Log out' })).toBeInTheDocument()
+    expect(sessionStorage.length).toBe(0)
+    await board.loaded()
+  })
+
+  it('a reload (session restored by refresh) keeps the stored hold: same person', async () => {
+    storeHold()
+    serveRefresh('token-1')
+    const board = serveEmptyBoard()
+    renderAt('/', testRoutes)
+
+    expect(await screen.findByRole('button', { name: 'Log out' })).toBeInTheDocument()
+    expect(sessionStorage.length).toBe(1)
+    await board.loaded()
+  })
+
+  it('a failed login attempt keeps it (a mistyped password is no reason to lose seats)', async () => {
+    storeHold()
+    server.use(http.post('/auth/login', () => problem(401, 'INVALID_CREDENTIALS')))
+    renderAt('/login', testRoutes)
+
+    await logIn()
+
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('Email or password is wrong.'))
+    expect(sessionStorage.length).toBe(1)
   })
 })
 

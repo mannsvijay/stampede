@@ -1,0 +1,74 @@
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.title {
+  font-size: clamp(28px, 4vw, 40px);
+  margin: 0;
+}
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  max-width: 560px;
+}
+
+.error,
+.notice {
+  margin: 0;
+}
+
+.error {
+  color: var(--signal);
+}
+
+/* Always in the DOM so screen readers notice their text changing; no space while empty. */
+.error:empty,
+.notice:empty {
+  display: none;
+}
+
+.picker {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: var(--space-2) var(--space-3);
+  align-items: center;
+  border: 1px solid var(--hairline);
+  padding: var(--space-3);
+  margin: 0;
+}
+
+.picker legend {
+  padding: 0 var(--space-1);
+}
+
+.picker button {
+  grid-column: 2;
+  justify-self: start;
+}
+
+.seatList {
+  margin: var(--space-2) 0;
+  padding-left: var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.hint {
+  color: var(--graphite);
+  font-size: 0.875rem;
+}
+
+.countdown {
+  font-size: 1.5rem;
+  margin: var(--space-2) 0;
+}
+
+.actions {
+  display: flex;
+  gap: var(--space-3);
+}

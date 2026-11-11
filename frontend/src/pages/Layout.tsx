@@ -5,6 +5,7 @@ import { Link, Outlet, useLocation, useNavigate } from 'react-router'
 import { logout, restoreSession } from '../api/auth'
 import { loginPath } from '../auth/safeNext'
 import { useSession } from '../auth/useSession'
+import { clearBookingState } from '../booking/holdStore'
 import styles from './Layout.module.css'
 
 export function Layout() {
@@ -46,7 +47,10 @@ function SessionControls() {
       // The token is gone from memory, but the server may not have revoked the refresh cookie.
       setLogoutFailed(true)
     }
-    queryClient.clear() // nothing fetched for this user stays on screen or in the cache
+    // Whether or not the server answered: nothing of this user's stays on this (maybe shared)
+    // computer, neither fetched data nor the current hold kept in sessionStorage.
+    queryClient.clear()
+    clearBookingState()
     await navigate('/')
   }
 

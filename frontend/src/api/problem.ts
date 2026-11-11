@@ -16,8 +16,21 @@ export class ApiError extends Error {
   readonly detail: string | undefined
   readonly errors: FieldError[]
   readonly errorId: string | undefined
+  /** SEAT_TAKEN and LIMIT_EXCEEDED: the seats that caused the rejection. */
+  readonly seatIds: string[]
+  /** SEAT_TAKEN: milliseconds since the most recently taken of those seats was taken. */
+  readonly takenAgoMs: number | undefined
+  /** LIMIT_EXCEEDED: the event's per-user ticket limit. */
+  readonly limit: number | undefined
 
-  constructor(status: number, code: ErrorCode, detail?: string, errors: FieldError[] = [], errorId?: string) {
+  constructor(
+    status: number,
+    code: ErrorCode,
+    detail?: string,
+    errors: FieldError[] = [],
+    errorId?: string,
+    extra: Pick<Problem, 'seatIds' | 'takenAgoMs' | 'limit'> = {},
+  ) {
     super(detail ?? code)
     this.name = 'ApiError'
     this.status = status
@@ -25,12 +38,16 @@ export class ApiError extends Error {
     this.detail = detail
     this.errors = errors
     this.errorId = errorId
+    this.seatIds = extra.seatIds ?? []
+    this.takenAgoMs = extra.takenAgoMs
+    this.limit = extra.limit
   }
 
   /** From an HTTP status and a parsed response body that should be a problem. */
   static fromBody(status: number, body: unknown): ApiError {
     if (isProblem(body)) {
-      return new ApiError(status, body.code, body.detail, body.errors ?? [], body.errorId)
+      const { seatIds, takenAgoMs, limit } = body
+      return new ApiError(status, body.code, body.detail, body.errors ?? [], body.errorId, { seatIds, takenAgoMs, limit })
     }
     // Not a problem body (e.g. a proxy's HTML error page): keep the status, use a generic code.
     return new ApiError(status, status >= 500 ? 'INTERNAL_ERROR' : 'REQUEST_FAILED', `HTTP ${status}`)

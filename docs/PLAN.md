@@ -328,6 +328,25 @@ and gets the seeded demo event from GET /events. Still open in M0: M0.7a (date-g
       `queryClient.clear()` in Layout's logout handler (outside the try), with a test for both cases.
       Note (from M1.8b): the account email isn't shown in the header (no `GET /me` for the user, and
       TokenResponse carries none). Add one if a page needs it.
+      M1.8c part 1 done, not committed: /drops/:id/seats under RequireAuth ("Pick seats" on the event
+      page for SCHEDULED/LIVE). Canvas2D venue (`seatmap/draw.ts`, `SeatCanvas.tsx`): fitted to the
+      container width, drawn in device pixels (sharp on high-DPI), outlines, stage, seats coloured
+      free / taken / yours. Pure maths in `seatmap/geometry.ts` (fit, inverse, nearest seat with an
+      8 CSS px minimum hit radius). Keyboard picker (row, then free seat, then Add) and a list of picked
+      seats with prices and total; cap = min(perUserLimit, 20). Hold with a server-clock countdown,
+      Release, a disabled "Continue to checkout" stub. Hold in sessionStorage
+      (`booking/holdStore.ts`, `stampede:hold:<eventId>`); cleared on release, expiry, HOLD_NOT_FOUND,
+      logout (even if the request fails) and every successful login (`login()` clears it before
+      setting the token; a refresh doesn't). Every hold attempt refetches the seat map. `ApiError`
+      now carries `seatIds`, `takenAgoMs`, `limit`. Error texts in `pages/holdErrorText.ts`.
+      Note (from M1.8c part 1, for part 2): reuse `holdErrorText` for POST /orders (HOLD_EXPIRED,
+      HOLD_NOT_FOUND, HOLD_CONVERTED are written and tested; SEAT_TAKEN there has no `takenAgoMs`).
+      Store the last order under a `stampede:` key so `clearBookingState()` covers it. Replace the
+      checkout stub in `SeatsPage.tsx`. The Playwright purchase test should click the canvas at
+      least once (jsdom tests only fake its size).
+      Note (from M1.8c part 1, for M5): the canvas redraws everything on each change and hit-tests
+      linearly; fine at 2,014 seats, not for PRD 8.4's 20,000 at 60 fps with pan/zoom (grid index,
+      layered canvases). Section names aren't drawn (label points sit among the seats; semantic zoom).
 **Exit:** a full purchase works end to end in the browser; concurrency test passes 1000/1000.
 
 ## M2 - Contention lab (weeks 4-5)  <- the heart of the portfolio
