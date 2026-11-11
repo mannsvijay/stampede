@@ -368,6 +368,11 @@ Write these yourself, in your own words. Each one is an interview answer you've 
     published at least 14 days before install, and `npm install --before=<date>` applies the same
     cutoff to transitive dependencies. package-lock.json is committed.
   - No login UI yet. It comes with the first page that needs a user (M1.8).
+  - **Session (added in M1.8b):** `api/auth.ts` also keeps a session status (`restoring`,
+    `loggedIn`, `loggedOut`) that follows the token. On page load, one memoized refresh restores the
+    session (the cookie survives a reload, the in-memory token doesn't); any failure means logged out,
+    shown without an error. Pages that need a user wait while restoring, so a reload doesn't bounce
+    to /login. `?next=` after login accepts only in-app paths (no open redirect).
 - **Why:**
   - **openapi-typescript:** generates only types, so the committed diff stays small and readable,
     and our auth logic is plain code we own rather than generator output.

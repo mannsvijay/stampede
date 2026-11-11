@@ -307,11 +307,27 @@ and gets the seeded demo event from GET /events. Still open in M0: M0.7a (date-g
       Pages: /login, /register, /drops/:id/seats, /wallet. The current hold and the last order are
       kept in sessionStorage (no GET /me/holds or /me/orders; survives a reload, one tab): the wallet
       shows "tickets on the way" with a retry of POST /orders when that order has fewer tickets than items.
-      M1.8a done, not committed (D-020, draft): public `GET /events/{id}/layout` (static; seats sorted
+      M1.8a done, committed f060b65 (D-020, draft): public `GET /events/{id}/layout` (static; seats sorted
       by seat id, byte-wise uuid order; position = bit index) and `GET /events/{id}/seatmap`
       (`{eventId, seatCount, available, asOf}`, 1 bit per seat, MSB first, base64; no `seq` until
       M5.1). SecurityConfig permits exactly those two paths. Proxy adds /holds, /orders, /me, /tickets.
       Frontend: `fetchLayout`/`fetchSeatMap`/`useLayout`/`useSeatMap`, `seatmap/availability.ts`.
+      M1.8b done, not committed (D-011): /login and /register (register, then login with the same
+      credentials; the API returns no token on register). Session status in `api/auth.ts`
+      (`restoring` | `loggedIn` | `loggedOut`, read with `useSession`); one memoized refresh on page
+      load, any failure = logged out with no error. `RequireAuth` layout route waits while restoring,
+      else sends to `/login?next=`; `safeNext` accepts only in-app paths (no `//`, `\`, control
+      characters, other origins, /login or /register). Header Log in / Log out; logout clears the
+      token and the TanStack Query cache even if the request fails, and says the session may come
+      back on reload. Errors by code in `pages/authErrorText.ts`; field messages use the server's
+      wording. Tests: the MSW server's default `POST /auth/refresh` answers INVALID_REFRESH_TOKEN.
+      No new dependencies (forms tested with `fireEvent`; no user-event).
+      Note (from M1.8b, for M1.8c): put /drops/:id/seats and /wallet under `RequireAuth` in
+      routes.tsx. Logout must also remove the sessionStorage hold and last-order entries (privacy on a
+      shared computer), and must remove them even when POST /auth/logout fails: clear them next to
+      `queryClient.clear()` in Layout's logout handler (outside the try), with a test for both cases.
+      Note (from M1.8b): the account email isn't shown in the header (no `GET /me` for the user, and
+      TokenResponse carries none). Add one if a page needs it.
 **Exit:** a full purchase works end to end in the browser; concurrency test passes 1000/1000.
 
 ## M2 - Contention lab (weeks 4-5)  <- the heart of the portfolio

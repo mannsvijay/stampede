@@ -3,7 +3,7 @@ import '@testing-library/jest-dom/vitest'
 import { cleanup } from '@testing-library/react'
 import { afterAll, afterEach, beforeAll } from 'vitest'
 
-import { setAccessToken } from '../api/auth'
+import { resetSession } from '../api/auth'
 import { server } from './server'
 
 // MSW (Mock Service Worker) intercepts fetch at the network level, so tests run the real API
@@ -24,7 +24,7 @@ beforeAll(() => {
 afterEach(() => {
   server.resetHandlers()
   cleanup()
-  setAccessToken(null)
+  resetSession() // a fresh page load: no token, status 'restoring'
   const requests = unhandled.splice(0)
   if (requests.length > 0) {
     throw new Error(`Unexpected API request(s) with no MSW handler: ${requests.join(', ')}`)

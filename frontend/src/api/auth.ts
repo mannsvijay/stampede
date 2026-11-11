@@ -25,30 +25,113 @@ const authClient = createClient<paths>({
   fetch: (request) => globalThis.fetch(request),
 })
 
+/**
+ * Whether there is a session, for the UI.
+ * - `restoring`: the page just loaded and the one start-up refresh hasn't answered yet. Pages that
+ *   need a user wait instead of redirecting, or every reload of such a page would bounce to /login.
+ * - `loggedIn` / `loggedOut`: there is / isn't an access token in memory.
+ */
+export type SessionStatus = 'restoring' | 'loggedIn' | 'loggedOut'
+
 let accessToken: string | null = null
+let status: SessionStatus = 'restoring'
 let refreshInFlight: Promise<string> | null = null
+let restoreOnce: Promise<void> | null = null
+const listeners = new Set<() => void>()
 
 export function getAccessToken(): string | null {
   return accessToken
 }
 
+/** The only place the token changes, so the session status and its listeners always follow it. */
 export function setAccessToken(token: string | null): void {
   accessToken = token
+  setStatus(token === null ? 'loggedOut' : 'loggedIn')
+}
+
+export function getSessionStatus(): SessionStatus {
+  return status
+}
+
+/** Calls `listener` whenever the session status changes; returns the unsubscribe function. */
+export function subscribeSession(listener: () => void): () => void {
+  listeners.add(listener)
+  return () => listeners.delete(listener)
+}
+
+function setStatus(next: SessionStatus): void {
+  if (next !== status) {
+    status = next
+    listeners.forEach((listener) => listener())
+  }
+}
+
+/**
+ * Restores the session after a page load with ONE refresh call: the httpOnly cookie survives a
+ * reload, the in-memory access token doesn't. Calling it again returns the same promise, so React
+ * StrictMode running effects twice still sends one request. Never rejects: any failure means
+ * "logged out" (INVALID_REFRESH_TOKEN is the normal answer for a visitor with no session).
+ */
+export function restoreSession(): Promise<void> {
+  restoreOnce ??= (async () => {
+    if (accessToken !== null) {
+      setStatus('loggedIn') // already logged in this page load: nothing to restore
+      return
+    }
+    try {
+      await refreshAccessToken()
+    } catch {
+      setAccessToken(null)
+    }
+  })()
+  return restoreOnce
+}
+
+/** Back to the state of a fresh page load. For tests. */
+export function resetSession(): void {
+  accessToken = null
+  restoreOnce = null
+  setStatus('restoring')
 }
 
 export async function login(email: string, password: string): Promise<void> {
-  const { data, error, response } = await authClient.POST('/auth/login', { body: { email, password } })
+  const { data, error, response } = await send(() => authClient.POST('/auth/login', { body: { email, password } }))
   if (error !== undefined || data === undefined) {
     throw ApiError.fromBody(response.status, error)
   }
-  accessToken = data.accessToken
+  setAccessToken(data.accessToken)
 }
 
+/** Creates the account. It does not log in (the API returns no token); call {@link login} next. */
+export async function register(email: string, password: string): Promise<void> {
+  const { error, response } = await send(() => authClient.POST('/auth/register', { body: { email, password } }))
+  if (error !== undefined) {
+    throw ApiError.fromBody(response.status, error)
+  }
+}
+
+/**
+ * Ends the session on the server (revokes the refresh token, clears the cookie) and forgets the
+ * access token. The token is forgotten even if the request fails; the error is still thrown, because
+ * the cookie may then still be valid and a reload would log the user back in.
+ */
 export async function logout(): Promise<void> {
   try {
-    await authClient.POST('/auth/logout', { headers: CLIENT_HEADER })
+    const { error, response } = await send(() => authClient.POST('/auth/logout', { headers: CLIENT_HEADER }))
+    if (error !== undefined) {
+      throw ApiError.fromBody(response.status, error)
+    }
   } finally {
-    accessToken = null
+    setAccessToken(null)
+  }
+}
+
+/** fetch rejects (instead of resolving) when the server can't be reached: make that an ApiError too. */
+async function send<T>(call: () => Promise<T>): Promise<T> {
+  try {
+    return await call()
+  } catch (cause) {
+    throw ApiError.network(cause)
   }
 }
 
@@ -72,18 +155,12 @@ export function refreshAccessToken(): Promise<string> {
 }
 
 async function doRefresh(): Promise<string> {
-  let result
-  try {
-    result = await authClient.POST('/auth/refresh', { headers: CLIENT_HEADER })
-  } catch (cause) {
-    throw ApiError.network(cause)
-  }
-  const { data, error, response } = result
+  const { data, error, response } = await send(() => authClient.POST('/auth/refresh', { headers: CLIENT_HEADER }))
   if (error !== undefined || data === undefined) {
-    accessToken = null
+    setAccessToken(null)
     throw ApiError.fromBody(response.status, error)
   }
-  accessToken = data.accessToken
+  setAccessToken(data.accessToken)
   return data.accessToken
 }
 
