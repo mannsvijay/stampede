@@ -60,6 +60,9 @@ class SecurityConfig {
                         .requestMatchers(HttpMethod.POST,
                                 "/auth/register", "/auth/login", "/auth/refresh", "/auth/logout").permitAll()
                         .requestMatchers(HttpMethod.GET, "/events", "/events/*").permitAll()
+                        // The seat map (D-020). Listed path by path, not "/events/**", so a future GET
+                        // under /events/{id}/ stays behind login unless someone makes it public on purpose.
+                        .requestMatchers(HttpMethod.GET, "/events/*/layout", "/events/*/seatmap").permitAll()
                         // Ticket public keys (D-018): scanners fetch them to verify tickets offline.
                         .requestMatchers(HttpMethod.GET, "/tickets/keys").permitAll()
                         .requestMatchers("/actuator/health", "/actuator/health/**").permitAll()

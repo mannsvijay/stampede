@@ -417,6 +417,124 @@
         "tags" : [ "holds" ]
       }
     },
+    "/events/{id}/layout" : {
+      "get" : {
+        "description" : "Venue outline, stage, sections and every seat with its position and tier. It doesn't change after the event is created, so load it once. Seats are sorted by seat id as PostgreSQL orders uuid values (byte by byte, the same as comparing the lowercase text form). A seat's position in this list is its bit index in GET /events/{id}/seatmap.",
+        "operationId" : "eventLayout",
+        "parameters" : [ {
+          "in" : "path",
+          "name" : "id",
+          "required" : true,
+          "schema" : {
+            "type" : "string",
+            "format" : "uuid"
+          }
+        } ],
+        "responses" : {
+          "200" : {
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/EventLayout"
+                }
+              }
+            },
+            "description" : "OK"
+          },
+          "400" : {
+            "content" : {
+              "application/problem+json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description" : "VALIDATION_FAILED"
+          },
+          "404" : {
+            "content" : {
+              "application/problem+json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description" : "EVENT_NOT_FOUND"
+          },
+          "500" : {
+            "content" : {
+              "application/problem+json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description" : "INTERNAL_ERROR"
+          }
+        },
+        "summary" : "The event's static seat layout",
+        "tags" : [ "events" ]
+      }
+    },
+    "/events/{id}/seatmap" : {
+      "get" : {
+        "description" : "One bit per seat, in the order of the layout's seat list. Poll it again after a rejected hold; realtime updates with a sequence number arrive in M5. Base64 (RFC 4648 section 4, with padding) of ceil(seatCount / 8) bytes. Bit i describes seats[i] of GET /events/{id}/layout: it is bit (7 - i % 8) of byte floor(i / 8), i.e. the most significant bit first. 1 = AVAILABLE, 0 = held or sold. Unused bits of the last byte are 0.",
+        "operationId" : "seatMap",
+        "parameters" : [ {
+          "in" : "path",
+          "name" : "id",
+          "required" : true,
+          "schema" : {
+            "type" : "string",
+            "format" : "uuid"
+          }
+        } ],
+        "responses" : {
+          "200" : {
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/SeatMap"
+                }
+              }
+            },
+            "description" : "OK"
+          },
+          "400" : {
+            "content" : {
+              "application/problem+json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description" : "VALIDATION_FAILED"
+          },
+          "404" : {
+            "content" : {
+              "application/problem+json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description" : "EVENT_NOT_FOUND"
+          },
+          "500" : {
+            "content" : {
+              "application/problem+json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description" : "INTERNAL_ERROR"
+          }
+        },
+        "summary" : "Which seats are available now",
+        "tags" : [ "events" ]
+      }
+    },
     "/holds/{id}" : {
       "delete" : {
         "operationId" : "cancel",
@@ -773,6 +891,26 @@
         },
         "required" : [ "dropAt", "id", "perUserLimit", "serverTime", "startsAt", "status", "tiers", "title", "venue" ]
       },
+      "EventLayout" : {
+        "type" : "object",
+        "properties" : {
+          "eventId" : {
+            "type" : "string",
+            "format" : "uuid"
+          },
+          "seats" : {
+            "type" : "array",
+            "description" : "Seats are sorted by seat id as PostgreSQL orders uuid values (byte by byte, the same as comparing the lowercase text form). A seat's position in this list is its bit index in GET /events/{id}/seatmap.",
+            "items" : {
+              "$ref" : "#/components/schemas/LayoutSeat"
+            }
+          },
+          "venue" : {
+            "$ref" : "#/components/schemas/VenueLayout"
+          }
+        },
+        "required" : [ "eventId", "seats", "venue" ]
+      },
       "EventList" : {
         "type" : "object",
         "properties" : {
@@ -919,6 +1057,113 @@
           }
         },
         "required" : [ "keys" ]
+      },
+      "LayoutPoint" : {
+        "type" : "object",
+        "properties" : {
+          "x" : {
+            "type" : "number",
+            "format" : "double"
+          },
+          "y" : {
+            "type" : "number",
+            "format" : "double"
+          }
+        },
+        "required" : [ "x", "y" ]
+      },
+      "LayoutRect" : {
+        "type" : "object",
+        "properties" : {
+          "height" : {
+            "type" : "number",
+            "format" : "double"
+          },
+          "width" : {
+            "type" : "number",
+            "format" : "double"
+          },
+          "x" : {
+            "type" : "number",
+            "format" : "double"
+          },
+          "y" : {
+            "type" : "number",
+            "format" : "double"
+          }
+        },
+        "required" : [ "height", "width", "x", "y" ]
+      },
+      "LayoutSeat" : {
+        "type" : "object",
+        "properties" : {
+          "accessible" : {
+            "type" : "boolean"
+          },
+          "aisle" : {
+            "type" : "boolean"
+          },
+          "id" : {
+            "type" : "string",
+            "format" : "uuid"
+          },
+          "number" : {
+            "type" : "integer",
+            "format" : "int32",
+            "example" : 1
+          },
+          "row" : {
+            "type" : "string",
+            "example" : "A"
+          },
+          "section" : {
+            "type" : "string",
+            "description" : "Section code",
+            "example" : "FL-L"
+          },
+          "tierId" : {
+            "type" : "string",
+            "format" : "uuid",
+            "description" : "The seat's price tier; prices are in GET /events/{id}"
+          },
+          "x" : {
+            "type" : "number",
+            "format" : "double",
+            "description" : "Seat centre"
+          },
+          "y" : {
+            "type" : "number",
+            "format" : "double"
+          }
+        },
+        "required" : [ "accessible", "aisle", "id", "number", "row", "section", "tierId", "x", "y" ]
+      },
+      "LayoutSection" : {
+        "type" : "object",
+        "properties" : {
+          "code" : {
+            "type" : "string"
+          },
+          "label" : {
+            "$ref" : "#/components/schemas/LayoutPoint",
+            "description" : "Where the section's name is drawn when zoomed out"
+          },
+          "name" : {
+            "type" : "string"
+          },
+          "outline" : {
+            "type" : "array",
+            "description" : "Polygon of [x, y] points, drawn as a block when zoomed out",
+            "items" : {
+              "type" : "array",
+              "items" : {
+                "type" : "number",
+                "format" : "double"
+              }
+            }
+          }
+        },
+        "required" : [ "code", "label", "name", "outline" ]
       },
       "LoginRequest" : {
         "type" : "object",
@@ -1101,6 +1346,30 @@
         },
         "required" : [ "email", "password" ]
       },
+      "SeatMap" : {
+        "type" : "object",
+        "properties" : {
+          "asOf" : {
+            "type" : "string",
+            "format" : "date-time",
+            "description" : "When this snapshot was read, by the server's clock"
+          },
+          "available" : {
+            "type" : "string",
+            "description" : "Base64 (RFC 4648 section 4, with padding) of ceil(seatCount / 8) bytes. Bit i describes seats[i] of GET /events/{id}/layout: it is bit (7 - i % 8) of byte floor(i / 8), i.e. the most significant bit first. 1 = AVAILABLE, 0 = held or sold. Unused bits of the last byte are 0."
+          },
+          "eventId" : {
+            "type" : "string",
+            "format" : "uuid"
+          },
+          "seatCount" : {
+            "type" : "integer",
+            "format" : "int32",
+            "description" : "Number of seats, equal to the length of the layout's seat list"
+          }
+        },
+        "required" : [ "asOf", "available", "eventId", "seatCount" ]
+      },
       "TicketResponse" : {
         "type" : "object",
         "properties" : {
@@ -1183,6 +1452,42 @@
           }
         },
         "required" : [ "email", "id", "role" ]
+      },
+      "VenueLayout" : {
+        "type" : "object",
+        "properties" : {
+          "height" : {
+            "type" : "integer",
+            "format" : "int32"
+          },
+          "id" : {
+            "type" : "string",
+            "format" : "uuid"
+          },
+          "name" : {
+            "type" : "string"
+          },
+          "seatRadius" : {
+            "type" : "integer",
+            "format" : "int32",
+            "description" : "Radius of each seat circle, in venue units"
+          },
+          "sections" : {
+            "type" : "array",
+            "items" : {
+              "$ref" : "#/components/schemas/LayoutSection"
+            }
+          },
+          "stage" : {
+            "$ref" : "#/components/schemas/LayoutRect",
+            "description" : "Rectangle (top-left corner plus size) that shows which way the venue faces"
+          },
+          "width" : {
+            "type" : "integer",
+            "format" : "int32"
+          }
+        },
+        "required" : [ "height", "id", "name", "seatRadius", "sections", "stage", "width" ]
       },
       "VenueRef" : {
         "type" : "object",

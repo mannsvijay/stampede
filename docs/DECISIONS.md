@@ -1046,3 +1046,60 @@ Write these yourself, in your own words. Each one is an interview answer you've 
   when run after another class (a leak between tests); the check takes long enough on a real event
   to matter (time it per event, then consider spreading rules over ticks); or the annotation list
   keeps growing (tests are building fake states instead of using the real paths).
+
+### D-020 Seat map API: static layout plus an availability bitset (DRAFT)
+- **Date:** 2026-11-11
+- **Context:** M1.8's seat map page needs every seat's position, label and tier, and which seats are
+  free. PRD 10 names one endpoint, `GET /events/{id}/seatmap`, returning "bitset + sequence number"
+  for M5's realtime diffs. Nothing produces a sequence number yet. SecurityConfig's public rule
+  `/events/*` matches one path segment only, so a sub-path of an event needs its own rule.
+- **Options considered:**
+  - Shape: one payload (layout, seats and bitset); a static layout plus a separate status bitset;
+    one payload with a status string per seat.
+  - Access: both public; layout public and status behind login.
+  - Bits: one per seat (available or not); two (available, held, sold).
+  - Sequence number: a placeholder now; none until M5.1 produces one.
+- **Decision:**
+  - **Two endpoints, both public GETs** in internal `inventory.catalog`:
+    `GET /events/{id}/layout` (venue size, stage, section outlines from `venues.layout_json`, and
+    every seat with id, section, row, number, x, y, tierId, aisle, accessible) and
+    `GET /events/{id}/seatmap` (`{eventId, seatCount, available, asOf}`).
+  - **They are joined by position.** The layout lists seats `ORDER BY seat_id`, which is PostgreSQL's
+    byte-wise uuid order (the same as comparing lowercase text, and **not** Java's signed
+    `UUID.compareTo`). Bit i of the seat map describes `seats[i]`. Documented in the OpenAPI
+    descriptions and docs/venue-format.md.
+  - **One bit per seat**, 1 = AVAILABLE, most significant bit first, base64 with padding, unused bits
+    zero. 2,014 seats are 252 bytes.
+  - **No sequence number until M5.1** (a deliberate deviation from PRD 10). `asOf` is the snapshot
+    time (`now()` of the one statement), which also corrects the client's clock. M5.1 adds `seq` as a
+    new field, which doesn't break clients.
+  - The seat map is **one statement** (existence check, seats and `asOf` from one snapshot). The
+    layout is two statements (venue, then seats), because nothing in it changes after seeding.
+  - Unknown or DRAFT event: 404 EVENT_NOT_FOUND; malformed id: 400; incomplete `layout_json`: 500
+    (a data bug: seeded venues always have it).
+  - **Security:** `GET /events/*/layout` and `GET /events/*/seatmap` are permitted one by one, not
+    `/events/**`, so a future GET under an event stays behind login unless made public on purpose.
+  - Frontend: `/holds`, `/orders`, `/me` and `/tickets` join the Vite dev proxy; app pages may not
+    start with any proxied prefix (so the wallet is `/wallet`).
+- **Why:**
+  - The layout is about 2,000 seat objects and never changes; the status changes constantly. Split,
+    the page downloads the layout once and refreshes 252 bytes after each rejected hold, and M5's
+    WebSocket snapshot can reuse the bitset as it is (at 20,000 seats a combined payload would be
+    re-sent in full on every refresh).
+  - One bit is all a buyer needs (can I pick it?). Held versus sold matters to the operator heat
+    view (M5.5), which can get its own encoding.
+  - A placeholder sequence number would look meaningful to a client and mean nothing.
+  - Public, like `/events`: people look before they log in. Reads take no locks (a plain SELECT reads
+    a snapshot and never waits for the row locks holds take), so polling doesn't slow buyers down.
+- **Trade-offs:**
+  - Two requests on page load, and a positional contract between them: if the seat set of an event
+    ever changed, a cached layout and a fresh bitset would disagree. `seatCount` lets the client
+    detect that (the decoder throws on a length mismatch). Seats don't change after seeding today.
+  - Anonymous clients can poll the seat map; nothing limits that until M4 (rate limits, admission).
+  - No HTTP caching headers on the layout yet; TanStack Query keeps it for the page's lifetime.
+  - Two generic-sounding schemas were prefixed (`LayoutRect`, `LayoutPoint`) because OpenAPI
+    schema names share one namespace.
+- **How I'd know it was wrong:** the layout's size or time shows up in the M2.4 load test or the PRD 8
+  performance budgets (then gzip/ETag, or a compact array encoding); M4.2 finds bots scraping the
+  seat map (then require the admission token for `/seatmap`); M5.1 can't express its diffs against
+  this bit order; or the client's length check ever fires.

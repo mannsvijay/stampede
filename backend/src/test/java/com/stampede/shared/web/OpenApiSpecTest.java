@@ -82,10 +82,25 @@ class OpenApiSpecTest {
 
         assertThat(paths).containsExactlyInAnyOrder(
                 "/auth/register", "/auth/login", "/auth/refresh", "/auth/logout",
-                "/events", "/events/{id}",
+                "/events", "/events/{id}", "/events/{id}/layout", "/events/{id}/seatmap",
                 "/events/{id}/holds", "/holds/{id}",
                 "/orders", "/orders/{id}",
                 "/me/tickets", "/tickets/keys");
+    }
+
+    @Test
+    void seatMapEndpointsArePublicAndDocumentTheSeatOrder() {
+        JsonNode layout = generated.path("paths").path("/events/{id}/layout").path("get");
+        assertThat(layout.path("operationId").asText()).isEqualTo("eventLayout");
+        // Public: no 401 documented.
+        assertThat(fieldNames(layout.path("responses"))).containsExactlyInAnyOrder("200", "400", "404", "500");
+        assertThat(layout.path("responses").path("404").path("description").asText()).isEqualTo("EVENT_NOT_FOUND");
+        assertThat(layout.path("description").asText()).contains("sorted by seat id", "bit index");
+
+        JsonNode seatMap = generated.path("paths").path("/events/{id}/seatmap").path("get");
+        assertThat(seatMap.path("operationId").asText()).isEqualTo("seatMap");
+        assertThat(fieldNames(seatMap.path("responses"))).containsExactlyInAnyOrder("200", "400", "404", "500");
+        assertThat(seatMap.path("description").asText()).contains("most significant bit first");
     }
 
     @Test

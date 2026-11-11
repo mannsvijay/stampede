@@ -300,6 +300,18 @@ and gets the seeded demo event from GET /events. Still open in M0: M0.7a (date-g
       holds return 409 SALE_NOT_OPEN). Use `serverTime` from the hold response to correct the timer.
       Note (from M1.5): add `/orders` to the Vite dev proxy too. POST /orders returns the PAID order
       (201) or the existing one (200); 410 means pick seats again; 409 SEAT_TAKEN means retry shortly.
+      Split (agreed 2026-11-11): M1.8a seat map API + proxy; M1.8b login/register UI and session
+      restore; M1.8c seat map page, hold, checkout, wallet (QR via qrcode-generator 2.0.4, exact pin,
+      `--before=2026-10-28`; confirm byte mode and level M first), Playwright purchase test run locally
+      against the compose stack (`@playwright/test` 1.64.1, no CI job), the 1000-round proof.
+      Pages: /login, /register, /drops/:id/seats, /wallet. The current hold and the last order are
+      kept in sessionStorage (no GET /me/holds or /me/orders; survives a reload, one tab): the wallet
+      shows "tickets on the way" with a retry of POST /orders when that order has fewer tickets than items.
+      M1.8a done, not committed (D-020, draft): public `GET /events/{id}/layout` (static; seats sorted
+      by seat id, byte-wise uuid order; position = bit index) and `GET /events/{id}/seatmap`
+      (`{eventId, seatCount, available, asOf}`, 1 bit per seat, MSB first, base64; no `seq` until
+      M5.1). SecurityConfig permits exactly those two paths. Proxy adds /holds, /orders, /me, /tickets.
+      Frontend: `fetchLayout`/`fetchSeatMap`/`useLayout`/`useSeatMap`, `seatmap/availability.ts`.
 **Exit:** a full purchase works end to end in the browser; concurrency test passes 1000/1000.
 
 ## M2 - Contention lab (weeks 4-5)  <- the heart of the portfolio
@@ -374,6 +386,9 @@ and gets the seeded demo event from GET /events. Still open in M0: M0.7a (date-g
 
 ## M5 - Realtime and frontend (weeks 9-10)
 - [ ] M5.1 WebSocket seat channel: snapshot, 100 ms bitset diffs, sequence numbers, resync
+      Note (from M1.8a, D-020): `GET /events/{id}/seatmap` has no sequence number yet (PRD 10
+      deviation). Add `seq` there as a new field and reuse its bitset (1 bit per seat, layout order,
+      MSB first) for the snapshot message, so diffs and the HTTP snapshot share one bit index.
       Note (from M0.6): GET /events and /events/{id} deliberately return no availability counts.
       Live demand (seats left, people waiting) for the board and event page comes from realtime.
 - [ ] M5.2 Measure hold-to-visible latency against the budget above
@@ -406,6 +421,8 @@ and gets the seeded demo event from GET /events. Still open in M0: M0.7a (date-g
       Note (from M0.9): replace the short root README.md (keep the CI badge) and link to
       docs/DEVELOPING.md for how to run it rather than duplicating the commands.
 - [ ] M7.3 Demo video (3 minutes): drop, collision, chaos run, invariants staying green
+      Note (from M1.8): consider a CI job for the Playwright purchase test once the UI settles
+      (reuse the compose-smoke stack with `seed,demo-open-sale`; Chromium only). M1.8 runs it locally.
 
 ## Stretch (only when everything above is green)
 Kafka/Redpanda publisher, OpenTelemetry + Jaeger, WebGL particle waiting room, ticket reveal and

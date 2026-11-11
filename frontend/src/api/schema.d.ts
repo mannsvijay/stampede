@@ -113,6 +113,46 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/events/{id}/layout": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The event's static seat layout
+         * @description Venue outline, stage, sections and every seat with its position and tier. It doesn't change after the event is created, so load it once. Seats are sorted by seat id as PostgreSQL orders uuid values (byte by byte, the same as comparing the lowercase text form). A seat's position in this list is its bit index in GET /events/{id}/seatmap.
+         */
+        get: operations["eventLayout"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/events/{id}/seatmap": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Which seats are available now
+         * @description One bit per seat, in the order of the layout's seat list. Poll it again after a rejected hold; realtime updates with a sequence number arrive in M5. Base64 (RFC 4648 section 4, with padding) of ceil(seatCount / 8) bytes. Bit i describes seats[i] of GET /events/{id}/layout: it is bit (7 - i % 8) of byte floor(i / 8), i.e. the most significant bit first. 1 = AVAILABLE, 0 = held or sold. Unused bits of the last byte are 0.
+         */
+        get: operations["seatMap"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/holds/{id}": {
         parameters: {
             query?: never;
@@ -214,6 +254,13 @@ export interface components {
             title: string;
             venue: components["schemas"]["VenueRef"];
         };
+        EventLayout: {
+            /** Format: uuid */
+            eventId: string;
+            /** @description Seats are sorted by seat id as PostgreSQL orders uuid values (byte by byte, the same as comparing the lowercase text form). A seat's position in this list is its bit index in GET /events/{id}/seatmap. */
+            seats: components["schemas"]["LayoutSeat"][];
+            venue: components["schemas"]["VenueLayout"];
+        };
         EventList: {
             items: components["schemas"]["EventSummary"][];
             /** Format: date-time */
@@ -270,6 +317,60 @@ export interface components {
         };
         KeySet: {
             keys: components["schemas"]["Jwk"][];
+        };
+        LayoutPoint: {
+            /** Format: double */
+            x: number;
+            /** Format: double */
+            y: number;
+        };
+        LayoutRect: {
+            /** Format: double */
+            height: number;
+            /** Format: double */
+            width: number;
+            /** Format: double */
+            x: number;
+            /** Format: double */
+            y: number;
+        };
+        LayoutSeat: {
+            accessible: boolean;
+            aisle: boolean;
+            /** Format: uuid */
+            id: string;
+            /**
+             * Format: int32
+             * @example 1
+             */
+            number: number;
+            /** @example A */
+            row: string;
+            /**
+             * @description Section code
+             * @example FL-L
+             */
+            section: string;
+            /**
+             * Format: uuid
+             * @description The seat's price tier; prices are in GET /events/{id}
+             */
+            tierId: string;
+            /**
+             * Format: double
+             * @description Seat centre
+             */
+            x: number;
+            /** Format: double */
+            y: number;
+        };
+        LayoutSection: {
+            code: string;
+            /** @description Where the section's name is drawn when zoomed out */
+            label: components["schemas"]["LayoutPoint"];
+            name: string;
+            /** @description Polygon of [x, y] points, drawn as a block when zoomed out */
+            outline: number[][];
         };
         LoginRequest: {
             email: string;
@@ -349,6 +450,22 @@ export interface components {
             /** @description At least 12 characters and at most 72 UTF-8 bytes */
             password: string;
         };
+        SeatMap: {
+            /**
+             * Format: date-time
+             * @description When this snapshot was read, by the server's clock
+             */
+            asOf: string;
+            /** @description Base64 (RFC 4648 section 4, with padding) of ceil(seatCount / 8) bytes. Bit i describes seats[i] of GET /events/{id}/layout: it is bit (7 - i % 8) of byte floor(i / 8), i.e. the most significant bit first. 1 = AVAILABLE, 0 = held or sold. Unused bits of the last byte are 0. */
+            available: string;
+            /** Format: uuid */
+            eventId: string;
+            /**
+             * Format: int32
+             * @description Number of seats, equal to the length of the layout's seat list
+             */
+            seatCount: number;
+        };
         TicketResponse: {
             /** Format: uuid */
             eventId: string;
@@ -387,6 +504,23 @@ export interface components {
             /** Format: uuid */
             id: string;
             role: string;
+        };
+        VenueLayout: {
+            /** Format: int32 */
+            height: number;
+            /** Format: uuid */
+            id: string;
+            name: string;
+            /**
+             * Format: int32
+             * @description Radius of each seat circle, in venue units
+             */
+            seatRadius: number;
+            sections: components["schemas"]["LayoutSection"][];
+            /** @description Rectangle (top-left corner plus size) that shows which way the venue faces */
+            stage: components["schemas"]["LayoutRect"];
+            /** Format: int32 */
+            width: number;
         };
         VenueRef: {
             /** Format: uuid */
@@ -735,6 +869,104 @@ export interface operations {
             };
             /** @description SEAT_TAKEN, LIMIT_EXCEEDED, SALE_NOT_OPEN */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description INTERNAL_ERROR */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    eventLayout: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EventLayout"];
+                };
+            };
+            /** @description VALIDATION_FAILED */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description EVENT_NOT_FOUND */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description INTERNAL_ERROR */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    seatMap: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SeatMap"];
+                };
+            };
+            /** @description VALIDATION_FAILED */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description EVENT_NOT_FOUND */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

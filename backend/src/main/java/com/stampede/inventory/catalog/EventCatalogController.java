@@ -17,7 +17,7 @@ import io.swagger.v3.oas.annotations.tags.Tag;
 
 /**
  * GET /events (the departures board, PRD 8.1) and GET /events/{id} (the event page, PRD 8.2).
- * Public: SecurityConfig permits both without a token. The seat map is a separate endpoint (later).
+ * Public: SecurityConfig permits both without a token. The seat map is in {@link SeatMapController}.
  */
 @Tag(name = "events")
 @RestController

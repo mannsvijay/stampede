@@ -412,7 +412,8 @@ The OpenAPI spec is the source of truth, and the TypeScript client is generated 
 |---|---|---|
 | `POST /auth/register`, `/auth/login`, `/auth/refresh` | Identity | Refresh-token rotation |
 | `GET /events`, `GET /events/{id}` | Browse | Public. List: upcoming non-draft events as `{items, serverTime}`, at most 100, no pagination yet. Detail adds tiers with prices. No availability counts (live demand comes from realtime) |
-| `GET /events/{id}/seatmap` | Seat snapshot | Returns bitset + sequence number |
+| `GET /events/{id}/layout` | Static seat layout | Public. Venue outline, stage, sections, every seat with position and tier, sorted by seat id; a seat's position is its bit index in the seat map (D-020) |
+| `GET /events/{id}/seatmap` | Seat snapshot | Public. Availability bitset (1 bit per seat, layout order) + `asOf`; the sequence number arrives with realtime in M5.1 (D-020) |
 | `POST /events/{id}/queue` | Join waiting room | Body includes PoW solution |
 | `GET /queue/{ticket}` | Position stream | SSE |
 | `POST /events/{id}/holds` | Hold seats | Requires admission token; all-or-nothing |

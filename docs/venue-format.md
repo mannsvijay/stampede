@@ -85,6 +85,25 @@ Seats live only in the `seats` table, not in `layout_json`, so there is one sour
 `layout_json` is what a renderer needs to draw the venue zoomed out (and the silhouette on the
 departures board) without loading every seat.
 
+## Over the API (D-020)
+
+The seat map page reads a venue through two public endpoints, joined by seat position:
+
+- `GET /events/{id}/layout`: the venue's size, `seatRadius`, `stage` and sections (code, name, label,
+  outline: what `layout_json` holds), plus every seat of the event as `{id, section, row, number, x,
+  y, tierId, aisle, accessible}`. It doesn't change after seeding; load it once.
+- `GET /events/{id}/seatmap`: `{eventId, seatCount, available, asOf}`, which seats are free now.
+
+**Seat order.** `seats` is sorted by seat id the way PostgreSQL orders `uuid` values: byte by byte,
+which is the same as comparing the lowercase text form. (Java's `UUID.compareTo` compares signed
+longs and gives a different order.) A seat's position in that list is its **bit index** in the seat map.
+
+**Bitset.** `available` is base64 (RFC 4648 section 4, with `=` padding) of `ceil(seatCount / 8)`
+bytes. Seat i is bit `7 - i % 8` of byte `floor(i / 8)`, most significant bit first. 1 = AVAILABLE,
+0 = held or sold; the unused bits of the last byte are 0. Example: 5 seats, all free = `0xF8` = `+A==`.
+`seatCount` equals the length of the layout's seat list; a client that sees another byte count has a
+stale layout. A sequence number for realtime updates is added in M5.1.
+
 ## Seed ids
 
 Every seeded row gets a name-based UUID (version 3) built from the slugs and codes, for example

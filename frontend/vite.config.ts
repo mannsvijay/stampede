@@ -10,10 +10,15 @@ export default defineConfig({
     strictPort: true,
     // The dev proxy makes the API same-origin with the app, so the httpOnly refresh cookie
     // (SameSite=Strict, Path=/auth) is sent, and no CORS is needed (D-008, D-011). Only API
-    // prefixes are proxied: app pages live at / and /drops/:id, so reloading a page never hits the API.
+    // prefixes are proxied, and no app page may start with one (see routes.tsx): reloading a page
+    // must load the app, never the API's JSON.
     proxy: {
       '/auth': backend,
       '/events': backend,
+      '/holds': backend,
+      '/orders': backend,
+      '/me': backend,
+      '/tickets': backend,
       '/actuator': backend,
       '/v3': backend,
     },
