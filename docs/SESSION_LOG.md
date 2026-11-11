@@ -621,3 +621,42 @@ PENDING orders), then M1.8 seat map with the ticket QR.
 - The seat map can be polled anonymously without limits until M4 (rate limits, admission).
 - No correctness-reviewer pass (read-only endpoints, no locking code).
 - Still open from M1.7: the 1000-round proof (planned at the end of M1.8c).
+
+## 2026-11-12 - M1.8b Login and register screens, session restore, RequireAuth
+
+**What changed**
+- `api/auth.ts`: session status (`restoring` | `loggedIn` | `loggedOut`) that follows the in-memory
+  token; `restoreSession()` (one memoized refresh per page load, any failure = logged out, no
+  error shown); `register()`; `resetSession()` for tests. Login/register/logout now turn an
+  unreachable server into NETWORK_ERROR (login used to throw a raw TypeError).
+- `auth/`: `useSession` (useSyncExternalStore), `RequireAuth` layout route (waits while restoring,
+  else `/login?next=`), `safeNext` (in-app paths only: no `//`, `\`, control characters, other
+  origins, /login or /register).
+- Pages: /login, /register (register, then login with the same credentials; if only the login
+  fails, /login with "Account created. Log in to continue."). Labels, autocomplete
+  email/current-password/new-password, password rule shown up front, field errors via
+  aria-describedby + aria-invalid + focus, form errors in an always-present role="alert" region.
+  Error text by code in `pages/authErrorText.ts`; field messages use the server's wording.
+- Header: Log in (with next) / Log out. Logout clears the token and the TanStack Query cache even
+  if the request fails, and warns the session may come back on reload.
+- Tests: MSW server's default `POST /auth/refresh` = INVALID_REFRESH_TOKEN; `renderAt` returns the
+  router and takes a route list. New: LoginPage (5), RegisterPage (5), session (12), safeNext.
+- Docs: PLAN M1.8b note + M1.8c note (logout must also clear the sessionStorage hold and
+  last-order entries, even when POST /auth/logout fails); D-011 "Session" item; M1.8a note
+  corrected to committed (f060b65). No new dependency.
+
+**Verified**
+- `./gradlew test --rerun`: 417 tests, 0 failures/errors/skipped (8 min 32 s).
+- Frontend: test 79/79 (5 consecutive green runs), typecheck, lint, check:api, build green.
+- Mutation checks: making `safeNext` follow any next fails 14 tests; removing the shared refresh
+  fails the "two 401s, one refresh" UI test.
+
+**Next**: M1.8c seat map page, hold, checkout, wallet (under RequireAuth), Playwright purchase
+test locally, the 1000-round proof.
+
+**Open problems**
+- Not tried in a real browser yet (only jsdom); M1.8c's Playwright test will cover login.
+- The header shows no account email (no `GET /me` for the user).
+- Two test flakes this session came from requests outliving their test; tests that end on a page
+  that fetches must wait for it to load.
+- Still open: D-020 draft to rewrite; the 1000-round proof (end of M1.8c).

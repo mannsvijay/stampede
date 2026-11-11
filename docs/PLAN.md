@@ -312,7 +312,7 @@ and gets the seeded demo event from GET /events. Still open in M0: M0.7a (date-g
       (`{eventId, seatCount, available, asOf}`, 1 bit per seat, MSB first, base64; no `seq` until
       M5.1). SecurityConfig permits exactly those two paths. Proxy adds /holds, /orders, /me, /tickets.
       Frontend: `fetchLayout`/`fetchSeatMap`/`useLayout`/`useSeatMap`, `seatmap/availability.ts`.
-      M1.8b done, not committed (D-011): /login and /register (register, then login with the same
+      M1.8b done, committed f17e3f8 (D-011): /login and /register (register, then login with the same
       credentials; the API returns no token on register). Session status in `api/auth.ts`
       (`restoring` | `loggedIn` | `loggedOut`, read with `useSession`); one memoized refresh on page
       load, any failure = logged out with no error. `RequireAuth` layout route waits while restoring,
