@@ -286,7 +286,7 @@ and gets the seeded demo event from GET /events. Still open in M0: M0.7a (date-g
       full checker each round; ModularityTest green. Every rule shown to fire in InvariantCheckerTest;
       the listener shown to fail a test that leaves bad data (InvariantAssertionListenerTest).
       Not run: the 1000-round proof (M1 exit criterion) and a correctness-reviewer pass.
-- [ ] M1.8 Basic seat map page: Canvas2D render of seats, click to hold, checkout, show ticket QR
+- [x] M1.8 Basic seat map page: Canvas2D render of seats, click to hold, checkout, show ticket QR
       Note (from M1.6, D-018): tickets come from GET /me/tickets (`qr` is the string to draw, byte
       mode, 195 chars; labels in section/row/seatNumber). A 201 order can briefly have no tickets
       (step 5 failed): show "tickets on the way" and let the buyer retry POST /orders for the same
@@ -371,9 +371,18 @@ and gets the seeded demo event from GET /events. Still open in M0: M0.7a (date-g
       Verified 2026-11-12: typecheck, lint, 153 Vitest tests (was 131), check:api, build (JS 129.7 KB
       gzipped) all green; Playwright purchase test passed twice against the compose stack
       (`seed,demo-open-sale`): register, canvas click, hold, pay, wallet QR with 57 modules.
-      Open: the 1000-round proof. The first attempt was stopped by Claude Code for low system memory
-      (not a test failure; no result). M1.8 stays unticked until it passes 1000/1000.
+      1000-round proof 2026-11-12 (run by the user in PowerShell with everything else closed; a first
+      attempt in the Claude session was stopped for low system memory, with no result):
+      `.\gradlew.bat test --rerun --tests "*ConcurrencyTest" "-Dstampede.harness.rounds=1000"`,
+      BUILD SUCCESSFUL in 22 min 47 s. Reports (`backend/build/reports/concurrency/`), each
+      "1000/1000 rounds clean, 0 invariant violations, 0 exceptions": PESSIMISTIC singleSeat,
+      overlappingSets, churn, capRace, capOnlyHolds, capHoldsAndReleases (16 threads each).
+      Also by the user: the Playwright purchase test in headed mode (1 passed, 10.0 s), and a manual
+      purchase in the browser (seat map, hold, checkout, wallet QR; a seat can't be sold twice).
 **Exit:** a full purchase works end to end in the browser; concurrency test passes 1000/1000.
+**Exit met (2026-11-12):** the Playwright purchase test and a manual browser purchase complete end to
+end against the compose stack, and every concurrency harness scenario passed 1000/1000 rounds with
+0 invariant violations (evidence under M1.8 above).
 
 ## M2 - Contention lab (weeks 4-5)  <- the heart of the portfolio
 - [ ] M2.1 Optimistic strategy (version column, bounded retries with jitter)

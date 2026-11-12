@@ -694,3 +694,46 @@ the 1000-round proof.
 - Full redraw and linear hit test won't scale to 20,000 seats (M5).
 - docs/DEVELOPING.md line 157 lists the old proxy prefixes (missing /holds, /orders, /me, /tickets).
 - Still open: D-020 draft to rewrite; the 1000-round proof.
+
+## 2026-11-12 - M1.8c part 2 Checkout, wallet with QR, Playwright purchase test; M1 exit met
+
+**What changed**
+- Checkout on the seats page: "Continue to checkout" opens a receipt (`pages/CheckoutReceipt.tsx`,
+  mono, dotted leaders); Pay sends POST /orders (`api/orders.ts`). 201/200 PAID or PENDING: hold
+  cleared, last order saved, go to /wallet. 410, 402, 404 and a 200 CANCELLED/REFUNDED order: hold
+  cleared, seat map refetched. 409 SEAT_TAKEN and network errors keep the hold; Pay becomes Retry.
+  `pages/checkoutErrorText.ts` handles SEAT_TAKEN, PAYMENT_FAILED, NETWORK_ERROR and delegates the
+  rest to `holdErrorText`.
+- `booking/lastOrderStore.ts` (`stampede:last-order`, cleared by `clearBookingState()` on logout and
+  login); `holdStore.ts` exports the shared `stampede:` prefix.
+- /wallet under RequireAuth, header link when logged in: GET /me/tickets grouped by order
+  (`booking/groupTickets.ts`), seat label snapshot, QR as SVG (`qr/qrMatrix.ts`, `qr/TicketQr.tsx`:
+  byte mode, level M, auto version, quiet zone 4). "Tickets on the way" with Retry when the last
+  order has fewer tickets than items.
+- Playwright: `frontend/e2e/purchase.spec.ts` (register, canvas click at a free seat via the app's
+  `fitTransform`, hold, pay, wallet QR with 57 modules), `playwright.config.ts` (Chromium,
+  webServer `npm run dev`), `tsconfig.e2e.json` (type-checked by `tsc -b`), `npm run e2e`. Vitest
+  limited to `src/**/*.test.{ts,tsx}`. `CANVAS_PADDING` moved into `seatmap/geometry.ts`.
+- New dependencies (exact, `--before=2026-10-28`): qrcode-generator 2.0.4, @playwright/test 1.64.1.
+- Docs: DEVELOPING.md and frontend/README.md proxy lists fixed; Playwright commands documented.
+- Frontend code committed by the user in 258c491; docs in the proposed docs commit.
+
+**Verified**
+- Frontend: typecheck, lint, 153 tests (was 131), check:api, build green; JS 129.7 KB gzipped.
+- A real 195-character ticket string gives a 57×57 QR grid (level L would give 53×53).
+- Playwright purchase test against the compose stack (`seed,demo-open-sale`): passed twice in the
+  session (12.9 s, 5.9 s) and once headed by the user (10.0 s). Manual browser purchase by the user;
+  a seat can't be sold twice.
+- 1000-round proof (run by the user): BUILD SUCCESSFUL in 22 min 47 s; all six PESSIMISTIC harness
+  scenarios 1000/1000 clean, 0 invariant violations, 0 exceptions. M1 exit criterion met.
+
+**Next**: M2.1 optimistic strategy.
+
+**Open problems**
+- The 1000-round proof took 22 min 47 s, about twice the "about 11 min" in CLAUDE.md and
+  DEVELOPING.md; update those numbers.
+- The first proof attempt inside the Claude session was stopped for low system memory: run the full
+  proof outside the session, with other apps closed.
+- Playwright purchase test isn't in CI (M7.3 note). Each run sells one seat for good; reset the data
+  with `docker compose down -v` long before the 2,014 demo seats run out.
+- Still open: D-020 draft to rewrite.
