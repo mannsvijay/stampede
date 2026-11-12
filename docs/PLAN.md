@@ -389,7 +389,8 @@ end against the compose stack, and every concurrency harness scenario passed 100
       Done (D-021): versioned UPDATEs in seat_id order, 3 tries with full-jitter backoff, 409
       SEAT_CONTENDED, Micrometer counters. Verified by the user: `*ConcurrencyTest`, ModularityTest
       and OpenApiSpecTest BUILD SUCCESSFUL in 6m 27s; full suite with --rerun (100 rounds) BUILD
-      SUCCESSFUL in 15m 20s. The 1000-round proof of the optimistic strategy is still to run.
+      SUCCESSFUL in 15m 20s. 1000-round proof (user): `.\gradlew.bat test --rerun --tests
+      "Optimistic*ConcurrencyTest" "-Dstampede.harness.rounds=1000"` BUILD SUCCESSFUL in 18m 11s.
 - [ ] M2.2 Redis-first strategy (Lua: all-or-nothing hold keys with TTL, per-user cap inside Lua,
       async persistence + reconciler)
       Note (from M1.7, D-019): add PRD 6.10 #5 ("Redis hold state is consistent with Postgres") as an

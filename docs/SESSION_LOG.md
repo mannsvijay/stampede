@@ -777,8 +777,10 @@ the 1000-round proof.
 - By the user (PowerShell, other apps closed): `*ConcurrencyTest` + ModularityTest + OpenApiSpecTest
   BUILD SUCCESSFUL in 6m 27s; full backend suite --rerun (100 rounds) BUILD SUCCESSFUL in 15m 20s.
   The in-session full run had been stopped for low system memory.
+- 1000-round proof of the optimistic strategy (user): `.\gradlew.bat test --rerun --tests
+  "Optimistic*ConcurrencyTest" "-Dstampede.harness.rounds=1000"` BUILD SUCCESSFUL in 18m 11s.
 
-**Next**: the 1000-round proof with the optimistic strategy (user), then M2.2 Redis-first strategy.
+**Next**: test-infrastructure cleanup (the M2.1 note on M2.3, pulled forward), then M2.2 Redis-first.
 
 **Open problems**
 - At JVM shutdown, `HoldExpirySweeper` in a cached test context logged "Connection refused" /
@@ -786,5 +788,6 @@ the 1000-round proof.
 - `compileJava` prints an "unchecked or unsafe operations" note for `OpenApiConfig`; not checked
   whether it predates M2.1.
 - D-021 is a draft for you to rewrite in your own words (also still: D-020).
-- CLAUDE.md and DEVELOPING.md still say the 1000-round proof takes about 11 min; it now covers twice
-  the scenarios.
+- CLAUDE.md and DEVELOPING.md still say the 1000-round proof takes about 11 min. Measured: 22 min 47 s
+  for the pessimistic scenarios (M1), 18 min 11 s for the optimistic ones alone, so `*ConcurrencyTest`
+  at 1000 rounds now takes roughly 40 min. Update those numbers.
