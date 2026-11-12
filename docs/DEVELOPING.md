@@ -154,15 +154,45 @@ Stop-Process -Id <pid>
 ```powershell
 cd frontend
 npm ci --ignore-scripts     # install exactly the lockfile, as CI does
-npm run dev                 # http://localhost:5173; proxies /auth, /events, /actuator, /v3 to :8080
+npm run dev                 # http://localhost:5173; proxies the API to :8080 (see below)
 npm run typecheck
 npm run lint
 npm test
 npm run check:api           # fails if src/api/schema.d.ts is out of date with docs/openapi.json
 npm run build
 ```
+The dev server proxies `/auth`, `/events`, `/holds`, `/orders`, `/me`, `/tickets`, `/actuator` and
+`/v3` to the backend (`vite.config.ts`), so the API is same-origin and the refresh cookie is sent.
+App pages never start with one of these prefixes (hence `/wallet`).
+
 Adding or upgrading a package: exact versions, each published at least 14 days earlier, installed
 with `npm install --before=<date>` (D-011). More detail: `frontend/README.md`.
+
+### Purchase test (Playwright)
+One end-to-end test (`frontend/e2e/purchase.spec.ts`) buys a seat in a real browser: register, click a
+seat on the canvas, hold, pay, and see the ticket's QR code in the wallet. It runs locally against the
+compose stack with the demo sale open; it is not in CI. Chromium only.
+
+Install the browser once (about 150 MB, into your user profile, not the repo):
+```powershell
+cd frontend
+npx playwright install chromium
+```
+Start the stack with the demo sale open. Either set `STAMPEDE_COMPOSE_PROFILES=seed,demo-open-sale`
+in `.env`, or set it for one command:
+```powershell
+$env:STAMPEDE_COMPOSE_PROFILES = "seed,demo-open-sale"
+docker compose up -d --build --wait
+Remove-Item Env:STAMPEDE_COMPOSE_PROFILES
+```
+Run it (it starts `npm run dev` itself, or reuses one already running on :5173):
+```powershell
+cd frontend
+npm run e2e
+npx playwright show-report      # after a failure: steps, screenshot and trace
+```
+Each run registers a new user and buys one random free seat, which stays sold. The demo venue has
+2,014 seats; reset the data (`docker compose down -v`) long before they run out.
 
 ## CI
 `.github/workflows/ci.yml` runs on pushes to main and on pull requests: the backend tests, and the

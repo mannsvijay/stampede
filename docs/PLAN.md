@@ -347,6 +347,32 @@ and gets the seeded demo event from GET /events. Still open in M0: M0.7a (date-g
       Note (from M1.8c part 1, for M5): the canvas redraws everything on each change and hit-tests
       linearly; fine at 2,014 seats, not for PRD 8.4's 20,000 at 60 fps with pan/zoom (grid index,
       layered canvases). Section names aren't drawn (label points sit among the seats; semantic zoom).
+      M1.8c part 2 done 2026-11-12 (not committed): checkout and wallet. "Continue to checkout" opens a
+      receipt (`pages/CheckoutReceipt.tsx`: mono, dotted leaders, seat lines and total) on the seats
+      page, keeping the hold countdown; Pay sends POST /orders (`api/orders.ts`). 201/200 PAID or
+      PENDING: hold cleared, last order saved (`booking/lastOrderStore.ts`, `stampede:last-order`,
+      covered by `clearBookingState()`), go to /wallet. 410, 402 (the server already released the
+      hold, D-017), 404 and a 200 CANCELLED/REFUNDED order: hold cleared, seat map refetched. 409
+      SEAT_TAKEN and network errors keep the hold and turn Pay into Retry (same hold: never charged
+      twice). Texts in `pages/checkoutErrorText.ts`, which delegates to `holdErrorText` except for
+      SEAT_TAKEN, PAYMENT_FAILED, NETWORK_ERROR. /wallet under RequireAuth (header link when logged
+      in): GET /me/tickets grouped by order (newest first; seats by section, row, number), event title
+      per group, label snapshot "Section A · Row 3 · Seat 5", QR as SVG (`qr/qrMatrix.ts` +
+      `qr/TicketQr.tsx`: qrcode-generator 2.0.4, byte mode, level M, auto version, 4-module quiet
+      zone). A real 195-character ticket gives 57×57 (tested; L would give 53). "Tickets on the way"
+      when the last order has fewer tickets than items; Retry re-sends POST /orders for its hold.
+      New dependencies (exact, `--before=2026-10-28`): qrcode-generator 2.0.4 (runtime, MIT, no
+      deps); @playwright/test 1.64.1 (dev; brings playwright and playwright-core 1.64.1). Audit
+      unchanged (`--omit=dev`: 0). Playwright: `frontend/e2e/purchase.spec.ts`, `playwright.config.ts`,
+      `tsconfig.e2e.json` (type-checked by `tsc -b`, so CI checks it without running it), `npm run
+      e2e`; Vitest limited to `src/**/*.test.{ts,tsx}`. `CANVAS_PADDING` moved to `geometry.ts` so
+      the test clicks with the canvas's own maths. DEVELOPING.md and frontend/README.md proxy lists
+      fixed; Playwright commands documented.
+      Verified 2026-11-12: typecheck, lint, 153 Vitest tests (was 131), check:api, build (JS 129.7 KB
+      gzipped) all green; Playwright purchase test passed twice against the compose stack
+      (`seed,demo-open-sale`): register, canvas click, hold, pay, wallet QR with 57 modules.
+      Open: the 1000-round proof. The first attempt was stopped by Claude Code for low system memory
+      (not a test failure; no result). M1.8 stays unticked until it passes 1000/1000.
 **Exit:** a full purchase works end to end in the browser; concurrency test passes 1000/1000.
 
 ## M2 - Contention lab (weeks 4-5)  <- the heart of the portfolio
