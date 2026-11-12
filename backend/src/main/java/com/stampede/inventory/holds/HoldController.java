@@ -71,7 +71,7 @@ class HoldController {
     @ApiResponse(responseCode = "200", description = "You already hold exactly these seats; that hold is returned",
             content = @Content(schema = @Schema(implementation = HoldResponse.class)))
     @ErrorResponses({ErrorCode.VALIDATION_FAILED, ErrorCode.UNAUTHENTICATED, ErrorCode.EVENT_NOT_FOUND,
-            ErrorCode.SEAT_TAKEN, ErrorCode.LIMIT_EXCEEDED, ErrorCode.SALE_NOT_OPEN})
+            ErrorCode.SEAT_TAKEN, ErrorCode.SEAT_CONTENDED, ErrorCode.LIMIT_EXCEEDED, ErrorCode.SALE_NOT_OPEN})
     ResponseEntity<HoldResponse> hold(@PathVariable UUID id, @Valid @RequestBody HoldSeatsRequest request,
                                       @AuthenticationPrincipal CurrentUser user) {
         if (new HashSet<>(request.seatIds()).size() != request.seatIds().size()) {
@@ -91,6 +91,9 @@ class HoldController {
             case HoldResult.SeatTaken taken -> throw new ApiException(ErrorCode.SEAT_TAKEN,
                     "Some of these seats were just taken by someone else.",
                     Map.of("seatIds", taken.seatIds(), "takenAgoMs", taken.takenAgoMs()));
+            case HoldResult.Contended contended -> throw new ApiException(ErrorCode.SEAT_CONTENDED,
+                    "Many buyers are trying for these seats right now. Try again in a moment.",
+                    Map.of("seatIds", contended.seatIds()));
             case HoldResult.LimitExceeded limit -> throw new ApiException(ErrorCode.LIMIT_EXCEEDED,
                     "You can hold or buy at most " + limit.limit() + " tickets for this event.",
                     Map.of("seatIds", limit.seatIds(), "limit", limit.limit()));

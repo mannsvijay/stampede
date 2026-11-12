@@ -417,7 +417,7 @@ export interface components {
              * @description Stable error code (PRD section 10). Branch on this, never on title or detail.
              * @enum {string}
              */
-            code: "VALIDATION_FAILED" | "UNAUTHENTICATED" | "INVALID_CREDENTIALS" | "INVALID_REFRESH_TOKEN" | "FORBIDDEN" | "EMAIL_TAKEN" | "EVENT_NOT_FOUND" | "NOT_FOUND" | "METHOD_NOT_ALLOWED" | "UNSUPPORTED_MEDIA_TYPE" | "SEAT_TAKEN" | "LIMIT_EXCEEDED" | "SALE_NOT_OPEN" | "HOLD_NOT_FOUND" | "HOLD_CONVERTED" | "HOLD_EXPIRED" | "PAYMENT_FAILED" | "ORDER_NOT_FOUND" | "REQUEST_FAILED" | "INTERNAL_ERROR";
+            code: "VALIDATION_FAILED" | "UNAUTHENTICATED" | "INVALID_CREDENTIALS" | "INVALID_REFRESH_TOKEN" | "FORBIDDEN" | "EMAIL_TAKEN" | "EVENT_NOT_FOUND" | "NOT_FOUND" | "METHOD_NOT_ALLOWED" | "UNSUPPORTED_MEDIA_TYPE" | "SEAT_TAKEN" | "SEAT_CONTENDED" | "LIMIT_EXCEEDED" | "SALE_NOT_OPEN" | "HOLD_NOT_FOUND" | "HOLD_CONVERTED" | "HOLD_EXPIRED" | "PAYMENT_FAILED" | "ORDER_NOT_FOUND" | "REQUEST_FAILED" | "INTERNAL_ERROR";
             /** @description Human-readable; may change. */
             detail?: string;
             /** @description INTERNAL_ERROR only: the id the server logged the error under. */
@@ -431,7 +431,7 @@ export interface components {
              * @description LIMIT_EXCEEDED only: the event's per-user ticket limit.
              */
             limit?: number;
-            /** @description SEAT_TAKEN and LIMIT_EXCEEDED: the seats that caused the rejection. */
+            /** @description SEAT_TAKEN, SEAT_CONTENDED and LIMIT_EXCEEDED: the seats that caused the rejection. */
             seatIds?: string[];
             /** Format: int32 */
             status: number;
@@ -867,9 +867,11 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description SEAT_TAKEN, LIMIT_EXCEEDED, SALE_NOT_OPEN */
+            /** @description SEAT_TAKEN, SEAT_CONTENDED, LIMIT_EXCEEDED, SALE_NOT_OPEN */
             409: {
                 headers: {
+                    /** @description Sent with SEAT_CONTENDED: seconds to wait before trying again. */
+                    "Retry-After"?: number;
                     [name: string]: unknown;
                 };
                 content: {

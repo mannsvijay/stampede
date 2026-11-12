@@ -74,6 +74,15 @@ stampede:
       interval: PT5S
       # Expired holds read per page; a sweep pages past holds it could not expire (D-016).
       batch-size: 500
+  inventory:
+    optimistic:
+      # Retry policy of the optimistic strategy (D-021). Tries per hold, the first one included; a
+      # taken (HELD/SOLD) seat is never retried, only a lost version check is.
+      max-attempts: 3
+      # Before try n the strategy sleeps a random time in [0, min(backoff-max, backoff-base * 2^(n-2))]
+      # ("full jitter"), with no transaction or connection held.
+      backoff-base: 5ms
+      backoff-max: 50ms
   invariants:
     monitor:
       # Runs the invariant checker (PRD 6.10, D-019) over every event that is neither DRAFT nor ENDED;

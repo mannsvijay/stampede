@@ -21,6 +21,8 @@ export function holdErrorText(error: unknown, context: HoldErrorContext): string
   switch (error.code) {
     case 'SEAT_TAKEN':
       return seatTakenText(error, context)
+    case 'SEAT_CONTENDED':
+      return seatContendedText(error, context)
     case 'LIMIT_EXCEEDED':
       return error.limit === undefined
         ? 'That would take you over the ticket limit for this drop.'
@@ -57,6 +59,16 @@ function seatTakenText(error: ApiError, context: HoldErrorContext): string {
   const verb = names.length > 1 ? 'were' : 'was'
   const when = error.takenAgoMs === undefined ? 'just now' : `${formatAgo(error.takenAgoMs)} ago`
   return `${who} ${verb} taken ${when}. Pick ${names.length > 1 ? 'others' : 'another'}.`
+}
+
+/**
+ * Lost races, not taken seats (D-021): the server tried a few times while other buyers kept changing
+ * these seats, and nothing was held. The seats may well still be free, so the selection stays.
+ */
+function seatContendedText(error: ApiError, context: HoldErrorContext): string {
+  const names = error.seatIds.map(context.seatName)
+  const which = names.length === 0 ? 'these seats' : joinNames(names)
+  return `Lots of people are going for ${which} right now, so we couldn't hold your seats. They're still picked: try again.`
 }
 
 /** 40 → "40 ms", 3400 → "3 s", 125000 → "2 min" (PRD 8.4: "Taken 40 ms ago"). */

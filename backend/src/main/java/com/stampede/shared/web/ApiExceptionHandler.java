@@ -46,7 +46,11 @@ class ApiExceptionHandler extends ResponseEntityExceptionHandler {
     ResponseEntity<ProblemDetail> api(ApiException e) {
         ProblemDetail problem = Problems.of(e.code(), e.getMessage());
         e.properties().forEach(problem::setProperty);
-        return ResponseEntity.status(e.code().status()).body(problem);
+        ResponseEntity.BodyBuilder response = ResponseEntity.status(e.code().status());
+        if (e.code().retryAfterSeconds() != null) {
+            response.header(HttpHeaders.RETRY_AFTER, String.valueOf(e.code().retryAfterSeconds()));
+        }
+        return response.body(problem);
     }
 
     /**

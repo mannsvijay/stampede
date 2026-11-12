@@ -427,7 +427,7 @@ The OpenAPI spec is the source of truth, and the TypeScript client is generated 
 | `POST /admin/events/{id}/admission-rate`, `/pause`, `/strategy`, `/chaos` | Operator controls | Admin role only |
 | `WS /ws/events/{id}/seats?sections=…` | Live seat map | `snapshot`, `diff`, `resync-required` messages |
 
-**Errors** follow RFC 7807 (`application/problem+json`) with stable codes: `SEAT_TAKEN` (including `takenAgoMs`), `HOLD_EXPIRED`, `LIMIT_EXCEEDED`, `NOT_ADMITTED`, `RATE_LIMITED`, `IDEMPOTENCY_CONFLICT`.
+**Errors** follow RFC 7807 (`application/problem+json`) with stable codes: `SEAT_TAKEN` (including `takenAgoMs`), `SEAT_CONTENDED`, `HOLD_EXPIRED`, `LIMIT_EXCEEDED`, `NOT_ADMITTED`, `RATE_LIMITED`, `IDEMPOTENCY_CONFLICT`.
 
 Auth and request errors (added in M0.5, D-008). Every problem body carries the code in a `code` property:
 
@@ -460,6 +460,12 @@ Checkout errors (added in M1.5, D-017):
 | `PAYMENT_FAILED` | 402 | The payment provider declined; the order is cancelled and the hold's seats are released |
 | `SEAT_TAKEN` | 409 | A seat of the hold is still part of another order that hasn't finished (in flight, or crashed before it could clean up); retry shortly; `seatIds`, no `takenAgoMs` |
 | `ORDER_NOT_FOUND` | 404 | `GET /orders/{id}` for an id that is unknown or someone else's order (indistinguishable) |
+
+Hold contention (added in M2.1, D-021):
+
+| Code | Status | When |
+|---|---|---|
+| `SEAT_CONTENDED` | 409 | `POST /events/{id}/holds` on an optimistic-strategy event: every try lost a race on a seat that was still free when last read, so nothing was held; `seatIds` (the seat the last try lost on), header `Retry-After: 1`. A seat that is actually HELD or SOLD is `SEAT_TAKEN` instead |
 
 **Security runs before routing (401 before 404/405).** The security filter checks a request before
 Spring looks for a matching route, and every route that isn't explicitly public requires a token. So

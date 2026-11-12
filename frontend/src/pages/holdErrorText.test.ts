@@ -23,6 +23,18 @@ describe('holdErrorText', () => {
     )
   })
 
+  it('SEAT_CONTENDED names the contended seats and says the selection is kept', () => {
+    expect(holdErrorText(error(409, 'SEAT_CONTENDED', { seatIds: ['s1'] }), context)).toBe(
+      "Lots of people are going for Floor Left, row A, seat 2 right now, so we couldn't hold your seats. They're still picked: try again.",
+    )
+  })
+
+  it('SEAT_CONTENDED without seatIds still reads naturally', () => {
+    expect(holdErrorText(error(409, 'SEAT_CONTENDED'), context)).toBe(
+      "Lots of people are going for these seats right now, so we couldn't hold your seats. They're still picked: try again.",
+    )
+  })
+
   it('LIMIT_EXCEEDED gives the limit and says it counts what you already have', () => {
     expect(holdErrorText(error(409, 'LIMIT_EXCEEDED', { seatIds: ['s1'], limit: 4 }), context)).toBe(
       'You can have at most 4 tickets for this drop, counting seats you already hold or bought.',

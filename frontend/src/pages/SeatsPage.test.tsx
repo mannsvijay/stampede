@@ -183,6 +183,58 @@ describe('SeatsPage: holding', () => {
     expect(selectedSeats()).toEqual([expect.stringContaining('Floor Left, row A, seat 1')])
   })
 
+  it('SEAT_CONTENDED: explains, keeps the selection, and Try again holds the same seats', async () => {
+    const SERVER_NOW = new Date().toISOString()
+    const calls = serveSeatsPage()
+    const bodies: unknown[] = []
+    server.use(
+      http.post('/events/:id/holds', async ({ request }) => {
+        bodies.push(await request.json())
+        return bodies.length === 1
+          ? problem(409, 'SEAT_CONTENDED', 'detail', { seatIds: [seat(1)] })
+          : HttpResponse.json(
+              holdResponse([seat(0), seat(1)], SERVER_NOW, new Date(Date.now() + 5 * 60_000).toISOString()),
+              { status: 201 },
+            )
+      }),
+    )
+    renderAt(PAGE)
+    await pick('FL/A', 0)
+    await pick('FL/A', 1)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Hold 2 seats' }))
+
+    await expectAlert(
+      "Lots of people are going for Floor Left, row A, seat 2 right now, so we couldn't hold your seats. They're still picked: try again.",
+    )
+    await waitFor(() => expect(calls.seatMap).toBe(2))
+    expect(selectedSeats()).toEqual([
+      expect.stringContaining('Floor Left, row A, seat 1'),
+      expect.stringContaining('Floor Left, row A, seat 2'),
+    ])
+
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }))
+
+    expect(await screen.findByRole('button', { name: 'Continue to checkout' })).toBeEnabled()
+    expect(bodies).toEqual([{ seatIds: [seat(0), seat(1)] }, { seatIds: [seat(0), seat(1)] }])
+    expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull()
+    expect(screen.getByRole('alert')).toHaveTextContent('')
+  })
+
+  it('offers Try again only for SEAT_CONTENDED', async () => {
+    serveSeatsPage()
+    server.use(
+      http.post('/events/:id/holds', () => problem(409, 'LIMIT_EXCEEDED', 'detail', { seatIds: [seat(0)], limit: 4 })),
+    )
+    renderAt(PAGE)
+    await pick('FL/A', 0)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Hold 1 seat' }))
+
+    await expectAlert(/at most 4 tickets/)
+    expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull()
+  })
+
   it.each([
     [
       'LIMIT_EXCEEDED',

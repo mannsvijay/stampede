@@ -81,6 +81,9 @@ public class HoldService {
                 case SEAT_TAKEN -> existingHoldOnExactly(userId, eventId, seatIds)
                         .<HoldResult>map(HoldResult.Existing::new)
                         .orElseGet(() -> new HoldResult.SeatTaken(rejected.seatIds(), rejected.takenAgoMs()));
+                // No existing-hold check here: a lost race means the strategy's last read showed
+                // the seats free, so the caller can't already hold exactly them.
+                case CONTENDED -> new HoldResult.Contended(rejected.seatIds());
                 case LIMIT_EXCEEDED -> new HoldResult.LimitExceeded(rejected.seatIds(), event.get().perUserLimit());
             };
         };

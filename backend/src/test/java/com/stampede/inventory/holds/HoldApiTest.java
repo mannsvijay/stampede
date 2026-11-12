@@ -128,6 +128,45 @@ class HoldApiTest extends ApiTestSupport {
     }
 
     @Test
+    void anOptimisticHoldThatLosesEveryTryIs409SeatContendedWithRetryAfter() {
+        // M2.1, D-021. Only this test's event uses the optimistic strategy. A test-only trigger makes
+        // every UPDATE of SEATS[0] affect zero rows, which is what a lost version check looks like, so
+        // every try loses and the strategy answers CONTENDED.
+        jdbc.sql("UPDATE events SET strategy = 'OPTIMISTIC' WHERE id = ?").param(EVENT).update();
+        jdbc.sql("""
+                CREATE FUNCTION test_skip_seat_update() RETURNS trigger LANGUAGE plpgsql AS $$
+                BEGIN RETURN NULL; END $$
+                """).update();
+        jdbc.sql("CREATE TRIGGER test_skip_seat BEFORE UPDATE ON event_seats FOR EACH ROW "
+                + "WHEN (NEW.seat_id = '" + SEATS.get(0) + "') EXECUTE FUNCTION test_skip_seat_update()").update();
+        try {
+            Response response = postHold(EVENT, alice, SEATS.get(0), SEATS.get(1));
+
+            assertThat(response.status()).isEqualTo(409);
+            assertThat(response.code()).isEqualTo("SEAT_CONTENDED");
+            assertThat(response.headers().getFirst(HttpHeaders.RETRY_AFTER)).isEqualTo("1");
+            assertThat(uuids(response.body().path("seatIds"))).containsExactly(SEATS.get(0));
+            assertThat(response.body().has("takenAgoMs")).isFalse();
+            assertThat(heldSeats()).as("nothing held").isZero();
+            assertThat(used(aliceId)).isZero();
+        } finally {
+            jdbc.sql("DROP TRIGGER test_skip_seat ON event_seats").update();
+            jdbc.sql("DROP FUNCTION test_skip_seat_update()").update();
+        }
+    }
+
+    @Test
+    void anOptimisticEventHoldsLikeAPessimisticOne() {
+        jdbc.sql("UPDATE events SET strategy = 'OPTIMISTIC' WHERE id = ?").param(EVENT).update();
+
+        Response response = postHold(EVENT, alice, SEATS.get(1), SEATS.get(0));
+
+        assertThat(response.status()).isEqualTo(201);
+        assertThat(heldSeats()).isEqualTo(2);
+        assertThat(used(aliceId)).isEqualTo(2);
+    }
+
+    @Test
     void overlappingButDifferentSeatsOfYourOwnHoldAreSeatTaken() {
         postHold(EVENT, alice, SEATS.get(0), SEATS.get(1));
 

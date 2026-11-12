@@ -180,7 +180,8 @@ function SeatsView({ event, layout, seatMap, refetchSeatMap }: SeatsViewProps) {
       if (cause instanceof ApiError && cause.code === 'SEAT_TAKEN') {
         setPickedIds(picked.filter((id) => !cause.seatIds.includes(id)))
       }
-      // A NETWORK_ERROR keeps the selection: retrying the same seats is safe (D-016).
+      // A NETWORK_ERROR keeps the selection: retrying the same seats is safe (D-016). So does
+      // SEAT_CONTENDED: nothing was held and the seats may still be free (D-021); the page offers Retry.
     } finally {
       setBusy(false)
     }
@@ -270,6 +271,13 @@ function SeatsView({ event, layout, seatMap, refetchSeatMap }: SeatsViewProps) {
 
   const msUntilDrop = remainingMs(event.dropAt, event.clockOffsetMs, now)
   const errorContext = { seatName: nameOf, msUntilDrop }
+  /** A hold that lost its races (SEAT_CONTENDED) can be tried again as is; picked seats taken meanwhile have dropped out. */
+  const canRetryHold =
+    !hold &&
+    errorDuring === 'hold' &&
+    error instanceof ApiError &&
+    error.code === 'SEAT_CONTENDED' &&
+    picked.length > 0
 
   return (
     <article className={styles.page}>
@@ -293,6 +301,11 @@ function SeatsView({ event, layout, seatMap, refetchSeatMap }: SeatsViewProps) {
               : holdErrorText(error, errorContext)
             : ''}
         </p>
+        {canRetryHold && (
+          <button type="button" onClick={holdSeats} disabled={busy}>
+            Try again
+          </button>
+        )}
         <p role="status" className={styles.notice}>
           {notice}
         </p>

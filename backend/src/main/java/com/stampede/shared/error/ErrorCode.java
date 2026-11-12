@@ -20,6 +20,11 @@ public enum ErrorCode {
     UNSUPPORTED_MEDIA_TYPE(HttpStatus.UNSUPPORTED_MEDIA_TYPE, "Unsupported media type"),
     /** A requested seat is HELD or SOLD already. Body: {@code seatIds}, {@code takenAgoMs} (M1.4). */
     SEAT_TAKEN(HttpStatus.CONFLICT, "Seat taken"),
+    /**
+     * Other buyers kept changing these seats while the request tried to hold them (optimistic
+     * strategy, D-021); nothing was held. Body: {@code seatIds}. Header {@code Retry-After: 1} (M2.1).
+     */
+    SEAT_CONTENDED(HttpStatus.CONFLICT, "Seats contended", 1),
     /** The hold would take the user over the event's per-user limit. Body: {@code limit} (M1.4). */
     LIMIT_EXCEEDED(HttpStatus.CONFLICT, "Ticket limit exceeded"),
     /** The event's sale hasn't opened (before its drop) or isn't running (M1.4). */
@@ -46,14 +51,25 @@ public enum ErrorCode {
 
     private final HttpStatus status;
     private final String title;
+    private final Integer retryAfterSeconds;
 
     ErrorCode(HttpStatus status, String title) {
+        this(status, title, null);
+    }
+
+    ErrorCode(HttpStatus status, String title, Integer retryAfterSeconds) {
         this.status = status;
         this.title = title;
+        this.retryAfterSeconds = retryAfterSeconds;
     }
 
     public HttpStatus status() {
         return status;
+    }
+
+    /** Seconds for a {@code Retry-After} header sent with every response of this code, or null for none. */
+    public Integer retryAfterSeconds() {
+        return retryAfterSeconds;
     }
 
     public String title() {

@@ -47,6 +47,16 @@ public sealed interface HoldResult {
         }
     }
 
+    /**
+     * Other buyers kept changing these seats while this request tried to hold them (optimistic
+     * strategy, D-021); nothing changed, and trying again shortly may work.
+     */
+    record Contended(List<UUID> seatIds) implements HoldResult {
+        public Contended {
+            seatIds = List.copyOf(seatIds);
+        }
+    }
+
     /** Holding these seats would take the user over the event's per-user limit. */
     record LimitExceeded(List<UUID> seatIds, int limit) implements HoldResult {
         public LimitExceeded {

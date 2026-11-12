@@ -21,6 +21,7 @@ import com.stampede.shared.error.ErrorResponses;
 
 import io.swagger.v3.oas.models.Components;
 import io.swagger.v3.oas.models.OpenAPI;
+import io.swagger.v3.oas.models.headers.Header;
 import io.swagger.v3.oas.models.info.Info;
 import io.swagger.v3.oas.models.media.ArraySchema;
 import io.swagger.v3.oas.models.media.Content;
@@ -77,12 +78,21 @@ class OpenApiConfig {
             byStatus.computeIfAbsent(HttpStatus.INTERNAL_SERVER_ERROR, s -> new ArrayList<>())
                     .add(ErrorCode.INTERNAL_ERROR);
 
-            byStatus.forEach((status, codes) -> operation.getResponses().addApiResponse(
-                    String.valueOf(status.value()),
-                    new ApiResponse()
-                            .description(codes.stream().map(Enum::name).collect(Collectors.joining(", ")))
-                            .content(new Content().addMediaType(PROBLEM_JSON, new MediaType()
-                                    .schema(new Schema<>().$ref("#/components/schemas/" + PROBLEM_SCHEMA))))));
+            byStatus.forEach((status, codes) -> {
+                ApiResponse response = new ApiResponse()
+                        .description(codes.stream().map(Enum::name).collect(Collectors.joining(", ")))
+                        .content(new Content().addMediaType(PROBLEM_JSON, new MediaType()
+                                .schema(new Schema<>().$ref("#/components/schemas/" + PROBLEM_SCHEMA))));
+                List<String> retryable = codes.stream().filter(code -> code.retryAfterSeconds() != null)
+                        .map(Enum::name).toList();
+                if (!retryable.isEmpty()) {
+                    response.addHeaderObject("Retry-After", new Header()
+                            .description("Sent with " + String.join(", ", retryable)
+                                    + ": seconds to wait before trying again.")
+                            .schema(new IntegerSchema().format("int32")));
+                }
+                operation.getResponses().addApiResponse(String.valueOf(status.value()), response);
+            });
             return operation;
         };
     }
@@ -163,7 +173,8 @@ class OpenApiConfig {
                         .description("INTERNAL_ERROR only: the id the server logged the error under."))
                 .addProperty("seatIds", new ArraySchema()
                         .items(new StringSchema().format("uuid"))
-                        .description("SEAT_TAKEN and LIMIT_EXCEEDED: the seats that caused the rejection."))
+                        .description("SEAT_TAKEN, SEAT_CONTENDED and LIMIT_EXCEEDED: the seats that caused "
+                                + "the rejection."))
                 .addProperty("takenAgoMs", new IntegerSchema().format("int64")
                         .description("SEAT_TAKEN only: milliseconds since the most recently taken of seatIds "
                                 + "was taken."))

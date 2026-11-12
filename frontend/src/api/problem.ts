@@ -16,7 +16,7 @@ export class ApiError extends Error {
   readonly detail: string | undefined
   readonly errors: FieldError[]
   readonly errorId: string | undefined
-  /** SEAT_TAKEN and LIMIT_EXCEEDED: the seats that caused the rejection. */
+  /** SEAT_TAKEN, SEAT_CONTENDED and LIMIT_EXCEEDED: the seats that caused the rejection. */
   readonly seatIds: string[]
   /** SEAT_TAKEN: milliseconds since the most recently taken of those seats was taken. */
   readonly takenAgoMs: number | undefined

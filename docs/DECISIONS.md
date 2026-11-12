@@ -1108,3 +1108,66 @@ Write these yourself, in your own words. Each one is an interview answer you've 
   performance budgets (then gzip/ETag, or a compact array encoding); M4.2 finds bots scraping the
   seat map (then require the admission token for `/seatmap`); M5.1 can't express its diffs against
   this bit order; or the client's length check ever fires.
+
+### D-021 Optimistic inventory strategy: version-checked writes, bounded retries, SEAT_CONTENDED (DRAFT)
+- **Date:** 2026-11-13
+- **Context:** M2.1 adds strategy B of PRD 6.2 behind `InventoryStrategy`: no `SELECT … FOR UPDATE`,
+  each seat written with `UPDATE … WHERE version = <read>`. Three things were open: what to do when a
+  write loses (retry how often, how long to wait), what the caller gets when retries run out (D-015
+  anticipated a third rejection, `CONTENDED`), and how to count conflicts for the M2.5 benchmark.
+  Optimistic UPDATEs still lock rows, so the write order matters, and D-015's "callers must not be
+  `@Transactional`" matters more: a retry needs each try to be its own transaction.
+- **Options considered:**
+  - Retries: 3 tries with exponential backoff and full jitter; 2 tries without backoff; 5 tries with a
+    fixed delay; a time budget instead of a count. Retrying a seat that is HELD or SOLD: never; yes.
+  - Out of retries: a new `CONTENDED` rejection and 409 `SEAT_CONTENDED` with `Retry-After`; the same
+    rejection mapped to 409 `SEAT_TAKEN`; 503 with `Retry-After`; `SEAT_TAKEN` from the strategy itself.
+  - Counting: Micrometer counters and a timer; an `attempts` field on the outcomes; DEBUG logs; a table.
+  - Release and sell: shared with the pessimistic strategy (extracted into `HoldClosing`); delegate to
+    the pessimistic bean; separate optimistic versions.
+- **Decision:**
+  - **One try** (`OptimisticInventoryStrategy`): an unlocked read of the seats `ORDER BY seat_id`
+    (with each owner's `created_at` and `clock_timestamp()` in the same statement, for `takenAgoMs`);
+    UNKNOWN_SEAT; `EventSeat.hold` decides every seat (HELD or SOLD: SEAT_TAKEN, no retry); insert the
+    hold row (the foreign key needs it first; a new row nobody can wait for); one UPDATE per seat with
+    `AND version = :read` in the read's order; then the D-016 allowance upsert (LIMIT_EXCEEDED marks
+    the try rollback-only). Zero rows on any UPDATE throws an internal `VersionConflict`, which rolls
+    back the hold row and every seat written in that try.
+  - **Write order = lock order.** An UPDATE locks its row until commit, so the loop over the read's
+    rows (Postgres `seat_id` order, never a Java sort) is the lock order: the same as the pessimistic
+    strategy, release, sell and the sweeper (D-015). Not one batched UPDATE, whose locking order would
+    be the scan order. A deadlock (40P01) is not retried; it stays an exception for I7.
+  - **Transactions:** `hold()` is `@Transactional(propagation = NEVER)` (a caller's transaction is an
+    error) and runs each try through a `TransactionTemplate`. The backoff sleep happens between tries
+    with no transaction or connection held.
+  - **Retry policy:** at most 3 tries; before try n a random sleep in `[0, min(50 ms, 5 ms × 2^(n-2))]`
+    (full jitter); `stampede.inventory.optimistic.max-attempts/backoff-base/backoff-max`. Only a lost
+    version check is retried; a seat that reads HELD or SOLD is a real rejection.
+  - **Out of retries:** `HoldRejection.CONTENDED` with the seat the last try lost on, mapped to
+    **409 `SEAT_CONTENDED`** with `seatIds` and `Retry-After: 1` (the header comes from the error
+    code, so the spec documents it on every operation that can return it). Precedence UNKNOWN_SEAT >
+    SEAT_TAKEN > CONTENDED > LIMIT_EXCEEDED. The seats page explains it, keeps the selection and
+    offers "Try again".
+  - **Counting:** `stampede.inventory.hold.attempts{strategy}`, `…conflicts{strategy}` and the timer
+    `…duration{strategy,outcome}` (outcome: held, seat_taken, contended, limit_exceeded, unknown_seat,
+    error). Tags are only strategy and outcome, never an id, so the number of series stays fixed. The
+    pessimistic strategy records the same meters (one attempt per call, no conflicts). Exposing them
+    (`/actuator/metrics` or a Prometheus registry) is left to M2.5.
+  - **Release and sell** are shared: both start by locking the hold row, and only a path holding it
+    can change that hold's seats, so an optimistic version would remove no waiting. Extracted
+    unchanged into `HoldClosing`; the shared seat SQL into `SeatRows`.
+  - No event uses the strategy yet; switching per event is M2.3.
+- **Why:**
+  - A conflict on a seat almost always means it is now HELD, so try 2 mostly turns a race into an
+    accurate SEAT_TAKEN with the right seats and `takenAgoMs`. Try 3 covers seats that churn (held and
+    released in between). Jitter keeps losers of the same race from colliding again in step.
+  - SEAT_TAKEN for a lost race would tell a buyer a seat is taken when it may still be free, and the
+    benchmark couldn't tell lost races from taken seats. A 503 would count normal contention as a
+    server failure.
+  - Counters with bounded tags need no new dependency (Micrometer comes with Actuator) and read the
+    same way for all three strategies.
+- **How I'd know it was wrong:** the M2.4/M2.5 runs show many CONTENDED answers on seats that end up
+  unsold (more tries or a longer backoff needed), or long tails from backoff (fewer tries); the harness
+  or k6 logs a 40P01 for this strategy; conflicts per hold stay high where pessimistic lock waits are
+  short (optimistic is the wrong default for hot seats, which is the M2.6 analysis); or Retry-After: 1
+  makes clients retry in step (then jitter it on the client too).

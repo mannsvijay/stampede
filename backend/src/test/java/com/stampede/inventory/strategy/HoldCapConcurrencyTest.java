@@ -18,7 +18,7 @@ import java.util.Random;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import com.stampede.control.invariants.InvariantChecker;
@@ -31,8 +31,6 @@ import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 import org.testcontainers.containers.PostgreSQLContainer;
-import org.testcontainers.junit.jupiter.Container;
-import org.testcontainers.junit.jupiter.Testcontainers;
 
 /**
  * The per-user cap alone under concurrency (M1.4, D-005). One user, 16 threads, and every thread asks
@@ -40,23 +38,28 @@ import org.testcontainers.junit.jupiter.Testcontainers;
  * allowance counter decides. Runs on the M1.3 harness, so every round also gets I1-I8 (I8: the
  * counter equals the seats of the user's active holds and is never over the limit) and I7 (no
  * exceptions, so no deadlocks). Rounds: {@code -Dstampede.harness.rounds} (default 100), as for the harness.
+ * Run once per strategy by a subclass ({@link PessimisticHoldCapConcurrencyTest},
+ * {@link OptimisticHoldCapConcurrencyTest}): CLAUDE.md requires the cap under concurrency in every strategy.
  */
 @JdbcTest(properties = "spring.datasource.hikari.maximum-pool-size=" + HoldCapConcurrencyTest.POOL_SIZE)
 @AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
-@Testcontainers
-@Import({PessimisticInventoryStrategy.class, InvariantChecker.class})
+@Import({StrategyTestConfig.class, InvariantChecker.class})
 @Transactional(propagation = Propagation.NOT_SUPPORTED)
-class HoldCapConcurrencyTest {
+abstract class HoldCapConcurrencyTest {
 
     static final int THREADS = 16;
     static final int POOL_SIZE = THREADS + 4;
     static final int LIMIT = 4;
 
-    @Container
+    /** Started once for every subclass; see InventoryStrategyContractTest for why not {@code @Container}. */
     @ServiceConnection
-    static PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:16-alpine");
+    static final PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:16-alpine");
 
-    static final ExecutorService RACERS = Executors.newFixedThreadPool(THREADS);
+    static {
+        postgres.start();
+    }
+
+    private ExecutorService racers;
 
     static final UUID USER = UUID.fromString("00000000-0000-4000-8000-0000000000b1");
     static final UUID VENUE = UUID.fromString("00000000-0000-4000-8000-0000000000b2");
@@ -67,21 +70,22 @@ class HoldCapConcurrencyTest {
     static final List<UUID> SEATS = seats(2 * THREADS);
 
     @Autowired
-    PessimisticInventoryStrategy strategy;
-
-    @Autowired
     JdbcClient jdbc;
 
     @Autowired
     InvariantChecker invariants;
 
-    @AfterAll
-    static void stopThreads() {
-        RACERS.shutdownNow();
+    /** The strategy this subclass races. */
+    protected abstract InventoryStrategy strategyUnderTest();
+
+    @AfterEach
+    void stopThreads() {
+        racers.shutdownNow();
     }
 
     @BeforeEach
     void insertFixture() {
+        racers = Executors.newFixedThreadPool(THREADS);
         jdbc.sql("TRUNCATE users, venues CASCADE").update();
         jdbc.sql("INSERT INTO users (id, email, password_hash) VALUES (?, 'capped@example.test', 'x')").param(USER).update();
         jdbc.sql("INSERT INTO venues (id, name, layout_json) VALUES (?, 'Cap venue', '{}')").param(VENUE).update();
@@ -193,8 +197,8 @@ class HoldCapConcurrencyTest {
     }
 
     private void run(Scenario scenario) {
-        ConcurrencyHarness harness = new ConcurrencyHarness(strategy, jdbc, invariants, new Fixture(EVENT, USER, SEATS),
-                Config.fromSystemProperties(THREADS), RACERS);
+        ConcurrencyHarness harness = new ConcurrencyHarness(strategyUnderTest(), jdbc, invariants, new Fixture(EVENT, USER, SEATS),
+                Config.fromSystemProperties(THREADS), racers);
 
         HarnessReport report = harness.run(scenario);
 
