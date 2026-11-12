@@ -1,5 +1,6 @@
 package com.stampede.control.invariants;
 
+import com.stampede.testsupport.TestDatabases;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -13,13 +14,11 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.jdbc.AutoConfigureTestDatabase;
 import org.springframework.boot.test.autoconfigure.jdbc.JdbcTest;
 import org.springframework.boot.test.context.TestConfiguration;
-import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
+import org.springframework.test.context.DynamicPropertyRegistry;
+import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Import;
 import org.springframework.jdbc.core.simple.JdbcClient;
-import org.testcontainers.containers.PostgreSQLContainer;
-import org.testcontainers.junit.jupiter.Container;
-import org.testcontainers.junit.jupiter.Testcontainers;
 
 /**
  * The scheduled run (M1.7, D-019): grace period, open events only, and the per-rule gauge. Each test
@@ -28,13 +27,14 @@ import org.testcontainers.junit.jupiter.Testcontainers;
  */
 @JdbcTest
 @AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
-@Testcontainers
 @Import({InvariantChecker.class, InvariantMonitor.class, InvariantMonitorTest.Meters.class})
 class InvariantMonitorTest {
 
-    @Container
-    @ServiceConnection
-    static PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:16-alpine");
+    /** Its own database on the shared test Postgres (TestDatabases): nothing else ever sees its data. */
+    @DynamicPropertySource
+    static void database(DynamicPropertyRegistry registry) {
+        TestDatabases.register(registry, "invariant_monitor");
+    }
 
     @TestConfiguration(proxyBeanMethods = false)
     static class Meters {

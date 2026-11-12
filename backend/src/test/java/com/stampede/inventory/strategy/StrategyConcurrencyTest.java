@@ -21,12 +21,13 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.jdbc.AutoConfigureTestDatabase;
 import org.springframework.boot.test.autoconfigure.jdbc.JdbcTest;
-import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
+import com.stampede.testsupport.TestDatabases;
 import org.springframework.context.annotation.Import;
 import org.springframework.jdbc.core.simple.JdbcClient;
+import org.springframework.test.context.DynamicPropertyRegistry;
+import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
-import org.testcontainers.containers.PostgreSQLContainer;
 
 /**
  * M1.3: the concurrency harness, run once per strategy by a subclass ({@link PessimisticConcurrencyTest},
@@ -34,9 +35,13 @@ import org.testcontainers.containers.PostgreSQLContainer;
  * passes {@code -Dstampede.harness.rounds=1000}. Reports land in build/reports/concurrency/.
  * <p>
  * 16 threads with a pool of 20: every racing thread gets its own connection, so all contention happens
- * in Postgres (not in the pool's queue), and the round's own reset and checks never wait for one.
+ * in Postgres (not in the pool's queue), and the round's own reset and checks never wait for one. The
+ * pool keeps all 20 open (minimum-idle), overriding the tests' shrink-to-zero default, so no thread
+ * waits for a new connection at the start gate.
  */
-@JdbcTest(properties = "spring.datasource.hikari.maximum-pool-size=" + StrategyConcurrencyTest.POOL_SIZE)
+@JdbcTest(properties = {
+        "spring.datasource.hikari.maximum-pool-size=" + StrategyConcurrencyTest.POOL_SIZE,
+        "spring.datasource.hikari.minimum-idle=" + StrategyConcurrencyTest.POOL_SIZE})
 @AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
 @Import({StrategyTestConfig.class, InvariantChecker.class})
 @Transactional(propagation = Propagation.NOT_SUPPORTED)
@@ -45,12 +50,10 @@ abstract class StrategyConcurrencyTest {
     static final int THREADS = 16;
     static final int POOL_SIZE = THREADS + 4;
 
-    /** Started once for every subclass; see InventoryStrategyContractTest for why not {@code @Container}. */
-    @ServiceConnection
-    static final PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:16-alpine");
-
-    static {
-        postgres.start();
+    /** One database for both subclasses (they share this context), on the shared test Postgres. */
+    @DynamicPropertySource
+    static void database(DynamicPropertyRegistry registry) {
+        TestDatabases.register(registry, "strategy_concurrency");
     }
 
     static final UUID USER = UUID.fromString("00000000-0000-4000-8000-0000000000a1");

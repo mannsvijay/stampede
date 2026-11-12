@@ -25,12 +25,13 @@ import com.stampede.control.invariants.InvariantChecker;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.jdbc.AutoConfigureTestDatabase;
 import org.springframework.boot.test.autoconfigure.jdbc.JdbcTest;
-import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
+import com.stampede.testsupport.TestDatabases;
 import org.springframework.context.annotation.Import;
 import org.springframework.jdbc.core.simple.JdbcClient;
+import org.springframework.test.context.DynamicPropertyRegistry;
+import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
-import org.testcontainers.containers.PostgreSQLContainer;
 
 /**
  * The per-user cap alone under concurrency (M1.4, D-005). One user, 16 threads, and every thread asks
@@ -41,7 +42,10 @@ import org.testcontainers.containers.PostgreSQLContainer;
  * Run once per strategy by a subclass ({@link PessimisticHoldCapConcurrencyTest},
  * {@link OptimisticHoldCapConcurrencyTest}): CLAUDE.md requires the cap under concurrency in every strategy.
  */
-@JdbcTest(properties = "spring.datasource.hikari.maximum-pool-size=" + HoldCapConcurrencyTest.POOL_SIZE)
+// The pool keeps all its connections open (minimum-idle), as in StrategyConcurrencyTest.
+@JdbcTest(properties = {
+        "spring.datasource.hikari.maximum-pool-size=" + HoldCapConcurrencyTest.POOL_SIZE,
+        "spring.datasource.hikari.minimum-idle=" + HoldCapConcurrencyTest.POOL_SIZE})
 @AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
 @Import({StrategyTestConfig.class, InvariantChecker.class})
 @Transactional(propagation = Propagation.NOT_SUPPORTED)
@@ -51,12 +55,10 @@ abstract class HoldCapConcurrencyTest {
     static final int POOL_SIZE = THREADS + 4;
     static final int LIMIT = 4;
 
-    /** Started once for every subclass; see InventoryStrategyContractTest for why not {@code @Container}. */
-    @ServiceConnection
-    static final PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:16-alpine");
-
-    static {
-        postgres.start();
+    /** One database for both subclasses (they share this context), on the shared test Postgres. */
+    @DynamicPropertySource
+    static void database(DynamicPropertyRegistry registry) {
+        TestDatabases.register(registry, "hold_cap_concurrency");
     }
 
     private ExecutorService racers;

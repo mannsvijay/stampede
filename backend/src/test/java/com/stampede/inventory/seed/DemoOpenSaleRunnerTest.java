@@ -1,5 +1,6 @@
 package com.stampede.inventory.seed;
 
+import com.stampede.testsupport.TestDatabases;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import java.time.Duration;
@@ -12,13 +13,11 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.jdbc.AutoConfigureTestDatabase;
 import org.springframework.boot.test.autoconfigure.jdbc.JdbcTest;
-import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
+import org.springframework.test.context.DynamicPropertyRegistry;
+import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.context.annotation.Import;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.jdbc.core.simple.JdbcClient;
-import org.testcontainers.containers.PostgreSQLContainer;
-import org.testcontainers.junit.jupiter.Container;
-import org.testcontainers.junit.jupiter.Testcontainers;
 
 /**
  * The dev-only demo-open-sale profile's runner (D-016), against the tiny fixture event (drop in 1 h,
@@ -26,13 +25,14 @@ import org.testcontainers.junit.jupiter.Testcontainers;
  */
 @JdbcTest
 @AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
-@Testcontainers
 @Import(SeedLoader.class)
 class DemoOpenSaleRunnerTest {
 
-    @Container
-    @ServiceConnection
-    static PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:16-alpine");
+    /** Its own database on the shared test Postgres (TestDatabases): nothing else ever sees its data. */
+    @DynamicPropertySource
+    static void database(DynamicPropertyRegistry registry) {
+        TestDatabases.register(registry, "demo_open_sale_runner");
+    }
 
     private static final UUID EVENT = SeedIds.event("tiny-show");
 

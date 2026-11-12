@@ -33,7 +33,7 @@ import com.stampede.testsupport.TestcontainersConfiguration;
  * build/openapi/openapi.json: review the difference and copy it over docs/openapi.json.
  *
  * <p>Needs the {@code openapi} profile (the endpoint is off by default), so it runs in its own
- * application context with its own containers.
+ * application context with its own database (TestcontainersConfiguration).
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @Import(TestcontainersConfiguration.class)

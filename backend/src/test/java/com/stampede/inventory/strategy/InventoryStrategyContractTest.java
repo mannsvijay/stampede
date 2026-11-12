@@ -36,12 +36,13 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.jdbc.AutoConfigureTestDatabase;
 import org.springframework.boot.test.autoconfigure.jdbc.JdbcTest;
-import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
+import com.stampede.testsupport.TestDatabases;
 import org.springframework.context.annotation.Import;
 import org.springframework.jdbc.core.simple.JdbcClient;
+import org.springframework.test.context.DynamicPropertyRegistry;
+import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
-import org.testcontainers.containers.PostgreSQLContainer;
 
 /**
  * The behaviour every Postgres inventory strategy must have, against a real Postgres (M1.2, D-015;
@@ -67,15 +68,12 @@ import org.testcontainers.containers.PostgreSQLContainer;
 abstract class InventoryStrategyContractTest {
 
     /**
-     * One database for every subclass, started once and never stopped by JUnit (Testcontainers' Ryuk
-     * removes it when the JVM exits). With {@code @Container} each subclass would stop it after its
-     * tests, while Spring's context cache could hand the next subclass a context still pointing at it.
+     * One database for every subclass, on the shared test Postgres (TestDatabases). Both subclasses
+     * inherit this method, so they share one Spring context and one database, as before.
      */
-    @ServiceConnection
-    static final PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:16-alpine");
-
-    static {
-        postgres.start();
+    @DynamicPropertySource
+    static void database(DynamicPropertyRegistry registry) {
+        TestDatabases.register(registry, "strategy_contract");
     }
 
     /** Two threads for the race tests; a new pool per test, so no subclass inherits a shut-down one. */

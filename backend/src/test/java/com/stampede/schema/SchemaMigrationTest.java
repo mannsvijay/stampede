@@ -1,5 +1,6 @@
 package com.stampede.schema;
 
+import com.stampede.testsupport.TestDatabases;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -14,15 +15,13 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.jdbc.AutoConfigureTestDatabase;
 import org.springframework.boot.test.autoconfigure.jdbc.JdbcTest;
-import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
+import org.springframework.test.context.DynamicPropertyRegistry;
+import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.core.simple.JdbcClient;
-import org.testcontainers.containers.PostgreSQLContainer;
-import org.testcontainers.junit.jupiter.Container;
-import org.testcontainers.junit.jupiter.Testcontainers;
 
 /**
- * Checks the Flyway schema (V1 to V4) against a fresh Postgres container.
+ * Checks the Flyway schema (V1 to V4) against a fresh database of its own on the shared test Postgres.
  *
  * <p>{@code @JdbcTest} starts only the JDBC + Flyway slice, and wraps each test in a transaction that
  * is rolled back, so every test builds its own fixture and leaves nothing behind. A failed statement
@@ -33,7 +32,6 @@ import org.testcontainers.junit.jupiter.Testcontainers;
  */
 @JdbcTest
 @AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
-@Testcontainers
 class SchemaMigrationTest {
 
     private static final String UNIQUE_VIOLATION = "23505";
@@ -42,9 +40,11 @@ class SchemaMigrationTest {
     private static final String FOREIGN_KEY_VIOLATION = "23503";
     private static final String RAISE_EXCEPTION = "P0001";
 
-    @Container
-    @ServiceConnection
-    static PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:16-alpine");
+    /** Its own database on the shared test Postgres (TestDatabases): nothing else ever sees its data. */
+    @DynamicPropertySource
+    static void database(DynamicPropertyRegistry registry) {
+        TestDatabases.register(registry, "schema_migration");
+    }
 
     @Autowired
     JdbcClient jdbc;

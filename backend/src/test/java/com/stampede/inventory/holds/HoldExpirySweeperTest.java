@@ -1,5 +1,6 @@
 package com.stampede.inventory.holds;
 
+import com.stampede.testsupport.TestDatabases;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.stampede.inventory.holds.HoldExpirySweeper.SweepResult;
@@ -27,15 +28,13 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.jdbc.AutoConfigureTestDatabase;
 import org.springframework.boot.test.autoconfigure.jdbc.JdbcTest;
 import org.springframework.boot.test.context.TestConfiguration;
-import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
 import org.springframework.context.annotation.ComponentScan;
 import org.springframework.context.annotation.Import;
 import org.springframework.jdbc.core.simple.JdbcClient;
+import org.springframework.test.context.DynamicPropertyRegistry;
+import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
-import org.testcontainers.containers.PostgreSQLContainer;
-import org.testcontainers.junit.jupiter.Container;
-import org.testcontainers.junit.jupiter.Testcontainers;
 
 /**
  * The expiry sweeper (M1.4, D-016) against the real pessimistic strategy. Holds are created through
@@ -44,7 +43,6 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 // Pages of 2, so every test with more than two expired holds also goes through the keyset paging.
 @JdbcTest(properties = "stampede.holds.sweeper.batch-size=2")
 @AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
-@Testcontainers
 @Import({HoldExpirySweeper.class, HoldExpirySweeperTest.Strategies.class})
 @Transactional(propagation = Propagation.NOT_SUPPORTED)
 class HoldExpirySweeperTest {
@@ -55,9 +53,11 @@ class HoldExpirySweeperTest {
     static class Strategies {
     }
 
-    @Container
-    @ServiceConnection
-    static PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:16-alpine");
+    /** Its own database on the shared test Postgres (TestDatabases): nothing else ever sees its data. */
+    @DynamicPropertySource
+    static void database(DynamicPropertyRegistry registry) {
+        TestDatabases.register(registry, "hold_expiry_sweeper");
+    }
 
     static final ExecutorService THREADS = Executors.newFixedThreadPool(2);
 

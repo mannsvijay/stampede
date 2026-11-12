@@ -1,5 +1,6 @@
 package com.stampede.control.invariants;
 
+import com.stampede.testsupport.TestDatabases;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import java.time.Duration;
@@ -14,16 +15,14 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.jdbc.AutoConfigureTestDatabase;
 import org.springframework.boot.test.autoconfigure.jdbc.JdbcTest;
-import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
 import org.springframework.context.annotation.Import;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.test.context.DynamicPropertyRegistry;
+import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.transaction.support.TransactionTemplate;
-import org.testcontainers.containers.PostgreSQLContainer;
-import org.testcontainers.junit.jupiter.Container;
-import org.testcontainers.junit.jupiter.Testcontainers;
 
 /**
  * Proves every rule of the invariant checker can fail (M1.7, D-019). Each test starts from a valid
@@ -37,8 +36,8 @@ import org.testcontainers.junit.jupiter.Testcontainers;
  *   <li>S3 SOLD to bob's PAID order O1 at TICKETS_ISSUED: CONVERTED hold H2, one active item, one
  *       SUCCEEDED payment of the total, one live ticket held by bob (bob used = 1).</li>
  * </ul>
- * Own container: some tests break the schema's guarantees (O6) and none of this may leak into
- * another test class's database.
+ * Own database (on the shared test Postgres, TestDatabases): some tests break the schema's
+ * guarantees (O6) and none of this may leak into another test class's database.
  * <p>
  * Each test runs in {@code @JdbcTest}'s test transaction, which is rolled back: the checker joins
  * it and sees the broken state, and nothing broken is ever committed, so the after-test assertion
@@ -47,13 +46,14 @@ import org.testcontainers.junit.jupiter.Testcontainers;
  */
 @JdbcTest
 @AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
-@Testcontainers
 @Import(InvariantChecker.class)
 class InvariantCheckerTest {
 
-    @Container
-    @ServiceConnection
-    static PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:16-alpine");
+    /** Its own database on the shared test Postgres (TestDatabases): nothing else ever sees its data. */
+    @DynamicPropertySource
+    static void database(DynamicPropertyRegistry registry) {
+        TestDatabases.register(registry, "invariant_checker");
+    }
 
     static final Duration STRICT = Duration.ZERO;
     static final Duration GRACE = Duration.ofSeconds(30);
@@ -263,7 +263,7 @@ class InvariantCheckerTest {
     void o6SeatInTwoActiveOrdersWithTheUniqueIndexBypassed() {
         // PRD 6.10 #1. uq_order_items_active_seat makes this state impossible, so the only way to
         // show the rule fires is to remove the index. The ONE exception to CLAUDE.md's "never drop or
-        // relax it" (D-019): only here, in this class's own throwaway container, inside a transaction
+        // relax it" (D-019): only here, in this class's own throwaway database, inside a transaction
         // that is always rolled back. Postgres DDL is transactional, so the rollback restores it.
         TransactionTemplate rolledBack = new TransactionTemplate(transactions);
         List<Violation> violations = rolledBack.execute(status -> {
