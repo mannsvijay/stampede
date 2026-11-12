@@ -397,17 +397,20 @@ end against the compose stack, and every concurrency harness scenario passed 100
       `InvariantCheck` in `InvariantChecker`'s list (the after-test listener, harness and monitor
       then run it). Add the stuck-sweeper rule then too: ACTIVE holds whose `expires_at` is older
       than the grace period, since the sweeper becomes the safety net behind Redis expiry.
+      Note (from the test-infrastructure task): every test context shares ONE Redis container
+      (`TestDatabases`) with no isolation, which is fine only while nothing writes keys. The Redis
+      strategy's keys must be isolated per test context (e.g. a key prefix per context, or a Redis
+      database number per context; Postgres already has a database per context), and the after-test
+      invariant check for Redis (PRD 6.10 #5) must only see its own context's keys, never another's.
 - [ ] M2.3 Strategy selectable per event (admin endpoint); concurrency test parameterised over all three
       Note (from M1.7, D-019): if an admin endpoint ever changes `per_user_limit`, it must refuse
       (409) a limit below any user's current `used`, checked under the allowance row locks; I8
       treats `used > limit` as a violation.
-      Note (from M2.1): test infrastructure. (1) Consolidate the long-lived Testcontainers databases
-      (now one per test base class: `InventoryStrategyContractTest`, `StrategyConcurrencyTest`,
-      `HoldCapConcurrencyTest`, plus the others) into one shared singleton container for the whole
-      test JVM. (2) Disable the hold expiry sweeper and the invariant monitor in every test context.
-      At JVM shutdown of the full suite, `HoldExpirySweeper` in a cached context logged "Connection
-      refused" / "Pool is empty" after its database had stopped (tests passed). Fewer containers and
-      no background schedulers also lower the memory use that got in-session runs killed.
+      Note (from M2.1, done before M2.2): test infrastructure. One shared Postgres and Redis for the
+      test JVM (`testsupport.TestDatabases`), a database per Spring test context (same isolation as a
+      container per context), sweeper and monitor schedules off in every test context, idle pools
+      shrink to zero. Measured per batch: 2 containers (was up to 21 per full run), 15 contexts (was
+      16). Open: `spring.test.context.cache.maxSize=8` only if a full run shows memory is still short.
 - [ ] M2.4 k6 scenarios: seat-collision, mixed-realistic; `scripts/k6.sh` runs k6 in Docker
       Note (from M1.8a, D-020): measure GET /events/{id}/layout (size raw and gzipped, latency) and
       GET /events/{id}/seatmap under polling load; the layout size (~240 KB raw) is only an estimate.

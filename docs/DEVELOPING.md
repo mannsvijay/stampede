@@ -87,10 +87,16 @@ cd backend
 .\gradlew.bat test --rerun                           # all tests; --rerun avoids "UP-TO-DATE" no-op runs
 .\gradlew.bat test --rerun --tests "AuthFlowTest"    # one test class
 ```
+Tests start one Postgres and one Redis container for the whole run (`testsupport.TestDatabases`;
+Ryuk removes them when the JVM exits). Each Spring test context gets its own database in that
+Postgres, so no test class sees another's data. The hold sweeper and invariant monitor schedules are
+off in tests (`src/test/resources/config/application.properties`).
+
 The concurrency harness (`PessimisticConcurrencyTest`, `OptimisticConcurrencyTest`, and the cap-only
 `PessimisticHoldCapConcurrencyTest`, `OptimisticHoldCapConcurrencyTest`) runs 100 rounds per
-scenario by default, as CI does. The full proof (the M1 exit criterion) is 1000 rounds, about 11
-minutes locally; reports land in `backend\build\reports\concurrency\`. PowerShell needs the
+scenario by default, as CI does. The full proof (the M1 exit criterion) is 1000 rounds, about 40
+minutes locally for both strategies (measured: pessimistic 22m 47s, optimistic 18m 11s); reports land
+in `backend\build\reports\concurrency\`. PowerShell needs the
 `-D` arguments quoted:
 ```powershell
 .\gradlew.bat test --rerun --tests "*ConcurrencyTest" "-Dstampede.harness.rounds=1000"

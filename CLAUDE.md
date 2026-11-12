@@ -21,7 +21,7 @@ Git Bash forms, run from the repo root. PowerShell forms for me: docs/DEVELOPING
 - One test class: `cd backend && ./gradlew test --rerun --tests "ClassName"`
 - Concurrency harness: 100 rounds per scenario by default (as CI). Full proof (M1 exit criterion):
   `cd backend && ./gradlew test --rerun --tests "*ConcurrencyTest" -Dstampede.harness.rounds=1000`
-  (about 11 min); replay a round: add `-Dstampede.harness.seed=<seed> -Dstampede.harness.rounds=1`.
+  (about 40 min for both strategies: pessimistic ~23, optimistic ~18); replay a round: add `-Dstampede.harness.seed=<seed> -Dstampede.harness.rounds=1`.
   Reports: `backend/build/reports/concurrency/`.
 - Run the app: `cd backend && ./gradlew bootRun --args='--spring.profiles.active=seed,demo-reschedule'`
   Profiles, comma-separated: `seed` (load the demo venue and event), `demo-reschedule` (move the demo

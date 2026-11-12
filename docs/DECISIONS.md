@@ -1015,7 +1015,7 @@ Write these yourself, in your own words. Each one is an interview answer you've 
     user's current `used` (409), checked under the allowance row locks.
   - **The one exception to CLAUDE.md's "never drop or relax" rule for `uq_order_items_active_seat`:**
     `InvariantCheckerTest.o6SeatInTwoActiveOrdersWithTheUniqueIndexBypassed` drops it inside a
-    transaction that is always rolled back, in that class's own throwaway container, and then
+    transaction that is always rolled back, in that class's own throwaway database, and then
     asserts the index is back. Nowhere else: never in a migration or a shared test database.
     Why: O6 is PRD 6.10's first invariant, and a rule that has never been seen to fire may be a
     query that can't fire. The index makes the state impossible otherwise. Postgres DDL is
