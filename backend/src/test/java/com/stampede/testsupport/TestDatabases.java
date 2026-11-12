@@ -1,5 +1,6 @@
 package com.stampede.testsupport;
 
+import java.io.IOException;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
@@ -9,6 +10,7 @@ import java.sql.Statement;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Pattern;
 import org.springframework.test.context.DynamicPropertyRegistry;
+import org.testcontainers.containers.Container;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.PostgreSQLContainer;
 
@@ -97,8 +99,13 @@ public final class TestDatabases {
                 + "/" + name;
     }
 
-    static String username() {
+    public static String username() {
         return POSTGRES.getUsername();
+    }
+
+    /** Runs a command inside the Postgres container (SecretsAtRestTest's pg_dump). */
+    public static Container.ExecResult execInPostgres(String... command) throws IOException, InterruptedException {
+        return POSTGRES.execInContainer(command);
     }
 
     static String password() {

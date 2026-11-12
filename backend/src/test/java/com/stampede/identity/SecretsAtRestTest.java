@@ -8,20 +8,16 @@ import java.util.HexFormat;
 import java.util.List;
 
 import org.junit.jupiter.api.Test;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.testcontainers.containers.Container.ExecResult;
-import org.testcontainers.containers.PostgreSQLContainer;
 
 import com.stampede.testsupport.ApiTestSupport;
+import com.stampede.testsupport.TestDatabases;
 
 /**
  * Takes a real pg_dump of the database after a normal session and checks that no password or
  * refresh token is in it, only their hashes. This is what an attacker with a stolen backup sees.
  */
 class SecretsAtRestTest extends ApiTestSupport {
-
-    @Autowired
-    PostgreSQLContainer<?> postgres;
 
     @Test
     void databaseDumpContainsNoRawPasswordsOrRefreshTokens() throws Exception {
@@ -54,9 +50,11 @@ class SecretsAtRestTest extends ApiTestSupport {
         assertThat(storedHash).as("bcrypt, cost 12").startsWith("$2a$12$");
     }
 
+    /** pg_dump of the database this app context uses (its own database on the shared test Postgres). */
     private String pgDump() throws Exception {
-        ExecResult result = postgres.execInContainer(
-                "pg_dump", "--data-only", "-U", postgres.getUsername(), postgres.getDatabaseName());
+        String database = jdbc.sql("SELECT current_database()").query(String.class).single();
+        ExecResult result = TestDatabases.execInPostgres(
+                "pg_dump", "--data-only", "-U", TestDatabases.username(), database);
         assertThat(result.getExitCode()).as(result.getStderr()).isZero();
         return result.getStdout();
     }
