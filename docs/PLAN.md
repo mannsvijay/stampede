@@ -385,7 +385,11 @@ end against the compose stack, and every concurrency harness scenario passed 100
 0 invariant violations (evidence under M1.8 above).
 
 ## M2 - Contention lab (weeks 4-5)  <- the heart of the portfolio
-- [ ] M2.1 Optimistic strategy (version column, bounded retries with jitter)
+- [x] M2.1 Optimistic strategy (version column, bounded retries with jitter)
+      Done (D-021): versioned UPDATEs in seat_id order, 3 tries with full-jitter backoff, 409
+      SEAT_CONTENDED, Micrometer counters. Verified by the user: `*ConcurrencyTest`, ModularityTest
+      and OpenApiSpecTest BUILD SUCCESSFUL in 6m 27s; full suite with --rerun (100 rounds) BUILD
+      SUCCESSFUL in 15m 20s. The 1000-round proof of the optimistic strategy is still to run.
 - [ ] M2.2 Redis-first strategy (Lua: all-or-nothing hold keys with TTL, per-user cap inside Lua,
       async persistence + reconciler)
       Note (from M1.7, D-019): add PRD 6.10 #5 ("Redis hold state is consistent with Postgres") as an
@@ -396,6 +400,13 @@ end against the compose stack, and every concurrency harness scenario passed 100
       Note (from M1.7, D-019): if an admin endpoint ever changes `per_user_limit`, it must refuse
       (409) a limit below any user's current `used`, checked under the allowance row locks; I8
       treats `used > limit` as a violation.
+      Note (from M2.1): test infrastructure. (1) Consolidate the long-lived Testcontainers databases
+      (now one per test base class: `InventoryStrategyContractTest`, `StrategyConcurrencyTest`,
+      `HoldCapConcurrencyTest`, plus the others) into one shared singleton container for the whole
+      test JVM. (2) Disable the hold expiry sweeper and the invariant monitor in every test context.
+      At JVM shutdown of the full suite, `HoldExpirySweeper` in a cached context logged "Connection
+      refused" / "Pool is empty" after its database had stopped (tests passed). Fewer containers and
+      no background schedulers also lower the memory use that got in-session runs killed.
 - [ ] M2.4 k6 scenarios: seat-collision, mixed-realistic; `scripts/k6.sh` runs k6 in Docker
       Note (from M1.8a, D-020): measure GET /events/{id}/layout (size raw and gzipped, latency) and
       GET /events/{id}/seatmap under polling load; the layout size (~240 KB raw) is only an estimate.

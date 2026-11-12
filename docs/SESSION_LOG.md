@@ -737,3 +737,54 @@ the 1000-round proof.
 - Playwright purchase test isn't in CI (M7.3 note). Each run sells one seat for good; reset the data
   with `docker compose down -v` long before the 2,014 demo seats run out.
 - Still open: D-020 draft to rewrite.
+
+## 2026-11-13 - M2.1 Optimistic inventory strategy (D-021)
+
+**What changed**
+- `OptimisticInventoryStrategy`: unlocked read `ORDER BY seat_id` (with the owner's `created_at` and
+  `clock_timestamp()` for `takenAgoMs` in the same statement), `EventSeat` decides, hold row insert,
+  one `UPDATE … WHERE version = :read` per seat in the read's order (= the lock order of D-015),
+  allowance upsert last. Zero rows = `VersionConflict`, the try rolls back. `hold()` is
+  `@Transactional(NEVER)`; each try is its own `TransactionTemplate` transaction; full-jitter backoff
+  between tries with no connection held. 3 tries, 5 ms base, 50 ms cap (`stampede.inventory.optimistic.*`).
+  HELD/SOLD is never retried.
+- Release and sell extracted unchanged from the pessimistic strategy into `HoldClosing`; shared seat
+  SQL into `SeatRows`; both strategies delegate. `InventoryStrategyConfig` binds the retry properties.
+- `HoldRejection.CONTENDED` → `HoldResult.Contended` → 409 `SEAT_CONTENDED` with `seatIds` and
+  `Retry-After: 1` (from `ErrorCode.retryAfterSeconds`, also documented in the spec).
+- `HoldMetrics`: `stampede.inventory.hold.attempts{strategy}`, `.conflicts{strategy}`,
+  `.duration{strategy,outcome}`; recorded by both strategies; tags never carry ids.
+- Tests: `PessimisticInventoryStrategyTest` split into `InventoryStrategyContractTest` (43 shared tests)
+  + Pessimistic (44 = 43 + kind) and Optimistic (52 = 43 + 9: conflict detected and retried, retry
+  succeeds, taken seat not retried, CONTENDED with nothing written, interleaved opposite-order holds
+  without deadlock, read takes no row lock, refuses a caller's transaction, meter tags, kind).
+  Harness and cap tests are abstract bases with one subclass per strategy. `HoldApiTest` +2
+  (SEAT_CONTENDED over HTTP; optimistic event holds). Shared `StrategyTestConfig`.
+- Frontend: `SEAT_CONTENDED` message, selection kept, "Try again" button (seats page); +4 tests.
+- Docs: D-021 (DRAFT), PRD 10 (SEAT_CONTENDED), `openapi.json` + `schema.d.ts`, DEVELOPING.md class
+  names, PLAN note on M2.3 (test containers, background schedulers in tests).
+- Committed by the user: be00b20 (the first 5 new main files; doesn't build on its own) and 2f75866
+  (everything else, which completes it). This entry and the PLAN tick are a separate docs commit.
+
+**Verified**
+- Test counts before/after the split: PessimisticInventoryStrategyTest 44 → 44; Pessimistic harness 4
+  and cap 2 unchanged per strategy; Optimistic unit 52.
+- Deadlock mutation (writes in request order): the interleaving test failed with
+  `ERROR: deadlock detected` (40P01, two processes waiting on each other's transaction); reverted,
+  green again, no mutation in the code or in be00b20.
+- In session: Optimistic/Pessimistic unit tests and HoldApiTest green; frontend typecheck, lint,
+  157 tests, check:api, build all exit 0.
+- By the user (PowerShell, other apps closed): `*ConcurrencyTest` + ModularityTest + OpenApiSpecTest
+  BUILD SUCCESSFUL in 6m 27s; full backend suite --rerun (100 rounds) BUILD SUCCESSFUL in 15m 20s.
+  The in-session full run had been stopped for low system memory.
+
+**Next**: the 1000-round proof with the optimistic strategy (user), then M2.2 Redis-first strategy.
+
+**Open problems**
+- At JVM shutdown, `HoldExpirySweeper` in a cached test context logged "Connection refused" /
+  "Pool is empty" after its database stopped (PLAN note on M2.3).
+- `compileJava` prints an "unchecked or unsafe operations" note for `OpenApiConfig`; not checked
+  whether it predates M2.1.
+- D-021 is a draft for you to rewrite in your own words (also still: D-020).
+- CLAUDE.md and DEVELOPING.md still say the 1000-round proof takes about 11 min; it now covers twice
+  the scenarios.
