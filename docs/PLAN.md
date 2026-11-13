@@ -443,11 +443,41 @@ end against the compose stack, and every concurrency harness scenario passed 100
         reuses `StrategyTestConfig`. Rerun of the sweeper test, every `Redis*Test`,
         `*InventoryStrategyTest` and ModularityTest: BUILD SUCCESSFUL in 4m 48s.
         Verified by the user: full suite with --rerun BUILD SUCCESSFUL in 15m 28s.
-  - [ ] M2.2c Strategy, sell, invariants, harness: `RedisFirstInventoryStrategy` (hold, release, sell;
-        `HoldMetrics` like the other two), catch-up of pending stream entries before checkout step 0
-        and step 3, `sell` marks seats `S:<orderId>:<ms>` without a TTL and the user member `+inf`
-        before the Postgres sale, invariant 5 and the stuck-sweeper rule, contract tests and the
-        harness for the third strategy, D-022 final.
+  - [ ] M2.2c Strategy, sell, invariants, harness. Split (approved 2026-11-14) into M2.2c-1 and M2.2c-2.
+  - [x] M2.2c-1 Strategy, sell, catch-up, contract split (D-022 "M2.2c-1"). Decisions 2026-11-14: sell =
+        pin.lua, Postgres sale, sold.lua (A1); catch-up = this hold only through `applyHeld`, also from
+        `HoldService.cancel` (B1); the D-016 retry rule reads Redis for REDIS_FIRST (fixed, not a limit).
+        Done 2026-11-14: `RedisFirstInventoryStrategy`, `RedisCatchUp`, `pin.lua`, `sold.lua`;
+        `release.lua` frees a pinned hold past its expiry (EXPIRED, no entry); `HoldClosing` gates
+        (`closeWith`, `sellWith`; Postgres strategies unchanged); lock-first `RedisHoldWriter.expire`;
+        R4 finishes a CONVERTED hold's sale; epoch guard on the consumer's pre-close step; tested
+        hooks for both epoch guards; `HoldService` catch-up on step 0 and cancel, Redis retry rule.
+        Contract split: `InventoryStrategyContractTest` (behaviour, 10 tests, all three strategies),
+        `PostgresLockingContractTest` (34 tests moved unchanged, checked byte for byte; the approved
+        list had 33, plus `firstHoldLargerThanTheLimit…` moved on review), `RedisFirstInventoryStrategyTest`
+        (18 of its own, incl. a 100-round sell-vs-release race). HTTP: `OrderApiTest` REDIS_FIRST
+        checkout to PAID with tickets; `HoldApiTest` REDIS_FIRST retry (200, same hold) and cancel (204)
+        during consumer lag. No new dependency, no API change.
+        Targeted run (CLAUDE.md rule; `*InventoryStrategyTest`, `HoldExpirySweeperTest`, `Redis*Test`,
+        `*ConcurrencyTest`, ApplicationHealthTest, CheckoutFailureTest, OpenApiSpecTest, OrderApiTest,
+        HoldApiTest, ModularityTest): 26 classes, 355 tests, 0 failures, BUILD SUCCESSFUL in 15m 5s.
+        Both epoch-guard tests shown to fail with the guard removed.
+        Verified by the user: full suite with --rerun BUILD SUCCESSFUL in 14m 20s.
+  - [ ] M2.2c-2 Invariant 5, the stuck-sweeper rule, the REDIS_FIRST harness, D-022 final.
+        Decision (2026-11-14, C1): stuck-sweeper rule `I9` = ACTIVE hold whose `expires_at` is more than
+        **2 minutes** in the past, the same threshold at runtime and in tests (independent of grace).
+        Fires in `HoldExpirySweeperTest#brokenHoldsDoNotStarveHealthyOnesBehindThem` (10-minute holds):
+        its annotation becomes {"I8","I9"}. Strict zero was rejected: it fires inside the explicit
+        `assertInvariants()` of `OrderApiTest`/`CheckoutFailureTest`.
+        Plan (approved outline): `inventory.api.RedisHoldState` (read-only, own prefix) implemented in
+        `inventory.strategy`; `control.invariants.RedisConsistencyCheck` on loaded REDIS_FIRST events:
+        one atomic Redis read, then the Postgres snapshot, then a re-read of only the disagreeing keys;
+        compared by Redis time; holds, seat values, cap. Runtime: excused only while an unapplied stream
+        entry for that hold younger than 2 s explains it; tests: zero. `InvariantChecker` takes an
+        `ObjectProvider<RedisHoldState>`; the listener's fallback passes the context's; without a reader
+        the rule reports "cannot check" for REDIS_FIRST events. Harness hooks: Redis reset per round,
+        stream drain before the I5/I6/checker checks; `RedisFirstConcurrencyTest` with its own database
+        and prefix (verify that a subclass `@DynamicPropertySource` overrides cleanly).
         Note (decided 2026-11-13): **invariant 5 compares by time, not by status.** A Postgres hold
         whose `expires_at` has passed counts as expired, whatever its status column says. So the gap
         between a Redis TTL running out and the sweeper's 5 s tick is never reported as a mismatch;
@@ -457,29 +487,6 @@ end against the compose stack, and every concurrency harness scenario passed 100
         through a small read-only type in `inventory.api`. `InvariantAssertionListener`'s fallback
         `new InvariantChecker(jdbc, tx)` must not silently skip the Redis rule, and the rule must
         only read keys under its own context's prefix.
-        Note (from M2.2a): `InventoryStrategyContractTest` is Postgres-specific (row locks, versions,
-        `holdDirectly`). Proposal to approve first: a behaviour contract all three strategies run plus
-        a Postgres-locking contract for the two Postgres strategies, moving tests without changing
-        any assertion. The harness needs a Redis reset per round and must drain the stream before
-        its Postgres checks (I5, I6, the checker).
-        Note (from M2.2a): the stuck-sweeper rule at zero grace would fire in existing tests that
-        leave expired ACTIVE holds on purpose; decide its threshold then.
-        Note (from M2.2a): Redis alone answers `GONE` for an expired, released or unknown hold;
-        the strategy maps that to NotActive / NotFound from the Postgres row.
-        Note (from M2.2b): `release(…, EXPIRED)` delegates to `RedisHoldWriter.expire` (the sweeper
-        itself doesn't change). On `NOT_LOADED`, `hold()` calls `RedisEventLoader.ensureLoaded` and
-        retries once; `sell()` must do the same before touching Redis.
-        Note (from M2.2b): sell must replace the seat keys with `S:` markers, set the user member to
-        `+inf` AND delete the hold hash, in one script. If the hash survives, reconciler rule R4 sees a
-        Redis hold whose Postgres row is CONVERTED and calls release.lua, which keeps the `S:` keys but
-        ZREMs the `<holdId>:<n>` member and so un-counts bought seats from the cap.
-        Note (from M2.2b): give the consumer's "close older holds Redis no longer has" step
-        (`RedisHoldWriter.closeHoldsRedisNoLongerHas` / `closeGone`) the same load-epoch check as
-        reconciler rule R2, not only "is the event loaded": read the epoch before the Redis checks
-        and skip the close if it changed. Listed under D-022's known limits until done.
-        Note (from M2.2b): add a test for R2's epoch guard (a reload during a pass stops the pass and
-        closes nothing), with a test hook in `RedisReconciler` if the interleaving needs one. Listed
-        under D-022's known limits until done.
         Note (from M2.2b): invariant 5 can read `stampede.inventory.redis.stream.oldest.age` (or
         `RedisStreamConsumer.refreshLag`) for its 2 s window; tests drain with `pollOnce` +
         `reclaimOnce` (see `RedisPersistenceTestSupport.drain`).

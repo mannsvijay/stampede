@@ -207,4 +207,61 @@ class RedisHoldWriterTest extends RedisPersistenceTestSupport {
         assertThat(writer.expire(EVENT, holdId)).isInstanceOf(ReleaseOutcome.NotExpired.class);
         assertThat(holdStatus(holdId)).isEqualTo("ACTIVE");
     }
+
+    // ---- the load-epoch guard on "close older holds Redis no longer has" (M2.2c) ----
+
+    @Test
+    void aReloadWhileClosingAnOlderHoldStopsTheCloseAndTheReloadedHoldSurvives() {
+        load();
+        UUID older = hold(USER, FIVE_MINUTES, SEATS.get(0));
+        drain();
+        // Redis loses the older hold without an entry (partial loss), so a newer hold takes its seat.
+        redis.delete(List.of(store.keys().hold(EVENT, older), store.keys().seat(EVENT, SEATS.get(0))));
+        UUID newer = hold(OTHER_USER, FIVE_MINUTES, SEATS.get(0));
+        StreamEntry.HoldFacts newerFacts = StreamEntry.HoldFacts.of(EVENT, store.liveHold(EVENT, newer).orElseThrow());
+        // At the one moment the guard protects (after "Redis doesn't have the older hold", before the
+        // close), Redis is wiped and reloaded from Postgres, which still has the older hold ACTIVE.
+        writer.beforeEpochCheck(() -> {
+            TestRedis.deleteKeys(redis, PREFIX);
+            loader.ensureLoaded(EVENT);
+        });
+        Applied applied;
+        try {
+            applied = writer.applyHeld(newerFacts);
+        } finally {
+            writer.beforeEpochCheck(() -> { });
+        }
+
+        // Without the guard the older hold would be closed although the reload just restored it.
+        assertThat(holdStatus(older)).isEqualTo("ACTIVE");
+        assertThat(store.liveHold(EVENT, older)).isPresent();
+        assertThat(seat(SEATS.get(0)).holdId()).isEqualTo(older);
+        // The newer hold is still blocked after the reload: Postgres wins (D-022).
+        assertThat(applied).isEqualTo(Applied.CONFLICT);
+        assertThat(holdStatus(newer)).isEqualTo("RELEASED");
+        assertThat(violations()).isEmpty();
+    }
+
+    // ---- lock-first expiry of a pinned hold (M2.2c) ----
+
+    @Test
+    void expiryFreesAPinnedHoldWhoseSaleNeverFinishedOnceItsTimeRanOut() {
+        load();
+        UUID holdId = hold(USER, ONE_SECOND, SEATS.get(0));
+        drain();
+        store.pin(EVENT, holdId);   // and then the process crashed before the Postgres sale
+
+        assertThat(writer.expire(EVENT, holdId)).isInstanceOf(ReleaseOutcome.NotExpired.class);
+        org.awaitility.Awaitility.await().atMost(java.time.Duration.ofSeconds(5))
+                .pollInterval(java.time.Duration.ofMillis(50))
+                .until(() -> store.nowMillis() > holdRow(holdId).orElseThrow().expiresAt().toEpochMilli() + 50);
+
+        assertThat(writer.expire(EVENT, holdId)).isEqualTo(new ReleaseOutcome.Released(List.of(SEATS.get(0))));
+        assertThat(holdStatus(holdId)).isEqualTo("EXPIRED");
+        assertThat(store.liveHold(EVENT, holdId)).isEmpty();
+        assertThat(store.seatValue(EVENT, SEATS.get(0))).isNull();
+        assertThat(store.used(EVENT, USER)).isZero();
+        assertThat(allowance(USER)).isZero();
+        assertThat(violations()).isEmpty();
+    }
 }

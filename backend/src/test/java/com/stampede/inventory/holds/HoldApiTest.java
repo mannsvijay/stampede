@@ -3,6 +3,7 @@ package com.stampede.inventory.holds;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.stampede.inventory.strategy.RedisFirstTestAccess;
 import com.stampede.testsupport.ApiTestSupport;
 import java.time.Duration;
 import java.time.Instant;
@@ -14,6 +15,8 @@ import java.util.stream.StreamSupport;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.ApplicationContext;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
@@ -36,6 +39,9 @@ class HoldApiTest extends ApiTestSupport {
             UUID.fromString("30000000-0000-4000-8000-0000000001b3"),
             UUID.fromString("b0000000-0000-4000-8000-0000000001b4"),
             UUID.fromString("50000000-0000-4000-8000-0000000001b5"));
+
+    @Autowired
+    private ApplicationContext context;
 
     private String alice;
     private String bob;
@@ -111,6 +117,57 @@ class HoldApiTest extends ApiTestSupport {
         assertThat(jdbc.sql("SELECT user_id FROM holds WHERE id = ?").param(holdId).query(UUID.class).single())
                 .isEqualTo(aliceId);
         assertThat(used(aliceId)).isEqualTo(2);
+    }
+
+    @Test
+    void onARedisFirstEventARetryReturnsTheSameHoldBeforeTheConsumerHasPersistedIt() {
+        // M2.2c, D-016's retry promise for the Redis-first strategy. The stream consumer doesn't run in
+        // tests, so after the first POST the hold exists in Redis only, which is consumer lag at its worst.
+        jdbc.sql("UPDATE events SET strategy = 'REDIS_FIRST' WHERE id = ?").param(EVENT).update();
+        try {
+            Response first = postHold(EVENT, alice, SEATS.get(0), SEATS.get(1));
+            UUID holdId = holdId(first);
+            assertThat(jdbc.sql("SELECT count(*) FROM holds WHERE id = ?").param(holdId).query(Long.class).single())
+                    .as("not in Postgres yet").isZero();
+
+            Response retry = postHold(EVENT, alice, SEATS.get(1), SEATS.get(0));  // same set, other order
+
+            assertThat(retry.status()).as(String.valueOf(retry.body())).isEqualTo(200);
+            assertThat(retry.body().path("holdId").asText()).isEqualTo(holdId.toString());
+            assertThat(retry.body().path("expiresAt").asText()).isEqualTo(first.body().path("expiresAt").asText());
+            // The retry persisted the hold (catch-up), so the buyer can check out or cancel it at once.
+            assertThat(holdStatus(holdId)).isEqualTo("ACTIVE");
+            assertThat(seatStatus(SEATS.get(0))).isEqualTo("HELD");
+            assertThat(used(aliceId)).as("counted once").isEqualTo(2);
+
+            // Someone else asking for the same seats still gets SEAT_TAKEN, and so does a different set.
+            Response bobs = postHold(EVENT, bob, SEATS.get(0), SEATS.get(1));
+            assertThat(bobs.status()).isEqualTo(409);
+            assertThat(bobs.code()).isEqualTo("SEAT_TAKEN");
+            Response subset = postHold(EVENT, alice, SEATS.get(0));
+            assertThat(subset.status()).isEqualTo(409);
+            assertThat(subset.code()).isEqualTo("SEAT_TAKEN");
+        } finally {
+            RedisFirstTestAccess.deleteEventKeys(context, EVENT);
+        }
+    }
+
+    @Test
+    void onARedisFirstEventAHoldCanBeCancelledBeforeTheConsumerHasPersistedIt() {
+        jdbc.sql("UPDATE events SET strategy = 'REDIS_FIRST' WHERE id = ?").param(EVENT).update();
+        try {
+            UUID holdId = holdId(postHold(EVENT, alice, SEATS.get(0)));
+
+            Response response = request(HttpMethod.DELETE, "/holds/" + holdId, alice);
+
+            assertThat(response.status()).as("not 404: catch-up found the hold in Redis").isEqualTo(204);
+            assertThat(holdStatus(holdId)).isEqualTo("RELEASED");
+            assertThat(seatStatus(SEATS.get(0))).isEqualTo("AVAILABLE");
+            assertThat(RedisFirstTestAccess.seatValue(context, EVENT, SEATS.get(0))).isNull();
+            assertThat(used(aliceId)).isZero();
+        } finally {
+            RedisFirstTestAccess.deleteEventKeys(context, EVENT);
+        }
     }
 
     @Test

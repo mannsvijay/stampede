@@ -1180,7 +1180,9 @@ Write these yourself, in your own words. Each one is an interview answer you've 
   running; how holds reach Postgres, whose `event_seats.hold_id` and `orders.hold_id` have foreign
   keys to `holds`; which store wins when they disagree; and how much disagreement invariant 5 (PRD
   6.10) tolerates (PLAN change 6). Split into M2.2a (Redis alone), M2.2b (persistence, reconciler)
-  and M2.2c (strategy bean, sell, invariants, harness). **Implemented so far: M2.2a, M2.2b.**
+  and M2.2c (strategy bean, sell, invariants, harness), M2.2c itself split into M2.2c-1 (strategy,
+  sell, catch-up, contract split) and M2.2c-2 (invariant 5, stuck-sweeper rule, harness).
+  **Implemented so far: M2.2a, M2.2b, M2.2c-1.**
 - **Options considered:**
   - Persistence: a Redis Stream with a consumer; synchronous write-through in the request; an
     in-process queue.
@@ -1201,7 +1203,7 @@ Write these yourself, in your own words. Each one is an interview answer you've 
     | `p:ev:<event>:seat:<seat>` | string | `H:<holdId>:<createdMs>` while held; `S:<orderId>:<soldMs>` once sold (M2.2c) | with the hold; never when sold |
     | `p:ev:<event>:hold:<hold>` | hash | `user`, `seats`, `n`, `createdMs`, `expiresMs` | with its seats |
     | `p:ev:<event>:user:<user>` | sorted set | member `<holdId>:<seat count>`, score = expiry in ms | with its last member |
-    | `p:inv:stream` | stream | HELD / RELEASED entries (SOLD in M2.2c) | trimmed after ack (M2.2b) |
+    | `p:inv:stream` | stream | HELD / RELEASED entries (no SOLD entry: see M2.2c-1) | trimmed after ack (M2.2b) |
 
   - **`hold.lua` checks everything before it writes anything**, in this order: event loaded
     (`NOT_LOADED`), every seat in the seat set (`UNKNOWN_SEAT`), no seat key exists (`SEAT_TAKEN`
@@ -1234,8 +1236,8 @@ Write these yourself, in your own words. Each one is an interview answer you've 
     an expired one as taken for up to one sweeper tick. Redis still decides every hold attempt.
   - **Durability:** AOF with `appendfsync everysec` and `maxmemory-policy noeviction` (made explicit
     in compose in M2.2b). A crash can lose about the last second of acknowledged holds.
-  - M2.2a's `RedisHoldStore` is not an `InventoryStrategy`; `InventoryStrategies.forKind("REDIS_FIRST")`
-    still throws until M2.2c.
+  - M2.2a's `RedisHoldStore` is not itself an `InventoryStrategy`; `RedisFirstInventoryStrategy` (M2.2c-1)
+    is, and uses it.
   - **M2.2b, persistence and reconciler** (decided 2026-11-13: every instance runs a consumer;
     dead-letter after 5 non-transient failures; reconciler every 30 s; a cap disagreement is a
     Postgres-wins conflict):
@@ -1271,7 +1273,8 @@ Write these yourself, in your own words. Each one is an interview answer you've 
       RELEASED, `S:` markers back for sold seats, then `release.lua` in Redis.
     - **Expiry:** `RedisHoldWriter.expire` for the M2.2c strategy's `release(…, EXPIRED)`, so the
       sweeper doesn't change: `NOT_EXPIRED` from Redis = NotExpired; `GONE` = close by Redis' clock,
-      except while the event isn't loaded (then NotExpired: the loader decides).
+      except while the event isn't loaded (then NotExpired: the loader decides). Lock-first since
+      M2.2c-1 (below).
     - **Reconciler** (`RedisReconciler`, every 30 s on every instance, fixed delay): R0 load; R1 roll
       forward a Redis hold with no row, older than 5 s (`min-age`); R2 close a Postgres ACTIVE hold
       Redis doesn't have (re-reading Redis per hold, and stopping the pass if the load epoch
@@ -1282,6 +1285,69 @@ Write these yourself, in your own words. Each one is an interview answer you've 
       `…stream.oldest.age` (ms, Redis clock; what invariant 5 and M2.5 read), counters
       `…redis.applied{type,result}`, `…redis.deadletters`, `…redis.reconciler.repairs{rule}`.
     - **Compose:** `--appendfsync everysec --maxmemory-policy noeviction` (no `maxmemory` set yet).
+  - **M2.2c-1, the strategy and sell** (decided 2026-11-14: sell = pin, Postgres sale, `sold.lua`;
+    catch-up = this hold only, through `applyHeld`, also on cancel; the retry rule reads Redis):
+    - **`RedisFirstInventoryStrategy`.** `hold` touches only Redis: `RedisHoldStore.tryHold`, and on
+      `NOT_LOADED` it loads the event and runs the script once more (`HoldMetrics.attempts` counts
+      both runs; `conflicts` is always 0). `release` and `sell` work like the Postgres strategies:
+      **lock the `holds` row first**, run the Lua script while holding that lock, then write Postgres in
+      the same transaction (`HoldClosing.closeWith` / `sellWith`: a gate called once the row is locked
+      and ACTIVE; the Postgres strategies pass today's database-clock check through the same gate,
+      unchanged). So a sale, a cancel and the sweeper for one hold take turns on that row lock, and
+      the checkout's compensating release stays definitive (D-017). Release writes Postgres
+      synchronously; its RELEASED entry is a no-op (DUPLICATE) for the consumer later.
+    - **Release, RELEASED or SAGA_FAILED:** catch-up, lock, `release.lua`. RELEASED = close.
+      GONE = Redis already ended the hold (TTL, or a release whose Postgres write failed): Postgres
+      records it, EXPIRED or RELEASED by Redis' clock, and the caller gets `NotActive(that status)`
+      (a cancel is 204, a failed checkout cancels and refunds). GONE while the load epoch changed
+      means nothing yet: load, run the script once more.
+    - **Release, EXPIRED** (the sweeper): `RedisHoldWriter.expire`, now lock-first too, with the same
+      epoch check. `release.lua` change: an EXPIRED release of a hash whose `expiresMs` has passed
+      releases it. Only a pinned hold can be in that state (no TTL); EXPIRED releases write no stream
+      entry (the sweeper closes Postgres itself, and retries on its next tick if that fails).
+    - **Sell, three steps, so a sale never exists in Redis without Postgres:**
+      1. `pin.lua`, under the row lock: PERSIST the hold hash and its seat keys, member `+inf`, user
+         key PERSIST. No hash = `HoldExpired`; a hash past its expiry (an earlier pin that never
+         finished) = `HoldExpired`. Nothing is written in either case; the sweeper closes the hold.
+      2. The Postgres sale in the same transaction (seats `ORDER BY seat_id`, `EventSeat.sell`,
+         CONVERTED), with no database-clock expiry check: Redis' clock decided in step 1.
+      3. After the commit, `sold.lua`, one script: `S:<orderId>:<ms>` markers with no expiry, member
+         `+inf`, hold hash deleted. A seat key naming another hold is overwritten (Postgres sold it) and
+         that hold is released in Redis, as R3 does. One retry, then a WARN; the sale stands.
+
+      | Fails at | Redis | Postgres | Repaired by | Caller |
+      |---|---|---|---|---|
+      | step 1 (hold gone) | unchanged | unchanged | sweeper | 410, refund |
+      | step 2 | pinned, seats still `H:` | rolled back, ACTIVE | compensating release (`release.lua` finds the hash) | 500, refund |
+      | crash after step 1 | pinned | ACTIVE, expires | sweeper: `release.lua` EXPIRED once past `expiresMs` | PENDING order (D-017 crash limit) |
+      | step 3 | pinned: seats taken, cap counted | SOLD, CONVERTED | strategy retry; then R4 | 201 |
+      | answer lost after step 2 | pinned | CONVERTED | compensation sees CONVERTED, finishes the order; R4 | 201 |
+
+    - **No SOLD stream entry:** the sale is written to Postgres synchronously, so an entry would only
+      ever be a no-op. (The key table said "SOLD in M2.2c".)
+    - **Reconciler R4 change:** a Redis hold whose row is CONVERTED gets `sold.lua`, not `release.lua`.
+      Releasing it would free sold seats in Redis (the M2.2b note). Counted with the sold markers,
+      metric `R4_finish_sale`.
+    - **Catch-up** (`RedisCatchUp`, public, used by `HoldService`): for one hold, if Postgres has no
+      row and Redis has the hold, `RedisHoldWriter.applyHeld` (R1's roll-forward). Called by
+      checkout step 0 (`HoldService.checkoutHold`, only when the row isn't found, so the Postgres
+      strategies pay nothing), by `HoldService.cancel` (same), and by the strategy's release and sell
+      (after `ensureLoaded`). POST /orders and DELETE /holds/{id} carry only a hold id, so it looks
+      in each open REDIS_FIRST event (one HGETALL each). Cost: one or two Redis reads, independent
+      of the backlog. `booking.checkout` is unchanged.
+    - **The retry rule (D-016) for REDIS_FIRST reads Redis:** on SEAT_TAKEN, the caller's own live
+      Redis hold whose seat set equals the request (found through the first seat's key) is persisted
+      by catch-up and returned with 200. Postgres can't answer: during consumer lag it doesn't have
+      the hold, and it can still show a hold Redis has already expired.
+    - **Epoch guards:** the consumer's "close older holds Redis no longer has" step reads the load
+      epoch before its Redis checks and stops before a close if it changed, like R2. Both guards are
+      tested by wiping and reloading Redis at the exact moment they protect (a package-private test
+      hook in `RedisHoldWriter` and `RedisReconciler`); both tests fail with the guard removed.
+    - **Contract tests:** `InventoryStrategyContractTest` is now the behaviour contract all three
+      strategies run (10 tests; Redis through a test decorator that drains the stream after each
+      call). `PostgresLockingContractTest` holds the 34 tests that set state up with SQL or probe
+      Postgres locks (moved unchanged, checked byte for byte). `RedisFirstInventoryStrategyTest`
+      covers those behaviours through Redis-first's real paths, plus a 100-round sell-versus-release race.
 - **Why:**
   - Redis runs commands on one thread and a whole script as one command, so nothing can happen
     between a script's checks and its writes: that is the entire locking story of this strategy.
@@ -1299,10 +1365,20 @@ Write these yourself, in your own words. Each one is an interview answer you've 
     reaches it after its expiry time is recorded EXPIRED, not RELEASED (status only; seats and
     allowance are the same). A hold id reused after its hold ended (D-015 bug) makes its HELD a
     no-op; logged at ERROR. The load script grows with the event (about 150 KB of arguments for
-    2,000 seats) and blocks Redis while it runs. A Redis wipe between the `isLoaded` check and a
-    close in the consumer's pre-close step could close a hold the reload would have restored
-    (R2 guards with the epoch; this path doesn't yet: M2.2c note). The R2 epoch guard is not
-    exercised by a test yet (M2.2c note).
+    2,000 seats) and blocks Redis while it runs. (The consumer pre-close step's missing epoch guard
+    and the untested R2 guard were fixed in M2.2c-1.) Both epoch guards still have a window of
+    milliseconds between the epoch comparison and the close's commit, as R2 always had.
+  - (M2.2c-1) **404 instead of 410:** if a REDIS_FIRST hold's TTL runs out (about 5 minutes) before
+    the consumer or any catch-up has written its row, Postgres never has the hold and Redis no longer
+    does, so catch-up finds nothing: POST /orders and DELETE /holds/{id} answer 404 HOLD_NOT_FOUND
+    instead of 410 HOLD_EXPIRED / 204. It needs a consumer that is minutes behind. (A buyer's release
+    can't cause it: the strategy's release persists the hold first.)
+  - (M2.2c-1) Release and sell call Redis while holding a Postgres row lock (a few ms). If Redis
+    stalls, that hold's row stays locked for up to the Redis command timeout (2 s); other holds are
+    not affected.
+  - (M2.2c-1) The retry rule finds the caller's hold through the first requested seat's key. That is
+    exact (every seat of a hold names it), but a hold pinned by a sale in progress is also returned
+    (200) while it is being converted, as the Postgres rule would.
   - Single Redis node assumed: the scripts build seat and user key names from a prefix instead of
     declaring every key, and there is one stream. Redis Cluster would need hash tags per event.
   - A hold id reused after its hold expired is not caught in Redis; the `holds` primary key catches

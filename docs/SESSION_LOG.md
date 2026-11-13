@@ -939,3 +939,44 @@ only the last round. `@ExpectInvariantViolations({O1, O5, O7})` assumed sell won
   CheckoutFailureTest, OpenApiSpecTest): 24 classes, 290 tests, 0 failures, BUILD SUCCESSFUL in 11m 56s.
 
 **Next**: M2.2c. **Open problems**: none new; confirm on the next CI run.
+
+## 2026-11-14 - M2.2c-1 Redis-first strategy, sell, catch-up, contract split (M2.2c split in two)
+
+**Changed**
+- Decisions (user): M2.2c split into M2.2c-1 (this) and M2.2c-2 (invariant 5, stuck-sweeper rule,
+  harness); sell = pin, Postgres sale, `sold.lua` (A1); catch-up = this hold only, through
+  `applyHeld`, also from cancel (B1); stuck-sweeper threshold 2 minutes everywhere (C1, for M2.2c-2);
+  the D-016 retry rule must work during consumer lag (fixed, not a known limit).
+- `RedisFirstInventoryStrategy`: hold in Redis only (`tryHold`; on NOT_LOADED load and run once more);
+  release and sell lock the `holds` row first and run their Lua script under that lock
+  (`HoldClosing.closeWith` / `sellWith` gates; the Postgres strategies keep their exact behaviour).
+- Sell in three steps: `pin.lua` (no TTL, member +inf) under the lock, the Postgres sale, then
+  `sold.lua` after the commit (`S:` markers, +inf, hold hash deleted). `release.lua` frees a pinned
+  hold whose time has run out (EXPIRED, no stream entry). No SOLD stream entry.
+- `RedisHoldWriter.expire` lock-first; epoch guard on the consumer's "close older holds" step;
+  reconciler R4 finishes a CONVERTED hold's sale instead of releasing it; test hooks for both epoch guards.
+- `RedisCatchUp` (public): persists one Redis-only hold; used by `HoldService` at checkout step 0 and
+  cancel (only when the row isn't found) and by the strategy; the REDIS_FIRST retry rule reads Redis.
+- Contract split: `InventoryStrategyContractTest` = behaviour contract for all three (10 tests);
+  `PostgresLockingContractTest` = 34 tests moved byte for byte (the plan's "34" was really 33, plus
+  `firstHoldLargerThanTheLimit…` moved on review); `RedisFirstInventoryStrategyTest` (18 own tests);
+  `DrainingStrategy` and `RedisFirstTestAccess` test helpers. HTTP: `OrderApiTest` REDIS_FIRST checkout
+  to PAID with tickets; `HoldApiTest` REDIS_FIRST retry (200) and cancel (204) during consumer lag.
+- D-022 "M2.2c-1" section drafted (sell failure table, catch-up, retry rule, known limits incl. 404
+  instead of 410 when a hold expires before it was ever persisted).
+
+**Verified**
+- Targeted run (CLAUDE.md rule): 26 classes, 355 tests, 0 failures, BUILD SUCCESSFUL in 15m 5s.
+- Both epoch-guard tests fail with their guard removed (2/2), pass with it.
+- Sell vs failed-checkout release, 100 rounds: 57 sold, 43 released, the two stores agreeing every round.
+- By the user: full suite with --rerun BUILD SUCCESSFUL in 14m 20s.
+
+**Next**: M2.2c-2 (invariant 5 through `inventory.api`, `I9` at 2 minutes, REDIS_FIRST harness,
+D-022 final). Plan and notes are under M2.2c-2 in PLAN.md.
+
+**Open problems**
+- Not run yet: the REDIS_FIRST harness and invariant 5 (M2.2c-2), so Redis vs Postgres consistency is
+  only checked by the targeted tests, not after every test.
+- Release and sell hold a Postgres row lock while calling Redis (up to the 2 s command timeout if
+  Redis stalls); D-022 known limit.
+- D-022 is a draft for you to rewrite in your own words.

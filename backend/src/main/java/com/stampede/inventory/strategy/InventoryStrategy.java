@@ -19,6 +19,10 @@ import java.util.UUID;
  *   <li><b>Lock order</b> (D-015): seats are locked in Postgres {@code seat_id} order; a release or a
  *       sell locks the hold row before its seats; the per-user allowance row is locked after the seats.</li>
  * </ul>
+ * Redis-first (M2.2c, D-022) keeps the same contract with one difference in timing: its {@link #hold}
+ * decides and answers in Redis (cap included, inside Lua), and the {@code holds} row, the HELD seats and
+ * the allowance reach Postgres shortly after, through the stream consumer. Its release and sell lock the
+ * hold row first like the others.
  */
 public interface InventoryStrategy {
 

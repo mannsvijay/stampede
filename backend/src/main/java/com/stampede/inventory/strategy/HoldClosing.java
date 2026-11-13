@@ -38,9 +38,56 @@ class HoldClosing {
         this.seats = seats;
     }
 
+    /**
+     * What a path decides once it holds the hold row lock and has seen the hold ACTIVE: close it, or
+     * leave it alone and answer something else. The Postgres strategies decide with the database clock;
+     * the Redis-first strategy runs its Lua script here, under the lock (M2.2c, D-022).
+     */
+    sealed interface CloseDecision {
+
+        /**
+         * Free the seats and close the hold with this reason.
+         *
+         * @param alreadyEnded the hold had already ended elsewhere (in Redis) and this only records it:
+         *                     the caller is answered {@link NotActive} with the status written, not
+         *                     {@link Released}
+         */
+        record Close(ReleaseReason reason, boolean alreadyEnded) implements CloseDecision {
+        }
+
+        /** Change nothing and answer this. */
+        record Keep(ReleaseOutcome answer) implements CloseDecision {
+        }
+    }
+
+    /** Decides a close, see {@link CloseDecision}. Called inside the transaction, with the hold row locked. */
+    @FunctionalInterface
+    interface CloseGate {
+        CloseDecision decide(LockedHold hold);
+    }
+
+    /**
+     * Decides a sale once the hold row is locked and ACTIVE: empty to go ahead, or the outcome to answer
+     * with nothing written. A gate that throws rolls the transaction back.
+     */
+    @FunctionalInterface
+    interface SellGate {
+        Optional<SellOutcome> check(LockedHold hold);
+    }
+
+    /** The locked, ACTIVE hold a gate decides about. {@code expired} is by the database clock. */
+    record LockedHold(UUID eventId, UUID holdId, UUID userId, List<UUID> seatIds, Instant expiresAt,
+                      boolean expired) {
+    }
+
     @Transactional
     ReleaseOutcome release(UUID eventId, UUID holdId, ReleaseReason reason) {
-        return close(eventId, holdId, reason, true);
+        // The sweeper decided "expired" before it had the lock. Check again now that we hold it: the
+        // hold may have been extended in between (PRD 6.3), and then it must not be expired. The
+        // comparison runs in SQL so the database clock decides, like everywhere else (D-015).
+        return close(eventId, holdId, hold -> reason == ReleaseReason.EXPIRED && !hold.expired()
+                ? new CloseDecision.Keep(new NotExpired(hold.expiresAt()))
+                : new CloseDecision.Close(reason, false));
     }
 
     /**
@@ -52,10 +99,20 @@ class HoldClosing {
      */
     @Transactional
     ReleaseOutcome closeAsRedisDecided(UUID eventId, UUID holdId, ReleaseReason reason) {
-        return close(eventId, holdId, reason, false);
+        return close(eventId, holdId, hold -> new CloseDecision.Close(reason, false));
     }
 
-    private ReleaseOutcome close(UUID eventId, UUID holdId, ReleaseReason reason, boolean databaseClockDecides) {
+    /**
+     * Release with the decision made by {@code gate} while the hold row is locked (Redis-first, M2.2c):
+     * the gate runs release.lua, so a sale and a release of the same hold take turns on this lock just
+     * as they do for the Postgres strategies, and compensation's answer stays definitive (D-017).
+     */
+    @Transactional
+    ReleaseOutcome closeWith(UUID eventId, UUID holdId, CloseGate gate) {
+        return close(eventId, holdId, gate);
+    }
+
+    private ReleaseOutcome close(UUID eventId, UUID holdId, CloseGate gate) {
         // Step 8: lock the hold row FIRST (lock order, D-015). A buyer's cancel and the expiry
         // sweeper for the same hold now take turns: the second one waits here, then sees the status
         // the first one wrote and returns NotActive.
@@ -66,12 +123,12 @@ class HoldClosing {
         if (!hold.get().status().equals("ACTIVE")) {
             return new NotActive(hold.get().status());
         }
-        // The sweeper decided "expired" before it had the lock. Check again now that we hold it: the
-        // hold may have been extended in between (PRD 6.3), and then it must not be expired. The
-        // comparison runs in SQL so the database clock decides, like everywhere else (D-015).
-        if (databaseClockDecides && reason == ReleaseReason.EXPIRED && !hold.get().expired()) {
-            return new NotExpired(hold.get().expiresAt());
+        CloseDecision decision = gate.decide(hold.get().locked(eventId, holdId));
+        if (decision instanceof CloseDecision.Keep keep) {
+            return keep.answer();
         }
+        CloseDecision.Close close = (CloseDecision.Close) decision;
+        ReleaseReason reason = close.reason();
 
         // Step 9: then its seats, in the same ORDER BY seat_id FOR UPDATE order as every hold path.
         List<EventSeat> locked = lockSeatsOfHold(eventId, holdId, hold.get().seatIds());
@@ -116,7 +173,7 @@ class HoldClosing {
                 .update();
 
         // Step 13
-        return new Released(freed);
+        return close.alreadyEnded() ? new NotActive(reason.holdStatus()) : new Released(freed);
     }
 
     /**
@@ -125,6 +182,24 @@ class HoldClosing {
      */
     @Transactional
     SellOutcome sell(UUID eventId, UUID holdId, UUID orderId) {
+        // An ACTIVE hold can be past its expiry: the sweeper runs every few seconds, so there is a
+        // window where the status hasn't caught up. Checking status alone would sell an expired hold.
+        // The database clock decides, as for every hold expiry (D-015).
+        return sell(eventId, holdId, orderId, hold -> hold.expired()
+                ? Optional.of(new SellOutcome.HoldExpired(hold.expiresAt()))
+                : Optional.empty());
+    }
+
+    /**
+     * Sell with the "may this hold still be sold?" decision made by {@code gate} while the hold row is
+     * locked (Redis-first, M2.2c: the gate pins the hold in Redis, and Redis' clock decides expiry).
+     */
+    @Transactional
+    SellOutcome sellWith(UUID eventId, UUID holdId, UUID orderId, SellGate gate) {
+        return sell(eventId, holdId, orderId, gate);
+    }
+
+    private SellOutcome sell(UUID eventId, UUID holdId, UUID orderId, SellGate gate) {
         // Step S1: lock the hold row first. A sell, a cancel and the expiry sweeper for the same hold
         // take turns here; whoever comes second sees the status the first one wrote.
         Optional<HoldRow> hold = lockHold(eventId, holdId);
@@ -134,11 +209,9 @@ class HoldClosing {
         if (!hold.get().status().equals("ACTIVE")) {
             return new SellOutcome.NotActive(hold.get().status());
         }
-        // An ACTIVE hold can be past its expiry: the sweeper runs every few seconds, so there is a
-        // window where the status hasn't caught up. Checking status alone would sell an expired hold.
-        // The database clock decides, as for every hold expiry (D-015).
-        if (hold.get().expired()) {
-            return new SellOutcome.HoldExpired(hold.get().expiresAt());
+        Optional<SellOutcome> refused = gate.check(hold.get().locked(eventId, holdId));
+        if (refused.isPresent()) {
+            return refused.get();
         }
 
         // Step S2: its seats, in seat_id order.
@@ -213,5 +286,8 @@ class HoldClosing {
     }
 
     private record HoldRow(UUID userId, String status, List<UUID> seatIds, Instant expiresAt, boolean expired) {
+        LockedHold locked(UUID eventId, UUID holdId) {
+            return new LockedHold(eventId, holdId, userId, seatIds, expiresAt, expired);
+        }
     }
 }

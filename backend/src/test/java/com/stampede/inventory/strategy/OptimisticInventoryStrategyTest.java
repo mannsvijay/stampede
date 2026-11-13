@@ -21,16 +21,17 @@ import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
 /**
- * The optimistic strategy (M2.1, D-021): the shared contract ({@link InventoryStrategyContractTest}),
- * plus its own mechanism: unlocked reads, version conflicts that roll back and retry, the retry limit,
- * the write order that keeps opposite requests from deadlocking, and the counters.
+ * The optimistic strategy (M2.1, D-021): the shared contract ({@link InventoryStrategyContractTest} and
+ * {@link PostgresLockingContractTest}), plus its own mechanism: unlocked reads, version conflicts that roll
+ * back and retry, the retry limit, the write order that keeps opposite requests from deadlocking, and the
+ * counters.
  * <p>
  * Each conflict test makes the race happen in a fixed order with a second connection (and, for the
  * deadlock test, a test-only trigger), never by timing. Seat order in Postgres for this fixture:
  * SEAT_1 (10...) < SEAT_3 (30...) < SEAT_4 (40...) < SEAT_2 (90...); Java's UUID.compareTo puts SEAT_2
  * first (D-015).
  */
-class OptimisticInventoryStrategyTest extends InventoryStrategyContractTest {
+class OptimisticInventoryStrategyTest extends PostgresLockingContractTest {
 
     @Autowired
     OptimisticInventoryStrategy optimistic;

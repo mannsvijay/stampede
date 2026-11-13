@@ -56,6 +56,8 @@ class RedisHoldWriter {
     private final RedisHoldStore store;
     private final RedisStreamMetrics metrics;
     private final TransactionTemplate transaction;
+    /** Test hook only: runs between "Redis doesn't have this hold" and the epoch comparison. */
+    private volatile Runnable beforeEpochCheck = () -> { };
 
     RedisHoldWriter(JdbcClient jdbc, SeatRows seats, HoldClosing closing, RedisHoldStore store,
                     RedisStreamMetrics metrics, PlatformTransactionManager transactions) {
@@ -153,22 +155,46 @@ class RedisHoldWriter {
         if (!store.isLoaded(eventId)) {
             return new ReleaseOutcome.NotExpired(expiresAt.get());
         }
-        ReleaseReason reason = expiresAt.get().toEpochMilli() <= store.nowMillis()
-                ? ReleaseReason.EXPIRED : ReleaseReason.RELEASED;
-        return closing.closeAsRedisDecided(eventId, holdId, reason);
+        return closing.closeAsRedisDecided(eventId, holdId, reasonForGoneHold(expiresAt.get()));
     }
 
     /**
-     * Expiry of a REDIS_FIRST hold, for the existing sweeper (through the M2.2c strategy's
+     * Expiry of a REDIS_FIRST hold, for the existing sweeper (through the strategy's
      * {@code release(…, EXPIRED)}). Redis' clock decides: a hold Redis still has is not expired.
+     * <p>
+     * <b>Lock first</b> (M2.2c): the hold row is locked before release.lua runs, like every Redis-first
+     * release and sale. That matters for a pinned hold (pin.lua): its hash has no TTL, so once its time
+     * has run out release.lua frees it; under the row lock that can only happen after the sale that
+     * pinned it has committed (then the row is CONVERTED and nothing happens) or rolled back.
      */
     ReleaseOutcome expire(UUID eventId, UUID holdId) {
-        return switch (store.release(eventId, holdId, ReleaseReason.EXPIRED)) {
-            case RedisHoldStore.Release.NotExpired notExpired -> new ReleaseOutcome.NotExpired(notExpired.expiresAt());
-            case RedisHoldStore.Release.Gone gone -> closeGone(eventId, holdId);
-            case RedisHoldStore.Release.Released released ->
-                    throw new IllegalStateException("release.lua released a hold for reason EXPIRED");
-        };
+        return closing.closeWith(eventId, holdId, hold -> {
+            // Read the load epoch before asking Redis: if Redis is wiped and reloaded between that read
+            // and the GONE below, "Redis doesn't have it" means nothing (the reload may have restored it).
+            Optional<String> epoch = store.loadEpoch(eventId);
+            if (epoch.isEmpty()) {
+                // Not loaded: Redis having nothing means nothing. The loader decides (D-022).
+                return new HoldClosing.CloseDecision.Keep(new ReleaseOutcome.NotExpired(hold.expiresAt()));
+            }
+            return switch (store.release(eventId, holdId, ReleaseReason.EXPIRED)) {
+                case RedisHoldStore.Release.NotExpired notExpired ->
+                        new HoldClosing.CloseDecision.Keep(new ReleaseOutcome.NotExpired(notExpired.expiresAt()));
+                // A pinned hold whose sale never finished, past its expiry.
+                case RedisHoldStore.Release.Released released ->
+                        new HoldClosing.CloseDecision.Close(ReleaseReason.EXPIRED, false);
+                case RedisHoldStore.Release.Gone gone -> !epoch.equals(store.loadEpoch(eventId))
+                        ? new HoldClosing.CloseDecision.Keep(new ReleaseOutcome.NotExpired(hold.expiresAt()))
+                        : new HoldClosing.CloseDecision.Close(reasonForGoneHold(hold.expiresAt()), false);
+            };
+        });
+    }
+
+    /**
+     * Why a hold Redis no longer has is over: EXPIRED if its time has run out by Redis' clock, otherwise
+     * RELEASED (released in Redis, and that entry isn't applied yet).
+     */
+    ReleaseReason reasonForGoneHold(Instant expiresAt) {
+        return expiresAt.toEpochMilli() <= store.nowMillis() ? ReleaseReason.EXPIRED : ReleaseReason.RELEASED;
     }
 
     // ---- the ACTIVE insert ----
@@ -241,8 +267,19 @@ class RedisHoldWriter {
         });
     }
 
-    /** Closes the holds blocking an insert that Redis no longer has, each in its own transaction. */
+    /**
+     * Closes the holds blocking an insert that Redis no longer has, each in its own transaction.
+     * <p>
+     * <b>Load-epoch guard</b> (M2.2c, the same as reconciler rule R2): the epoch is read before any Redis
+     * check and compared again before each close. If Redis was wiped and reloaded in between, a hold
+     * that looked absent may have just been restored, so this stops and closes nothing more; the retry
+     * then decides with Redis as it is now.
+     */
     private void closeHoldsRedisNoLongerHas(HoldFacts hold, Blocked blocked) {
+        Optional<String> epoch = store.loadEpoch(hold.eventId());
+        if (epoch.isEmpty()) {
+            return;   // not loaded: "Redis doesn't have it" means nothing (closeGone would refuse too)
+        }
         Set<UUID> candidates = new LinkedHashSet<>(blocked.heldBy());
         if (blocked.overCap()) {
             candidates.addAll(jdbc.sql("""
@@ -256,10 +293,22 @@ class RedisHoldWriter {
                     .list());
         }
         for (UUID other : candidates) {
-            if (store.liveHold(hold.eventId(), other).isEmpty()) {
-                closeGone(hold.eventId(), other);
+            if (store.liveHold(hold.eventId(), other).isPresent()) {
+                continue;
             }
+            beforeEpochCheck.run();
+            if (!epoch.equals(store.loadEpoch(hold.eventId()))) {
+                log.warn("Event {} was reloaded into Redis while persisting hold {}; not closing older holds",
+                        hold.eventId(), hold.holdId());
+                return;
+            }
+            closeGone(hold.eventId(), other);
         }
+    }
+
+    /** For tests: interleave a Redis wipe and reload at the one moment the epoch guard protects. */
+    void beforeEpochCheck(Runnable hook) {
+        this.beforeEpochCheck = hook;
     }
 
     /**

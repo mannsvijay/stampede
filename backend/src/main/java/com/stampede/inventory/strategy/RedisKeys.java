@@ -9,7 +9,8 @@ import java.util.UUID;
  * <pre>
  * p:ev:{event}:meta          hash    limit (per-user limit), seatCount; exists = "event loaded"
  * p:ev:{event}:seats         set     every seat id of the event
- * p:ev:{event}:seat:{seat}   string  H:{holdId}:{createdMs} while held (expires with the hold)
+ * p:ev:{event}:seat:{seat}   string  H:{holdId}:{createdMs} while held (expires with the hold; no
+ *                                    expiry while a sale pins it), S:{orderId}:{soldMs} once sold (never)
  * p:ev:{event}:hold:{hold}   hash    user, seats, n, createdMs, expiresMs (expires with its seats)
  * p:ev:{event}:user:{user}   zset    member {holdId}:{seat count}, score = expiry in ms
  * p:inv:stream               stream  HELD / RELEASED entries for the Postgres consumer (M2.2b)

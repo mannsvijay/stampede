@@ -6,10 +6,11 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 
 /**
- * The pessimistic strategy (M1.2, D-015) against the shared contract ({@link InventoryStrategyContractTest}).
+ * The pessimistic strategy (M1.2, D-015) against the shared contract ({@link InventoryStrategyContractTest}
+ * and {@link PostgresLockingContractTest}).
  * Every test there runs here too; the lock tests in it prove the {@code SELECT ... FOR UPDATE} order.
  */
-class PessimisticInventoryStrategyTest extends InventoryStrategyContractTest {
+class PessimisticInventoryStrategyTest extends PostgresLockingContractTest {
 
     @Autowired
     PessimisticInventoryStrategy pessimistic;

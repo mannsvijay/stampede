@@ -383,6 +383,119 @@ class RedisHoldStoreTest {
         assertThat(store.holderOf(EVENT_A, SEAT_2)).contains(intruder);
     }
 
+    // ---- a sale: pin.lua, then (after Postgres) sold.lua (M2.2c) ----
+
+    @Test
+    void pinStopsTheHoldExpiringAndCountsItsSeatsForGood() {
+        UUID holdId = UUID.randomUUID();
+        Held held = (Held) store.hold(new HoldRequest(holdId, EVENT_A, USER, List.of(SEAT_1, SEAT_2), Duration.ofSeconds(1)));
+        int entriesBefore = streamEntries().size();
+
+        assertThat(store.pin(EVENT_A, holdId)).isEqualTo(new RedisHoldStore.Pin.Pinned(held.expiresAt(), List.of(SEAT_1, SEAT_2)));
+
+        assertThat(expireTimeMillis(store.keys().hold(EVENT_A, holdId))).isEqualTo(-1);
+        assertThat(expireTimeMillis(store.keys().seat(EVENT_A, SEAT_1))).isEqualTo(-1);
+        assertThat(expireTimeMillis(store.keys().seat(EVENT_A, SEAT_2))).isEqualTo(-1);
+        assertThat(expireTimeMillis(store.keys().user(EVENT_A, USER))).isEqualTo(-1);
+        await().atMost(Duration.ofSeconds(5)).pollInterval(Duration.ofMillis(20))
+                .until(() -> redisTimeMillis() > held.expiresAt().toEpochMilli() + 50);
+        assertThat(store.liveHold(EVENT_A, holdId)).as("pinned: outlives its expiry").isPresent();
+        assertThat(store.holderOf(EVENT_A, SEAT_1)).contains(holdId);
+        assertThat(store.used(EVENT_A, USER)).as("+inf member").isEqualTo(2);
+        assertThat(streamEntries()).as("pinning writes no entry").hasSize(entriesBefore);
+    }
+
+    @Test
+    void pinOfAHoldRedisDoesNotHaveIsGone() {
+        assertThat(store.pin(EVENT_A, UUID.randomUUID())).isEqualTo(new RedisHoldStore.Pin.Gone());
+    }
+
+    @Test
+    void pinOfAPinnedHoldWhoseTimeRanOutIsExpired() {
+        // An earlier sale pinned it and never finished: its time has run out, so it must not be sold now.
+        UUID holdId = UUID.randomUUID();
+        Held held = (Held) store.hold(new HoldRequest(holdId, EVENT_A, USER, List.of(SEAT_1), Duration.ofSeconds(1)));
+        store.pin(EVENT_A, holdId);
+        await().atMost(Duration.ofSeconds(5)).pollInterval(Duration.ofMillis(20))
+                .until(() -> redisTimeMillis() > held.expiresAt().toEpochMilli() + 50);
+
+        assertThat(store.pin(EVENT_A, holdId)).isEqualTo(new RedisHoldStore.Pin.Expired(held.expiresAt()));
+    }
+
+    @Test
+    void finishSaleMarksTheSeatsSoldForeverAndDeletesTheHoldInOneStep() {
+        UUID holdId = UUID.randomUUID();
+        store.hold(request(holdId, USER, SEAT_1, SEAT_2));
+        store.pin(EVENT_A, holdId);
+        UUID orderId = UUID.randomUUID();
+        int entriesBefore = streamEntries().size();
+
+        assertThat(store.finishSale(EVENT_A, holdId, orderId)).isEqualTo(new RedisHoldStore.Finish.Sold(List.of()));
+
+        for (UUID seat : List.of(SEAT_1, SEAT_2)) {
+            assertThat(store.seatValue(EVENT_A, seat)).startsWith("S:" + orderId + ":");
+            assertThat(expireTimeMillis(store.keys().seat(EVENT_A, seat))).as("sold: no expiry").isEqualTo(-1);
+        }
+        assertThat(store.liveHold(EVENT_A, holdId)).as("hold hash deleted").isEmpty();
+        assertThat(store.hasSoldMember(EVENT_A, new RedisHoldStore.SoldMember(USER, holdId, 2))).isTrue();
+        assertThat(store.used(EVENT_A, USER)).isEqualTo(2);
+        assertThat(streamEntries()).hasSize(entriesBefore);
+        // A seat sold in Redis can't be held again.
+        assertThat(store.hold(request(UUID.randomUUID(), OTHER_USER, SEAT_2)))
+                .isInstanceOfSatisfying(HoldOutcome.Rejected.class,
+                        rejected -> assertThat(rejected.reason()).isEqualTo(HoldRejection.SEAT_TAKEN));
+        // Run again (reconciler rule R4 after a lost answer): nothing left to do.
+        assertThat(store.finishSale(EVENT_A, holdId, orderId)).isEqualTo(new RedisHoldStore.Finish.Gone());
+    }
+
+    @Test
+    void finishSaleOverwritesASeatKeyNamingAnotherHoldAndSaysWhichHold() {
+        UUID holdId = UUID.randomUUID();
+        store.hold(request(holdId, USER, SEAT_1, SEAT_2));
+        // Drift made by hand: SEAT_2's key names another hold. Postgres sold the seat, so Postgres wins.
+        UUID intruder = UUID.randomUUID();
+        redis.opsForValue().set(store.keys().seat(EVENT_A, SEAT_2), "H:" + intruder + ":1");
+        UUID orderId = UUID.randomUUID();
+
+        assertThat(store.finishSale(EVENT_A, holdId, orderId)).isEqualTo(new RedisHoldStore.Finish.Sold(List.of(intruder)));
+        assertThat(store.seatValue(EVENT_A, SEAT_2)).startsWith("S:" + orderId + ":");
+    }
+
+    @Test
+    void anExpiredReleaseFreesAPinnedHoldOnlyOnceItsTimeHasRunOut() {
+        // The process crashed between pin and the Postgres commit: the sweeper is what frees the hold.
+        UUID holdId = UUID.randomUUID();
+        Held held = (Held) store.hold(new HoldRequest(holdId, EVENT_A, USER, List.of(SEAT_1, SEAT_2), Duration.ofSeconds(1)));
+        store.pin(EVENT_A, holdId);
+        int entriesBefore = streamEntries().size();
+
+        assertThat(store.release(EVENT_A, holdId, ReleaseReason.EXPIRED)).isInstanceOf(Release.NotExpired.class);
+        await().atMost(Duration.ofSeconds(5)).pollInterval(Duration.ofMillis(20))
+                .until(() -> redisTimeMillis() > held.expiresAt().toEpochMilli() + 50);
+
+        assertThat(store.release(EVENT_A, holdId, ReleaseReason.EXPIRED))
+                .isEqualTo(new Release.Released(List.of(SEAT_1, SEAT_2)));
+        assertThat(store.holderOf(EVENT_A, SEAT_1)).isEmpty();
+        assertThat(store.holderOf(EVENT_A, SEAT_2)).isEmpty();
+        assertThat(store.used(EVENT_A, USER)).isZero();
+        assertThat(store.liveHold(EVENT_A, holdId)).isEmpty();
+        assertThat(streamEntries()).as("the sweeper closes Postgres itself: no entry").hasSize(entriesBefore);
+    }
+
+    @Test
+    void aFailedCheckoutsReleaseFreesAPinnedHoldAtOnce() {
+        UUID holdId = UUID.randomUUID();
+        store.hold(request(holdId, USER, SEAT_1));
+        store.pin(EVENT_A, holdId);
+        int entriesBefore = streamEntries().size();
+
+        assertThat(store.release(EVENT_A, holdId, ReleaseReason.SAGA_FAILED)).isEqualTo(new Release.Released(List.of(SEAT_1)));
+
+        assertThat(store.holderOf(EVENT_A, SEAT_1)).isEmpty();
+        assertThat(store.used(EVENT_A, USER)).as("the +inf member is removed too").isZero();
+        assertThat(streamEntries()).hasSize(entriesBefore + 1);
+    }
+
     // ---- expiry by TTL ----
 
     @Test

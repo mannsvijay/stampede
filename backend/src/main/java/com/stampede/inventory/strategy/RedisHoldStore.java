@@ -26,9 +26,8 @@ import org.springframework.stereotype.Component;
  * writes that follow can't be interleaved with another buyer's. Expiry needs no code at all: every
  * key of a hold carries the same expiry time and Redis deletes them.
  * <p>
- * This class only talks to Redis. It is not an {@link InventoryStrategy} yet: holds reach Postgres
- * through the stream consumer ({@link RedisStreamConsumer}, M2.2b), and the strategy bean (with sell)
- * is M2.2c. Until then no event can use it.
+ * This class only talks to Redis. {@link RedisFirstInventoryStrategy} (M2.2c) uses it for every hold,
+ * release and sale; holds reach Postgres through the stream consumer ({@link RedisStreamConsumer}).
  */
 @Component
 class RedisHoldStore {
@@ -38,6 +37,8 @@ class RedisHoldStore {
     private final RedisScript<List> holdScript = script("redis/hold.lua");
     private final RedisScript<List> releaseScript = script("redis/release.lua");
     private final RedisScript<List> loadScript = script("redis/load.lua");
+    private final RedisScript<List> pinScript = script("redis/pin.lua");
+    private final RedisScript<List> soldScript = script("redis/sold.lua");
 
     RedisHoldStore(StringRedisTemplate redis, RedisInventoryProperties properties) {
         this.redis = redis;
@@ -86,6 +87,17 @@ class RedisHoldStore {
      * @throws IllegalStateException if the event was not loaded, or the hold id is already live
      */
     HoldOutcome hold(HoldRequest request) {
+        return tryHold(request).orElseThrow(
+                () -> new IllegalStateException("Event " + request.eventId() + " is not loaded into Redis"));
+    }
+
+    /**
+     * Like {@link #hold}, but empty when the event is not loaded into Redis ({@code NOT_LOADED}), so the
+     * strategy can load it and try again (M2.2c).
+     *
+     * @throws IllegalStateException if the hold id is already live
+     */
+    Optional<HoldOutcome> tryHold(HoldRequest request) {
         UUID eventId = request.eventId();
         List<String> scriptKeys = List.of(
                 keys.meta(eventId),
@@ -103,16 +115,80 @@ class RedisHoldStore {
 
         List<String> reply = run(holdScript, scriptKeys, args);
         return switch (reply.get(0)) {
-            case "HELD" -> new HoldOutcome.Held(request.holdId(), request.seatIds(),
-                    Instant.ofEpochMilli(Long.parseLong(reply.get(1))));
-            case "UNKNOWN_SEAT" -> new HoldOutcome.Rejected(HoldRejection.UNKNOWN_SEAT, uuids(reply, 1));
-            case "SEAT_TAKEN" -> new HoldOutcome.Rejected(HoldRejection.SEAT_TAKEN, uuids(reply, 2),
-                    Long.parseLong(reply.get(1)));
-            case "LIMIT_EXCEEDED" -> new HoldOutcome.Rejected(HoldRejection.LIMIT_EXCEEDED, request.seatIds());
-            case "NOT_LOADED" -> throw new IllegalStateException("Event " + eventId + " is not loaded into Redis");
+            case "HELD" -> Optional.of(new HoldOutcome.Held(request.holdId(), request.seatIds(),
+                    Instant.ofEpochMilli(Long.parseLong(reply.get(1)))));
+            case "UNKNOWN_SEAT" -> Optional.of(new HoldOutcome.Rejected(HoldRejection.UNKNOWN_SEAT, uuids(reply, 1)));
+            case "SEAT_TAKEN" -> Optional.of(new HoldOutcome.Rejected(HoldRejection.SEAT_TAKEN, uuids(reply, 2),
+                    Long.parseLong(reply.get(1))));
+            case "LIMIT_EXCEEDED" -> Optional.of(
+                    new HoldOutcome.Rejected(HoldRejection.LIMIT_EXCEEDED, request.seatIds()));
+            case "NOT_LOADED" -> Optional.empty();
             case "DUPLICATE_HOLD" -> throw new IllegalStateException("Hold id " + request.holdId()
                     + " is already live in Redis; every attempt needs a new id (D-015)");
             default -> throw new IllegalStateException("Unexpected reply from hold.lua: " + reply);
+        };
+    }
+
+    /** The result of {@link #pin}. */
+    sealed interface Pin {
+
+        /** The hold no longer expires in Redis until sold.lua or release.lua ends it. */
+        record Pinned(Instant expiresAt, List<UUID> seatIds) implements Pin {
+        }
+
+        /** The hash is still there (pinned by an earlier sale that never finished) but its time ran out. */
+        record Expired(Instant expiresAt) implements Pin {
+        }
+
+        /** Redis has no such hold: it expired, was released, or never existed. */
+        record Gone() implements Pin {
+        }
+    }
+
+    /**
+     * Step 1 of a sale ({@code redis/pin.lua}): stops a live hold from expiring while Postgres records
+     * the sale, and counts its seats in the user's cap for good (+inf). The caller holds the hold's
+     * Postgres row lock (M2.2c).
+     */
+    Pin pin(UUID eventId, UUID holdId) {
+        List<String> reply = run(pinScript, List.of(keys.hold(eventId, holdId)),
+                List.of(keys.seatPrefix(eventId), keys.userPrefix(eventId), holdId.toString()));
+        return switch (reply.get(0)) {
+            case "PINNED" -> new Pin.Pinned(Instant.ofEpochMilli(Long.parseLong(reply.get(1))), uuids(reply, 2));
+            case "EXPIRED" -> new Pin.Expired(Instant.ofEpochMilli(Long.parseLong(reply.get(1))));
+            case "GONE" -> new Pin.Gone();
+            default -> throw new IllegalStateException("Unexpected reply from pin.lua: " + reply);
+        };
+    }
+
+    /** The result of {@link #finishSale}. */
+    sealed interface Finish {
+
+        /**
+         * The seats are {@code S:} markers, the cap counts them forever and the hold hash is gone.
+         *
+         * @param overwrittenHolds other holds whose seat keys named a seat Postgres has sold to this order
+         */
+        record Sold(List<UUID> overwrittenHolds) implements Finish {
+        }
+
+        /** No hold hash: nothing to finish (an earlier run, or reconciler rule R3, did it). */
+        record Gone() implements Finish {
+        }
+    }
+
+    /**
+     * Step 3 of a sale ({@code redis/sold.lua}), only after Postgres committed it: marks the hold's seats
+     * {@code S:<orderId>:<ms>} with no expiry, sets the user's member to +inf and deletes the hold hash,
+     * in one script (M2.2c).
+     */
+    Finish finishSale(UUID eventId, UUID holdId, UUID orderId) {
+        List<String> reply = run(soldScript, List.of(keys.hold(eventId, holdId)),
+                List.of(keys.seatPrefix(eventId), keys.userPrefix(eventId), holdId.toString(), orderId.toString()));
+        return switch (reply.get(0)) {
+            case "SOLD" -> new Finish.Sold(uuids(reply, 2));
+            case "GONE" -> new Finish.Gone();
+            default -> throw new IllegalStateException("Unexpected reply from sold.lua: " + reply);
         };
     }
 

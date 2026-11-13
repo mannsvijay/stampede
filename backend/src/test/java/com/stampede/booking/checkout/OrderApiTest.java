@@ -2,12 +2,15 @@ package com.stampede.booking.checkout;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.stampede.inventory.strategy.RedisFirstTestAccess;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.ApplicationContext;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpMethod;
 
@@ -17,6 +20,9 @@ import org.springframework.http.HttpMethod;
  * CheckoutFailureTest, races in OrderConcurrencyTest.
  */
 class OrderApiTest extends CheckoutTestSupport {
+
+    @Autowired
+    ApplicationContext context;
 
     @AfterEach
     void invariantsHold() {
@@ -57,6 +63,47 @@ class OrderApiTest extends CheckoutTestSupport {
         assertThat(paymentStatuses(orderId)).containsExactly("SUCCEEDED");
         assertThat(used(aliceId)).as("bought seats keep counting (D-016)").isEqualTo(2);
         assertThat(count("SELECT count(*) FROM order_items WHERE order_id = ? AND active", orderId)).isEqualTo(2);
+    }
+
+    @Test
+    void aRedisFirstHoldChecksOutToPaidWithTicketsBeforeTheConsumerHasPersistedIt() {
+        // M2.2c. The stream consumer doesn't run in tests, so the hold exists in Redis only when
+        // POST /orders arrives: step 0's catch-up has to persist it, and the sale has to reach both stores.
+        jdbc.sql("UPDATE events SET strategy = 'REDIS_FIRST' WHERE id = ?").param(event).update();
+        try {
+            UUID gold = seats.get(0);
+            UUID silver = seats.get(1);
+            UUID holdId = hold(alice, gold, silver);
+            assertThat(count("SELECT count(*) FROM holds WHERE id = ?", holdId)).as("not in Postgres yet").isZero();
+
+            Response response = postOrder(alice, holdId);
+
+            assertThat(response.status()).as(response.body().toString()).isEqualTo(201);
+            UUID orderId = orderId(response);
+            assertThat(response.body().path("status").asText()).isEqualTo("PAID");
+            assertThat(response.body().path("totalPaise").asLong()).isEqualTo(GOLD_PAISE + SILVER_PAISE);
+            // Postgres: sold, converted, paid, tickets issued.
+            assertThat(seatStatus(gold)).isEqualTo("SOLD");
+            assertThat(seatStatus(silver)).isEqualTo("SOLD");
+            assertThat(seatOrder(gold)).isEqualTo(orderId);
+            assertThat(holdStatus(holdId)).isEqualTo("CONVERTED");
+            assertThat(paymentStatuses(orderId)).containsExactly("SUCCEEDED");
+            assertThat(used(aliceId)).as("bought seats keep counting (D-016)").isEqualTo(2);
+            assertThat(ticketsOfOrder(orderId)).isEqualTo(2);
+            assertThat(sagaState(orderId)).isEqualTo("TICKETS_ISSUED");
+            // Redis: the seats are sold for good, the hold is gone, the cap counts the seats forever.
+            assertThat(RedisFirstTestAccess.seatValue(context, event, gold)).startsWith("S:" + orderId + ":");
+            assertThat(RedisFirstTestAccess.seatValue(context, event, silver)).startsWith("S:" + orderId + ":");
+            assertThat(RedisFirstTestAccess.holdExists(context, event, holdId)).isFalse();
+            assertThat(RedisFirstTestAccess.boughtSeatsCounted(context, event, aliceId, holdId, 2)).isTrue();
+            // And another buyer can't hold a sold seat.
+            Response taken = exchange(HttpMethod.POST, "/events/" + event + "/holds",
+                    new HttpEntity<>(Map.of("seatIds", List.of(gold)), jsonHeaders(bob)));
+            assertThat(taken.status()).isEqualTo(409);
+            assertThat(taken.code()).isEqualTo("SEAT_TAKEN");
+        } finally {
+            RedisFirstTestAccess.deleteEventKeys(context, event);
+        }
     }
 
     @Test

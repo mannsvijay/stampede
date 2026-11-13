@@ -23,8 +23,8 @@ public class InventoryStrategies {
     }
 
     /**
-     * The strategy for {@code events.strategy}. An event naming a strategy that isn't built yet
-     * (REDIS_FIRST until M2.2) is a configuration bug, so this throws.
+     * The strategy for {@code events.strategy}. All three are built (REDIS_FIRST since M2.2c); a kind
+     * with no bean (a context that doesn't load one) is a configuration bug, so this throws.
      */
     public InventoryStrategy forKind(String eventStrategy) {
         StrategyKind kind = StrategyKind.valueOf(eventStrategy);

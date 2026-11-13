@@ -4,6 +4,8 @@ import com.stampede.inventory.api.HoldResult.HoldView;
 import com.stampede.inventory.strategy.HoldOutcome;
 import com.stampede.inventory.strategy.HoldRequest;
 import com.stampede.inventory.strategy.InventoryStrategies;
+import com.stampede.inventory.strategy.RedisCatchUp;
+import com.stampede.inventory.strategy.StrategyKind;
 import com.stampede.inventory.strategy.ReleaseOutcome;
 import com.stampede.inventory.strategy.ReleaseReason;
 import com.stampede.inventory.strategy.SellOutcome;
@@ -36,10 +38,12 @@ public class HoldService {
 
     private final JdbcClient jdbc;
     private final InventoryStrategies strategies;
+    private final RedisCatchUp redisCatchUp;
 
-    HoldService(JdbcClient jdbc, InventoryStrategies strategies) {
+    HoldService(JdbcClient jdbc, InventoryStrategies strategies, RedisCatchUp redisCatchUp) {
         this.jdbc = jdbc;
         this.strategies = strategies;
+        this.redisCatchUp = redisCatchUp;
     }
 
     /**
@@ -78,7 +82,7 @@ public class HoldService {
                     new HoldView(held.holdId(), eventId, held.seatIds(), held.expiresAt()));
             case HoldOutcome.Rejected rejected -> switch (rejected.reason()) {
                 case UNKNOWN_SEAT -> new HoldResult.UnknownSeats(rejected.seatIds());
-                case SEAT_TAKEN -> existingHoldOnExactly(userId, eventId, seatIds)
+                case SEAT_TAKEN -> existingHoldOnExactly(userId, eventId, seatIds, event.get().strategy())
                         .<HoldResult>map(HoldResult.Existing::new)
                         .orElseGet(() -> new HoldResult.SeatTaken(rejected.seatIds(), rejected.takenAgoMs()));
                 // No existing-hold check here: a lost race means the strategy's last read showed
@@ -96,7 +100,7 @@ public class HoldService {
     public CancelResult cancel(UUID userId, UUID holdId) {
         // Ownership first. Not locked: user_id and event_id never change after insert, so this read
         // can't go stale; the status, which can, is re-checked by the strategy under the hold lock.
-        Optional<HoldOwner> owner = owner(holdId);
+        Optional<HoldOwner> owner = ownerCaughtUp(holdId);
         if (owner.isEmpty() || !owner.get().userId().equals(userId)) {
             return new CancelResult.NotFound();
         }
@@ -126,15 +130,13 @@ public class HoldService {
      * The prices can't go stale: a seat's tier and a tier's price never change after seeding.
      */
     public CheckoutHold checkoutHold(UUID userId, UUID holdId) {
-        Optional<CheckoutRow> hold = jdbc.sql("""
-                        SELECT user_id, event_id, status, expires_at, expires_at <= now() AS expired
-                        FROM holds WHERE id = ?
-                        """)
-                .param(holdId)
-                .query((rs, n) -> new CheckoutRow(rs.getObject("user_id", UUID.class),
-                        rs.getObject("event_id", UUID.class), rs.getString("status"),
-                        rs.getObject("expires_at", OffsetDateTime.class).toInstant(), rs.getBoolean("expired")))
-                .optional();
+        Optional<CheckoutRow> hold = checkoutRow(holdId);
+        if (hold.isEmpty()) {
+            // A REDIS_FIRST hold may not have reached Postgres yet (consumer lag): persist it from Redis
+            // and read again (M2.2c). Costs nothing on the normal path, where the row is found at once.
+            redisCatchUp.catchUp(holdId);
+            hold = checkoutRow(holdId);
+        }
         if (hold.isEmpty() || !hold.get().userId().equals(userId)) {
             return new CheckoutHold.NotFound();
         }
@@ -146,6 +148,18 @@ public class HoldService {
             return new CheckoutHold.Expired();
         }
         return new CheckoutHold.Orderable(holdId, row.eventId(), seats(holdId), row.expiresAt());
+    }
+
+    private Optional<CheckoutRow> checkoutRow(UUID holdId) {
+        return jdbc.sql("""
+                        SELECT user_id, event_id, status, expires_at, expires_at <= now() AS expired
+                        FROM holds WHERE id = ?
+                        """)
+                .param(holdId)
+                .query((rs, n) -> new CheckoutRow(rs.getObject("user_id", UUID.class),
+                        rs.getObject("event_id", UUID.class), rs.getString("status"),
+                        rs.getObject("expires_at", OffsetDateTime.class).toInstant(), rs.getBoolean("expired")))
+                .optional();
     }
 
     /**
@@ -192,6 +206,16 @@ public class HoldService {
         };
     }
 
+    /** {@link #owner}, after persisting a REDIS_FIRST hold that only Redis has so far (consumer lag, M2.2c). */
+    private Optional<HoldOwner> ownerCaughtUp(UUID holdId) {
+        Optional<HoldOwner> owner = owner(holdId);
+        if (owner.isPresent()) {
+            return owner;
+        }
+        redisCatchUp.catchUp(holdId);
+        return owner(holdId);
+    }
+
     /** The hold's event and that event's strategy. user_id and event_id never change after insert. */
     private Optional<HoldOwner> owner(UUID holdId) {
         return jdbc.sql("""
@@ -206,9 +230,22 @@ public class HoldService {
     }
 
     /**
-     * The caller's ACTIVE, unexpired hold covering exactly these seats, if any (D-016's retry rule).
-     * Runs after the strategy's transaction, unlocked: if the hold ends in between, the caller gets
-     * SEAT_TAKEN, which is still true for whoever holds the seats now.
+     * The caller's live hold covering exactly these seats, if any (D-016's retry rule), by the store that
+     * decides holds for this strategy. For REDIS_FIRST that is Redis (M2.2c): Postgres may not have the
+     * hold yet (consumer lag), or may still show one Redis has already expired.
+     */
+    private Optional<HoldView> existingHoldOnExactly(UUID userId, UUID eventId, List<UUID> seatIds, String strategy) {
+        if (strategy.equals(StrategyKind.REDIS_FIRST.name())) {
+            return redisCatchUp.ownLiveHoldOnExactly(eventId, userId, seatIds)
+                    .map(own -> new HoldView(own.holdId(), eventId, own.seatIds(), own.expiresAt()));
+        }
+        return existingHoldOnExactly(userId, eventId, seatIds);
+    }
+
+    /**
+     * The caller's ACTIVE, unexpired hold covering exactly these seats in Postgres, if any (D-016's retry
+     * rule). Runs after the strategy's transaction, unlocked: if the hold ends in between, the caller
+     * gets SEAT_TAKEN, which is still true for whoever holds the seats now.
      */
     private Optional<HoldView> existingHoldOnExactly(UUID userId, UUID eventId, List<UUID> seatIds) {
         // @> and <@ are array containment: both together mean the same set of seats, in any order.

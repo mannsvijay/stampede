@@ -33,7 +33,8 @@ import org.springframework.stereotype.Component;
  *       the marker (and release in Redis any hold the key named); a bought order not counted in the
  *       buyer's Redis cap: add its {@code +inf} member.</li>
  *   <li><b>R4 release in Redis:</b> a Redis hold whose Postgres row exists but isn't ACTIVE: release it
- *       in Redis.</li>
+ *       in Redis. If the row is CONVERTED, the sale committed and only its last Redis step (sold.lua)
+ *       is missing, so the sale is finished in Redis instead (M2.2c; counted with the sold markers).</li>
  * </ul>
  * <b>Not racing the consumer.</b> Every rule goes through the same idempotent, lock-ordered writer
  * methods as the consumer, so if both do the same work the second is a no-op. R1's minimum age leaves
@@ -52,6 +53,8 @@ class RedisReconciler {
     private final RedisEventLoader loader;
     private final RedisStreamMetrics metrics;
     private final long minAgeMillis;
+    /** Test hook only: runs in R2 between "Redis doesn't have this hold" and the epoch comparison. */
+    private volatile Runnable beforeEpochCheck = () -> { };
 
     RedisReconciler(JdbcClient jdbc, RedisHoldStore store, RedisHoldWriter writer, RedisEventLoader loader,
                     RedisStreamMetrics metrics, RedisInventoryProperties properties) {
@@ -128,6 +131,16 @@ class RedisReconciler {
                         metrics.repair("R1_roll_forward");
                     }
                 }
+            } else if (status.equals("CONVERTED")) {
+                // R4, sold: Postgres committed the sale but sold.lua never ran (the hold is still
+                // pinned in Redis). Finish the sale in Redis; releasing it would free sold seats there.
+                Optional<UUID> orderId = orderOfConvertedHold(holdId);
+                if (orderId.isPresent()
+                        && store.finishSale(eventId, holdId, orderId.get()) instanceof RedisHoldStore.Finish.Sold sold) {
+                    sold.overwrittenHolds().forEach(other -> store.release(eventId, other, ReleaseReason.RELEASED));
+                    counter.soldMarkers++;
+                    metrics.repair("R4_finish_sale");
+                }
             } else if (!status.equals("ACTIVE")) {
                 // R4: Postgres has closed it; Postgres wins.
                 if (store.release(eventId, holdId, ReleaseReason.RELEASED) instanceof RedisHoldStore.Release.Released) {
@@ -142,6 +155,7 @@ class RedisReconciler {
             if (store.liveHold(eventId, holdId).isPresent()) {
                 continue;
             }
+            beforeEpochCheck.run();
             if (!epoch.equals(store.loadEpoch(eventId))) {
                 log.warn("Event {} was reloaded into Redis during reconciliation; stopping this pass", eventId);
                 return counter.repairs();
@@ -189,6 +203,26 @@ class RedisReconciler {
         Repairs repairs() {
             return new Repairs(loaded, rolledForward, closed, soldMarkers, soldMembers, releasedInRedis, 0);
         }
+    }
+
+    /** For tests: interleave a Redis wipe and reload at the one moment R2's epoch guard protects. */
+    void beforeEpochCheck(Runnable hook) {
+        this.beforeEpochCheck = hook;
+    }
+
+    /**
+     * The order a CONVERTED hold was sold to. A sold seat points to its order, not its hold (D-014), so
+     * this goes through the seats the hold lists.
+     */
+    private Optional<UUID> orderOfConvertedHold(UUID holdId) {
+        return jdbc.sql("""
+                        SELECT DISTINCT es.order_id
+                        FROM holds h JOIN event_seats es ON es.event_id = h.event_id AND es.seat_id = ANY (h.seat_ids)
+                        WHERE h.id = :holdId AND es.status = 'SOLD'
+                        """)
+                .param("holdId", holdId)
+                .query(UUID.class)
+                .optional();
     }
 
     private Map<UUID, String> statuses(List<UUID> holdIds) {
