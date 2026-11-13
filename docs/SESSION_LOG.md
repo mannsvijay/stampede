@@ -867,3 +867,49 @@ sweeper, reconciler, explicit AOF flags in compose). Notes are under M2.2b and M
 - Single Redis node assumed by the scripts (D-022 known limits).
 - D-022, D-021 and D-020 are drafts for you to rewrite in your own words.
 - `compileJava` "unchecked or unsafe operations" note for `OpenApiConfig`: still not checked.
+
+## 2026-11-13 - M2.2b Redis persistence and reconciler (second of three M2.2 sub-tasks)
+
+**Changed**
+- Decisions (user): a consumer on every instance (one group, unique names); a dead-letter stream after
+  5 non-transient failures, with the reconciler repairing the state; reconciler every 30 s; a cap
+  disagreement is a Postgres-wins conflict; `release.lua`'s RELEASED entry gains `createdMs` and
+  `expiresMs` (fields and assertions only added).
+- `RedisEventLoader` + `redis/load.lua`: loads an event from one REPEATABLE READ snapshot in one
+  atomic script, `meta` (with a `loadedMs` epoch) last, and writes nothing if the event is loaded.
+- `RedisStreamConsumer` + `RedisConsumerLifecycle`: XREADGROUP with BLOCK 1 s, XACK after commit,
+  XPENDING + XCLAIM of idle entries, dead letters, XTRIM MINID, group recreated after NOGROUP.
+- `RedisHoldWriter`: idempotent apply with the `holds` row as the gate (ON CONFLICT DO NOTHING,
+  tombstones for holds already over in Redis), D-015 lock order, closing older Redis-gone holds in
+  their own transactions, Postgres wins otherwise; `expire()` for the M2.2c strategy.
+- `RedisReconciler` + schedule: rules R0 load, R1 roll forward, R2 close (epoch-guarded), R3 SOLD
+  markers and cap members, R4 release in Redis.
+- `HoldClosing.closeAsRedisDecided`, `SeatRows.addToAllowance(event, user, count)`, `RedisHoldStore`
+  load/epoch/time/scan/sold-marker methods, `RedisKeys` group and dead-letter keys, nested consumer
+  and reconciler properties (off in tests), lag/age gauges and counters, compose `appendfsync
+  everysec` + `maxmemory-policy noeviction`.
+- CLAUDE.md and memory: a targeted run needs only one test class per distinct application context.
+- D-022 M2.2b section drafted. Committed mid-task by the user (3aab3dd..ee96417); this session-end
+  commit completes them.
+
+**Verified**
+- Tests: `RedisStreamConsumerTest` (11), `RedisHoldWriterTest` (10), `RedisReconcilerTest` (8),
+  `RedisEventLoaderTest` (4), `RedisPersistenceConcurrencyTest` (100 rounds; reached 1,224 duplicate
+  HELD, 1,165 tombstoned HELD, 2,263 duplicate RELEASED, 155 R2 closes, zero conflicts).
+- Targeted run: 281 tests, 6 failed, all `HoldExpirySweeperTest` at context load (its scan of
+  `inventory.strategy` found a second `meterRegistry` bean in the new test base). Fixed in the new
+  base only (reuses `StrategyTestConfig`); rerun of the sweeper test, `Redis*Test`,
+  `*InventoryStrategyTest`, ModularityTest: BUILD SUCCESSFUL in 4m 48s.
+- Bug found while testing: after NOGROUP, `pollOnce` recreated the group without reading; now reads.
+- By the user: full suite with --rerun BUILD SUCCESSFUL in 15m 28s.
+
+**Next**: M2.2c (strategy bean, sell, invariant 5 and the stuck-sweeper rule, contract tests,
+harness). Notes are under M2.2c in PLAN.md.
+
+**Open problems**
+- The consumer's pre-close step checks "loaded", not the load epoch; the R2 epoch guard has no test.
+  Both are M2.2c notes and D-022 known limits.
+- `sell` (M2.2c) must delete the Redis hold hash in its script, or R4 un-counts bought seats.
+- A released-but-unapplied hold closed after its expiry is recorded EXPIRED; a reused hold id is only
+  logged (D-022 known limits).
+- D-022 is a draft for you to rewrite in your own words.

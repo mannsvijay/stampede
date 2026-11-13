@@ -419,7 +419,7 @@ end against the compose stack, and every concurrency harness scenario passed 100
         tests: BUILD SUCCESSFUL in 7m 40s.
         Verified by the user: full suite with --rerun BUILD SUCCESSFUL in 13m 11s after the fix;
         `RedisHoldStoreConcurrencyTest` at 1000 rounds BUILD SUCCESSFUL in 5m 47s.
-  - [ ] M2.2b Persistence and reconciler: event loader (Postgres -> Redis: seats, limit, SOLD markers,
+  - [x] M2.2b Persistence and reconciler: event loader (Postgres -> Redis: seats, limit, SOLD markers,
         unexpired ACTIVE holds; also the answer to `NOT_LOADED` after a Redis restart), stream consumer
         (consumer group, at-least-once, idempotent on the `holds` primary key) that applies HELD and
         RELEASED to Postgres through `EventSeat` in the D-015 lock order with `created_at`/`expires_at`
@@ -430,7 +430,7 @@ end against the compose stack, and every concurrency harness scenario passed 100
         means that hold expired in Redis; close it as EXPIRED first, in its own transaction.
         Note (from M2.2a): `RedisHoldStore.loadEvent` only adds seats (SADD) and writes `meta` last;
         the real loader must also be safe to run while holds are being taken.
-        Implemented 2026-11-13 (D-022 M2.2b; not committed): `RedisEventLoader` + `load.lua`,
+        Done 2026-11-13 (D-022 M2.2b; commits 3aab3dd..ee96417 plus the session-end commit): `RedisEventLoader` + `load.lua`,
         `RedisStreamConsumer` + `RedisConsumerLifecycle`, `RedisHoldWriter`, `RedisReconciler` +
         schedule, `RedisStreamMetrics`; `HoldClosing.closeAsRedisDecided`; `release.lua` entry gains
         `createdMs`/`expiresMs`; compose AOF/noeviction flags. Decisions: consumer on every instance,
@@ -441,7 +441,8 @@ end against the compose stack, and every concurrency harness scenario passed 100
         one fix. The first run broke `HoldExpirySweeperTest` (it scans `inventory.strategy` test
         classes too and found a second `meterRegistry` bean from the new test base); the base now
         reuses `StrategyTestConfig`. Rerun of the sweeper test, every `Redis*Test`,
-        `*InventoryStrategyTest` and ModularityTest: BUILD SUCCESSFUL in 4m 48s. Full suite: the user.
+        `*InventoryStrategyTest` and ModularityTest: BUILD SUCCESSFUL in 4m 48s.
+        Verified by the user: full suite with --rerun BUILD SUCCESSFUL in 15m 28s.
   - [ ] M2.2c Strategy, sell, invariants, harness: `RedisFirstInventoryStrategy` (hold, release, sell;
         `HoldMetrics` like the other two), catch-up of pending stream entries before checkout step 0
         and step 3, `sell` marks seats `S:<orderId>:<ms>` without a TTL and the user member `+inf`
@@ -472,6 +473,13 @@ end against the compose stack, and every concurrency harness scenario passed 100
         `+inf` AND delete the hold hash, in one script. If the hash survives, reconciler rule R4 sees a
         Redis hold whose Postgres row is CONVERTED and calls release.lua, which keeps the `S:` keys but
         ZREMs the `<holdId>:<n>` member and so un-counts bought seats from the cap.
+        Note (from M2.2b): give the consumer's "close older holds Redis no longer has" step
+        (`RedisHoldWriter.closeHoldsRedisNoLongerHas` / `closeGone`) the same load-epoch check as
+        reconciler rule R2, not only "is the event loaded": read the epoch before the Redis checks
+        and skip the close if it changed. Listed under D-022's known limits until done.
+        Note (from M2.2b): add a test for R2's epoch guard (a reload during a pass stops the pass and
+        closes nothing), with a test hook in `RedisReconciler` if the interleaving needs one. Listed
+        under D-022's known limits until done.
         Note (from M2.2b): invariant 5 can read `stampede.inventory.redis.stream.oldest.age` (or
         `RedisStreamConsumer.refreshLag`) for its 2 s window; tests drain with `pollOnce` +
         `reclaimOnce` (see `RedisPersistenceTestSupport.drain`).

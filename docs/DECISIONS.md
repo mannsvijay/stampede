@@ -1301,7 +1301,8 @@ Write these yourself, in your own words. Each one is an interview answer you've 
     no-op; logged at ERROR. The load script grows with the event (about 150 KB of arguments for
     2,000 seats) and blocks Redis while it runs. A Redis wipe between the `isLoaded` check and a
     close in the consumer's pre-close step could close a hold the reload would have restored
-    (R2 guards with the epoch; this path doesn't). The R2 epoch guard is not exercised by a test.
+    (R2 guards with the epoch; this path doesn't yet: M2.2c note). The R2 epoch guard is not
+    exercised by a test yet (M2.2c note).
   - Single Redis node assumed: the scripts build seat and user key names from a prefix instead of
     declaring every key, and there is one stream. Redis Cluster would need hash tags per event.
   - A hold id reused after its hold expired is not caught in Redis; the `holds` primary key catches
