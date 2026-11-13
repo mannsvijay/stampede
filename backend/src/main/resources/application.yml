@@ -87,6 +87,27 @@ stampede:
       # First part of every inventory key in Redis (D-022). Applications or test contexts that share
       # one Redis server need different prefixes. Lowercase letters, digits and '_'.
       key-prefix: stampede
+      consumer:
+        # Applies the inventory stream (HELD/RELEASED) to Postgres (D-022). Every instance runs one
+        # consumer in the group "inventory-persister", under its own name.
+        enabled: true
+        # This instance's name in the group; empty = the host name. Must be unique per running instance.
+        name: ""
+        # Longest wait of one read for new entries. Below the 2 s Redis command timeout above.
+        block: 1s
+        batch-size: 100
+        # An entry unacknowledged this long (crashed consumer, failed apply) is taken over and retried.
+        claim-min-idle: 30s
+        # After this many deliveries that failed for a non-transient reason, an entry goes to the
+        # dead-letter stream (<prefix>:inv:dead) and the reconciler repairs the state instead.
+        max-deliveries: 5
+      reconciler:
+        # Repairs Redis/Postgres drift for REDIS_FIRST events (D-022). Every instance runs it; the
+        # first pass right after startup also loads open REDIS_FIRST events into Redis.
+        enabled: true
+        interval: 30s
+        # A Redis hold younger than this is left to the consumer.
+        min-age: 5s
   invariants:
     monitor:
       # Runs the invariant checker (PRD 6.10, D-019) over every event that is neither DRAFT nor ENDED;
