@@ -913,3 +913,29 @@ harness). Notes are under M2.2c in PLAN.md.
 - A released-but-unapplied hold closed after its expiry is recorded EXPIRED; a reused hold id is only
   logged (D-022 known limits).
 - D-022 is a draft for you to rewrite in your own words.
+
+## 2026-11-14 - CI #46 flake: sell vs cancel of the same hold (test-only fix)
+
+**Cause**: `InventoryStrategyContractTest.sellAndCancelOfTheSameHoldTakeTurns` raced sell against
+cancel for 20 rounds; each round's `insertFixture()` truncates, so the after-test invariant check saw
+only the last round. `@ExpectInvariantViolations({O1, O5, O7})` assumed sell won it; when cancel won
+(slower CI runner), only O7 fired and the exact-match rule failed. Pre-existing since M1.7, not M2.2.
+
+**Changed** (test only, committed by the user as 25b6b33)
+- Replaced by two deterministic tests: `sellThenCancelOfTheSameHoldTakeTurns` ({O1, O5, O7}) and
+  `cancelThenSellOfTheSameHoldTakeTurns` ({O7}), each asserting both outcomes, seat rows, hold status
+  and allowance. No assertion or annotation rule weakened.
+- New helper `inTurns`: a blocking session locks the hold row, the first call queues, then the
+  second (waits for 1, then 2 sessions blocked), then the blocker rolls back. Postgres serves a
+  row's waiters in arrival order, so the second runs only after the first has committed.
+- Checked every other `@ExpectInvariantViolations`: all deterministic (mocks, SQL drift, or a single
+  thread); `cancelAndExpiryOfTheSameHoldTakeTurns` races but has no annotation and ends the same way.
+
+**Verified**
+- Both tests as a temporary `@RepeatedTest(30)` (then restored to `@Test`): Pessimistic 60/60,
+  Optimistic 60/60, BUILD SUCCESSFUL in 2m 27s.
+- Targeted set (`*InventoryStrategyTest`, `HoldExpirySweeperTest`, `Redis*Test`, `*ConcurrencyTest`
+  at 100 rounds, ModularityTest, InvariantAssertionListenerTest, ApplicationHealthTest,
+  CheckoutFailureTest, OpenApiSpecTest): 24 classes, 290 tests, 0 failures, BUILD SUCCESSFUL in 11m 56s.
+
+**Next**: M2.2c. **Open problems**: none new; confirm on the next CI run.
