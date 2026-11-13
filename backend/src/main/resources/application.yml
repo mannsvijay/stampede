@@ -83,6 +83,10 @@ stampede:
       # ("full jitter"), with no transaction or connection held.
       backoff-base: 5ms
       backoff-max: 50ms
+    redis:
+      # First part of every inventory key in Redis (D-022). Applications or test contexts that share
+      # one Redis server need different prefixes. Lowercase letters, digits and '_'.
+      key-prefix: stampede
   invariants:
     monitor:
       # Runs the invariant checker (PRD 6.10, D-019) over every event that is neither DRAFT nor ENDED;

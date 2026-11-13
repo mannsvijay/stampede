@@ -27,12 +27,17 @@ import org.testcontainers.containers.PostgreSQLContainer;
  * through the context's own DataSource, so it never sees another context's data (deliberate violations
  * of {@code @ExpectInvariantViolations} tests, or a TRUNCATE-per-test class's last leftovers).
  * <p>
- * Redis is shared without isolation: nothing in the app writes keys yet (PLAN note on M2.2).
+ * <b>Redis: one server, a key prefix per context</b> (M2.2a, D-022). Every inventory key starts with
+ * {@code stampede.inventory.redis.key-prefix}; each context gets its own prefix ({@link #registerRedis}
+ * for slices, {@link #newAppKeyPrefix} for full application contexts), so no context sees another's
+ * holds. Not a Redis database number per context: there are only 16. Tests delete their own keys with
+ * {@link TestRedis#deleteKeys}, never FLUSHDB.
  */
 public final class TestDatabases {
 
     private static final Pattern NAME = Pattern.compile("[a-z][a-z0-9_]{0,62}");
     private static final AtomicInteger APP_CONTEXTS = new AtomicInteger();
+    private static final AtomicInteger APP_KEY_PREFIXES = new AtomicInteger();
 
     /**
      * Started on first use. Every cached context keeps a pool on this one server, so the connection
@@ -62,6 +67,27 @@ public final class TestDatabases {
         registry.add("spring.datasource.url", () -> jdbcUrl(name));
         registry.add("spring.datasource.username", POSTGRES::getUsername);
         registry.add("spring.datasource.password", POSTGRES::getPassword);
+    }
+
+    /**
+     * For a {@code @DynamicPropertySource} method of a test that uses Redis without the full
+     * application: points {@code spring.data.redis.*} at the shared server and makes {@code name}
+     * the context's inventory key prefix. One name per test class (or base class), like
+     * {@link #register}.
+     */
+    public static void registerRedis(DynamicPropertyRegistry registry, String name) {
+        if (!NAME.matcher(name).matches()) {
+            throw new IllegalArgumentException("Not a plain lowercase key prefix: " + name);
+        }
+        registry.add("spring.data.redis.host", TestDatabases::redisHost);
+        registry.add("spring.data.redis.port", TestDatabases::redisPort);
+        registry.add("spring.data.redis.password", () -> "");  // the test Redis has none, whatever .env says
+        registry.add("stampede.inventory.redis.key-prefix", () -> name);
+    }
+
+    /** A new inventory key prefix for one application context ({@code app_keys_1}, ...). */
+    static String newAppKeyPrefix() {
+        return "app_keys_" + APP_KEY_PREFIXES.incrementAndGet();
     }
 
     /** A new, empty database for one application context ({@code app_1}, {@code app_2}, ...). */
