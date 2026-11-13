@@ -856,36 +856,68 @@ abstract class InventoryStrategyContractTest {
         }
     }
 
+    // Sell and cancel of the same hold take turns: both lock the hold row first, so whichever comes
+    // second waits, then sees the status the first one wrote. Never sold AND released. The order is
+    // fixed with a blocking session (inTurns), not left to a race: the two orders end in different
+    // states, so they are two tests, each with its exact expected invariant rules.
+
     @Test
     @ExpectInvariantViolations(rules = {"O1", "O5", "O7"},
             reason = "Strategy unit test of step 3 only (D-017): the order is a bare PENDING row and step 4 (booking marks it PAID) never runs, so its seats are SOLD to a PENDING order")
-    void sellAndCancelOfTheSameHoldTakeTurns() throws Exception {
-        // Both lock the hold row first, so whichever comes second sees the first one's status. Each
-        // round ends either sold (cancel says CONVERTED) or released (sell says RELEASED), never both.
-        for (int round = 0; round < 20; round++) {
-            insertFixture();
-            UUID holdId = UUID.randomUUID();
-            holdDirectly(holdId, EVENT_A, SEAT_1, SEAT_2);
-            UUID orderId = pendingOrder(holdId, EVENT_A);
+    void sellThenCancelOfTheSameHoldTakeTurns() throws Exception {
+        UUID holdId = UUID.randomUUID();
+        holdDirectly(holdId, EVENT_A, SEAT_1, SEAT_2);
+        UUID orderId = pendingOrder(holdId, EVENT_A);
 
-            List<Object> outcomes = race(
-                    () -> strategy.sell(EVENT_A, holdId, orderId),
-                    () -> strategy.release(EVENT_A, holdId, ReleaseReason.RELEASED));
+        List<Object> outcomes = inTurns(holdId,
+                () -> strategy.sell(EVENT_A, holdId, orderId),
+                () -> strategy.release(EVENT_A, holdId, ReleaseReason.RELEASED));
 
-            Object sell = outcomes.get(0);
-            Object release = outcomes.get(1);
-            if (sell instanceof SellOutcome.Sold) {
-                assertThat(release).as("round %d", round).isEqualTo(new NotActive("CONVERTED"));
-                assertThat(seat(EVENT_A, SEAT_1).status()).isEqualTo(SeatStatus.SOLD);
-                assertThat(seat(EVENT_A, SEAT_2).status()).isEqualTo(SeatStatus.SOLD);
-                assertThat(used(EVENT_A)).isEqualTo(2);
-            } else {
-                assertThat(sell).as("round %d", round).isEqualTo(new SellOutcome.NotActive("RELEASED"));
-                assertThat(release).isInstanceOf(Released.class);
-                assertThat(seat(EVENT_A, SEAT_1)).isEqualTo(new SeatRow(SeatStatus.AVAILABLE, null, null, 2));
-                assertThat(seat(EVENT_A, SEAT_2)).isEqualTo(new SeatRow(SeatStatus.AVAILABLE, null, null, 2));
-                assertThat(used(EVENT_A)).isEqualTo(0);
-            }
+        assertThat(outcomes.get(0)).isInstanceOf(SellOutcome.Sold.class);
+        assertThat(outcomes.get(1)).as("cancel waited, then saw the sale").isEqualTo(new NotActive("CONVERTED"));
+        assertThat(seat(EVENT_A, SEAT_1)).isEqualTo(new SeatRow(SeatStatus.SOLD, null, orderId, 2));
+        assertThat(seat(EVENT_A, SEAT_2)).isEqualTo(new SeatRow(SeatStatus.SOLD, null, orderId, 2));
+        assertThat(hold(holdId).orElseThrow().status()).isEqualTo("CONVERTED");
+        assertThat(used(EVENT_A)).isEqualTo(2);
+    }
+
+    @Test
+    @ExpectInvariantViolations(rules = {"O7"},
+            reason = "The refused sale leaves the bare PENDING order this strategy unit test inserted; step 4 is booking's and never runs")
+    void cancelThenSellOfTheSameHoldTakeTurns() throws Exception {
+        UUID holdId = UUID.randomUUID();
+        holdDirectly(holdId, EVENT_A, SEAT_1, SEAT_2);
+        UUID orderId = pendingOrder(holdId, EVENT_A);
+
+        List<Object> outcomes = inTurns(holdId,
+                () -> strategy.release(EVENT_A, holdId, ReleaseReason.RELEASED),
+                () -> strategy.sell(EVENT_A, holdId, orderId));
+
+        assertThat(outcomes.get(0)).isInstanceOf(Released.class);
+        assertThat(outcomes.get(1)).as("sell waited, then saw the release")
+                .isEqualTo(new SellOutcome.NotActive("RELEASED"));
+        assertThat(seat(EVENT_A, SEAT_1)).isEqualTo(new SeatRow(SeatStatus.AVAILABLE, null, null, 2));
+        assertThat(seat(EVENT_A, SEAT_2)).isEqualTo(new SeatRow(SeatStatus.AVAILABLE, null, null, 2));
+        assertThat(hold(holdId).orElseThrow().status()).isEqualTo("RELEASED");
+        assertThat(used(EVENT_A)).isEqualTo(0);
+    }
+
+    /**
+     * Runs {@code first} and then {@code second} against one hold, overlapping but in a fixed order.
+     * Another session locks the hold row; {@code first} starts and blocks on it, then {@code second}
+     * starts and queues behind it. Postgres serves a row's waiters in arrival order (the first waiter
+     * holds the tuple lock the others queue on), so when the blocker lets go, {@code first} runs and
+     * {@code second} only gets the row after {@code first} has committed.
+     */
+    private List<Object> inTurns(UUID holdId, Callable<?> first, Callable<?> second) throws Exception {
+        try (Connection blocker = openTransaction()) {
+            exec(blocker, "SELECT 1 FROM holds WHERE id = ? FOR UPDATE", holdId);
+            Future<?> firstResult = THREADS.submit(first);
+            waitUntilOneSessionIsBlockedOnALock();
+            Future<?> secondResult = THREADS.submit(second);
+            waitUntilSessionsAreBlockedOnALock(2);
+            blocker.rollback();
+            return List.of(firstResult.get(30, TimeUnit.SECONDS), secondResult.get(30, TimeUnit.SECONDS));
         }
     }
 
