@@ -13,9 +13,14 @@ import java.util.UUID;
  * p:ev:{event}:hold:{hold}   hash    user, seats, n, createdMs, expiresMs (expires with its seats)
  * p:ev:{event}:user:{user}   zset    member {holdId}:{seat count}, score = expiry in ms
  * p:inv:stream               stream  HELD / RELEASED entries for the Postgres consumer (M2.2b)
+ * p:inv:dead                 stream  entries the consumer gave up on (dead letters, M2.2b)
  * </pre>
+ * The consumer group on the stream is {@link #GROUP}.
  */
 final class RedisKeys {
+
+    /** The consumer group every instance's stream consumer joins (D-022, decision 1a). */
+    static final String GROUP = "inventory-persister";
 
     private final String prefix;
 
@@ -46,7 +51,12 @@ final class RedisKeys {
     }
 
     String hold(UUID eventId, UUID holdId) {
-        return event(eventId) + "hold:" + holdId;
+        return holdPrefix(eventId) + holdId;
+    }
+
+    /** A hold's key is this followed by the hold id (the reconciler scans for {@code holdPrefix*}). */
+    String holdPrefix(UUID eventId) {
+        return event(eventId) + "hold:";
     }
 
     /** A user's key is this followed by the user id. */
@@ -60,6 +70,10 @@ final class RedisKeys {
 
     String stream() {
         return prefix + ":inv:stream";
+    }
+
+    String deadLetters() {
+        return prefix + ":inv:dead";
     }
 
     private String event(UUID eventId) {
