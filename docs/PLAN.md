@@ -402,6 +402,51 @@ end against the compose stack, and every concurrency harness scenario passed 100
       strategy's keys must be isolated per test context (e.g. a key prefix per context, or a Redis
       database number per context; Postgres already has a database per context), and the after-test
       invariant check for Redis (PRD 6.10 #5) must only see its own context's keys, never another's.
+      Split into three sub-tasks (D-022, decided 2026-11-13: persistence = Redis Stream + consumer;
+      on disagreement Postgres wins and Redis-only live holds roll forward; invariant 5 tolerance
+      2 s at runtime, zero in tests after draining the stream). No new dependency.
+  - [ ] M2.2a Redis hold store: key namespace with a prefix per test context, `hold.lua` and
+        `release.lua` (all-or-nothing, cap recounted from live holds, TTL, stream entry),
+        `RedisHoldStore`. Not an `InventoryStrategy` bean yet, so no event can use it.
+        Implemented 2026-11-13 (main code in 0738886; the remaining tests and docs not yet
+        committed): `RedisHoldStoreTest` (25),
+        `RedisHoldStoreConcurrencyTest` (3 scenarios x 100 rounds, 16 threads),
+        `RedisKeyIsolationTest` (6), `RedisKeyPrefixInAppContextTest` (1), ModularityTest green.
+        Full suite: to be run by the user.
+  - [ ] M2.2b Persistence and reconciler: event loader (Postgres -> Redis: seats, limit, SOLD markers,
+        unexpired ACTIVE holds; also the answer to `NOT_LOADED` after a Redis restart), stream consumer
+        (consumer group, at-least-once, idempotent on the `holds` primary key) that applies HELD and
+        RELEASED to Postgres through `EventSeat` in the D-015 lock order with `created_at`/`expires_at`
+        from Redis' times, expiry through the existing sweeper (`release(…, EXPIRED)` asks Redis, then
+        closes the hold in Postgres), reconciler, stream trimming after ack, and explicit
+        `--appendfsync everysec` and `--maxmemory-policy noeviction` in docker-compose.
+        Note (from M2.2a): a HELD entry for a seat that Postgres still shows HELD by an older hold
+        means that hold expired in Redis; close it as EXPIRED first, in its own transaction.
+        Note (from M2.2a): `RedisHoldStore.loadEvent` only adds seats (SADD) and writes `meta` last;
+        the real loader must also be safe to run while holds are being taken.
+  - [ ] M2.2c Strategy, sell, invariants, harness: `RedisFirstInventoryStrategy` (hold, release, sell;
+        `HoldMetrics` like the other two), catch-up of pending stream entries before checkout step 0
+        and step 3, `sell` marks seats `S:<orderId>:<ms>` without a TTL and the user member `+inf`
+        before the Postgres sale, invariant 5 and the stuck-sweeper rule, contract tests and the
+        harness for the third strategy, D-022 final.
+        Note (decided 2026-11-13): **invariant 5 compares by time, not by status.** A Postgres hold
+        whose `expires_at` has passed counts as expired, whatever its status column says. So the gap
+        between a Redis TTL running out and the sweeper's 5 s tick is never reported as a mismatch;
+        the 2 s window only measures consumer lag (a live Redis hold Postgres doesn't have yet, or a
+        release Postgres hasn't applied yet).
+        Note (from M2.2a): control may not import `inventory.strategy`; invariant 5 reads Redis
+        through a small read-only type in `inventory.api`. `InvariantAssertionListener`'s fallback
+        `new InvariantChecker(jdbc, tx)` must not silently skip the Redis rule, and the rule must
+        only read keys under its own context's prefix.
+        Note (from M2.2a): `InventoryStrategyContractTest` is Postgres-specific (row locks, versions,
+        `holdDirectly`). Proposal to approve first: a behaviour contract all three strategies run plus
+        a Postgres-locking contract for the two Postgres strategies, moving tests without changing
+        any assertion. The harness needs a Redis reset per round and must drain the stream before
+        its Postgres checks (I5, I6, the checker).
+        Note (from M2.2a): the stuck-sweeper rule at zero grace would fire in existing tests that
+        leave expired ACTIVE holds on purpose; decide its threshold then.
+        Note (from M2.2a): Redis alone answers `GONE` for an expired, released or unknown hold;
+        the strategy maps that to NotActive / NotFound from the Postgres row.
 - [ ] M2.3 Strategy selectable per event (admin endpoint); concurrency test parameterised over all three
       Note (from M1.7, D-019): if an admin endpoint ever changes `per_user_limit`, it must refuse
       (409) a limit below any user's current `used`, checked under the allowance row locks; I8

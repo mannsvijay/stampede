@@ -1171,3 +1171,94 @@ Write these yourself, in your own words. Each one is an interview answer you've 
   or k6 logs a 40P01 for this strategy; conflicts per hold stay high where pessimistic lock waits are
   short (optimistic is the wrong default for hot seats, which is the M2.6 analysis); or Retry-After: 1
   makes clients retry in step (then jitter it on the client too).
+
+### D-022 Redis-first strategy: keys, Lua scripts, stream persistence, and who wins (DRAFT)
+- **Date:** 2026-11-13
+- **Context:** M2.2 adds strategy C of PRD 6.2: a Lua script takes seats in Redis and Postgres is
+  updated afterwards. Open questions: how keys are named and kept apart between test contexts that
+  share one Redis; how the per-user cap (D-005) survives holds that expire by TTL with no code
+  running; how holds reach Postgres, whose `event_seats.hold_id` and `orders.hold_id` have foreign
+  keys to `holds`; which store wins when they disagree; and how much disagreement invariant 5 (PRD
+  6.10) tolerates (PLAN change 6). Split into M2.2a (Redis alone), M2.2b (persistence, reconciler)
+  and M2.2c (strategy bean, sell, invariants, harness). **Implemented so far: M2.2a.**
+- **Options considered:**
+  - Persistence: a Redis Stream with a consumer; synchronous write-through in the request; an
+    in-process queue.
+  - Disagreement: Postgres wins and Redis-only live holds roll forward; Postgres wins strictly
+    (delete what it doesn't have); Redis wins for live holds.
+  - Invariant 5 window: 2 s; 5 s (the sweeper interval); 30 s (the monitor's grace).
+  - Cap in Redis: an integer counter per (event, user); a recount from the user's live holds.
+  - Test isolation: a key prefix per Spring test context; a Redis database number per context.
+  - Expiry: one TTL per key; explicit deletion by a sweeper.
+- **Decision:**
+  - **Keys** (prefix `p` = `stampede.inventory.redis.key-prefix`, default `stampede`; `RedisKeys` is
+    the only place the formats are written in Java):
+
+    | Key | Type | Content | Expires |
+    |---|---|---|---|
+    | `p:ev:<event>:meta` | hash | `limit`, `seatCount`; its existence means "event loaded" | never |
+    | `p:ev:<event>:seats` | set | every seat id of the event | never |
+    | `p:ev:<event>:seat:<seat>` | string | `H:<holdId>:<createdMs>` while held; `S:<orderId>:<soldMs>` once sold (M2.2c) | with the hold; never when sold |
+    | `p:ev:<event>:hold:<hold>` | hash | `user`, `seats`, `n`, `createdMs`, `expiresMs` | with its seats |
+    | `p:ev:<event>:user:<user>` | sorted set | member `<holdId>:<seat count>`, score = expiry in ms | with its last member |
+    | `p:inv:stream` | stream | HELD / RELEASED entries (SOLD in M2.2c) | trimmed after ack (M2.2b) |
+
+  - **`hold.lua` checks everything before it writes anything**, in this order: event loaded
+    (`NOT_LOADED`), every seat in the seat set (`UNKNOWN_SEAT`), no seat key exists (`SEAT_TAKEN`
+    with `takenAgoMs` from the newest key's time), the cap (`LIMIT_EXCEEDED`), the hold id not live.
+    Then it writes every seat key, the hold hash and the user member with the **same absolute expiry
+    millisecond** (Redis `TIME` + the hold duration, D-015's "own authoritative clock") and appends a
+    HELD entry to the stream. Precedence is D-016's; CONTENDED never occurs.
+  - **`release.lua`:** no hold hash is `GONE`; an EXPIRED release of a hold that still exists is
+    `NOT_EXPIRED` (expiry needs no script, the TTL does it); otherwise it deletes each seat key only
+    if it still names this hold, removes the user member, deletes the hash and appends RELEASED.
+  - **The cap is recounted, not counted** (a deliberate change to D-005's "the same counter as a
+    Redis key"): the script adds up the seat counts of the user's members whose score is still in
+    the future. A hold that expires stops counting at the millisecond its seat keys disappear, with
+    nothing to decrement.
+  - **Persistence: Redis Stream + consumer** (M2.2b). The entry is appended by the same script as
+    the hold, so no hold exists without its entry. The consumer applies entries to Postgres through
+    `EventSeat` (the state machine still guards every Postgres seat change), idempotently.
+  - **On disagreement Postgres wins; a live hold only Redis knows is lag, not disagreement, and is
+    persisted** (rolled forward). A conflicting fact in Postgres (seat SOLD, seat held by another
+    unexpired hold, hold closed) wins and Redis is repaired. A sale always needs the Postgres hold
+    row and `uq_order_items_active_seat`, so "Redis is never trusted alone" still holds for sales.
+  - **Invariant 5: 2 s at runtime, zero in tests after the stream is drained, and it compares by
+    time, not by status.** A Postgres hold whose `expires_at` has passed counts as expired, so the
+    gap between a Redis TTL running out and the sweeper's 5 s tick is never reported as a mismatch;
+    the 2 s window only measures consumer lag.
+  - **Isolation: a key prefix per Spring test context** (`TestDatabases.registerRedis` for slices,
+    `app_keys_N` from `TestcontainersConfiguration` for application contexts). Tests delete their
+    own prefix with SCAN (`TestRedis.deleteKeys`), never FLUSHDB.
+  - **Seat map** keeps reading Postgres (D-020): a new hold can show as free for the consumer lag,
+    an expired one as taken for up to one sweeper tick. Redis still decides every hold attempt.
+  - **Durability:** AOF with `appendfsync everysec` and `maxmemory-policy noeviction` (made explicit
+    in compose in M2.2b). A crash can lose about the last second of acknowledged holds.
+  - M2.2a's `RedisHoldStore` is not an `InventoryStrategy`; `InventoryStrategies.forKind("REDIS_FIRST")`
+    still throws until M2.2c.
+- **Why:**
+  - Redis runs commands on one thread and a whole script as one command, so nothing can happen
+    between a script's checks and its writes: that is the entire locking story of this strategy.
+    Redis does not roll back a script that fails halfway, hence "all checks, then all writes".
+  - One expiry instant for every key of a hold means a reader never sees half an expired hold.
+  - A counter decremented on expiry would need code to run at expiry (keyspace notifications are not
+    guaranteed, PRD 6.3), and one missed decrement locks a user out. A recount can't drift.
+  - A stream written inside the script is a transactional outbox inside Redis: the hold answers
+    after one round trip, and the Postgres write can fail and be retried without losing the hold.
+  - Rolling forward keeps holds buyers were told they have when the consumer is slow; letting
+    Postgres win conflicts keeps a checkout in progress safe when Redis loses data.
+  - A prefix works on any Redis (there are only 16 numbered databases and 15 test contexts already).
+- **Known limits:**
+  - Single Redis node assumed: the scripts build seat and user key names from a prefix instead of
+    declaring every key, and there is one stream. Redis Cluster would need hash tags per event.
+  - A hold id reused after its hold expired is not caught in Redis; the `holds` primary key catches
+    it at persistence.
+  - Redis' clock and Postgres' clock are two clocks; for REDIS_FIRST events Redis decides expiry and
+    Postgres stores Redis' times.
+  - After a crash inside the AOF window, a buyer can lose an acknowledged hold (410 at checkout).
+- **How I'd know it was wrong:** the harness (M2.2c) or invariant 5 finds a seat with two live
+  holders or a user over the cap; invariant 5 fires in normal load (the consumer can't keep up, or
+  2 s is too tight); the M2.5 benchmark shows no gain over the Postgres strategies (the consumer or
+  the catch-up before checkout dominates); buyers report holds that vanished without a Redis crash;
+  or the seat map's staleness shows up as repeated SEAT_TAKEN on seats that look free (then read
+  Redis for REDIS_FIRST events).

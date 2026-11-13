@@ -25,6 +25,7 @@ import org.springframework.data.domain.Range;
 import org.springframework.data.redis.connection.stream.MapRecord;
 import org.springframework.data.redis.core.RedisCallback;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 
@@ -437,15 +438,15 @@ class RedisHoldStoreTest {
         List<Map<Object, Object>> entries = streamEntries();
 
         assertThat(entries).hasSize(2);
-        LiveHoldTimes times = new LiveHoldTimes(held.expiresAt().minus(FIVE_MINUTES), held.expiresAt());
+        long expiresMs = held.expiresAt().toEpochMilli();
         assertThat(entries.get(0)).containsOnly(
                 Map.entry("type", "HELD"),
                 Map.entry("event", EVENT_A.toString()),
                 Map.entry("hold", holdId.toString()),
                 Map.entry("user", USER.toString()),
                 Map.entry("seats", SEAT_1 + "," + SEAT_2),
-                Map.entry("createdMs", Long.toString(times.created().toEpochMilli())),
-                Map.entry("expiresMs", Long.toString(times.expires().toEpochMilli())));
+                Map.entry("createdMs", Long.toString(expiresMs - FIVE_MINUTES.toMillis())),
+                Map.entry("expiresMs", Long.toString(expiresMs)));
         assertThat(entries.get(1)).containsOnly(
                 Map.entry("type", "RELEASED"),
                 Map.entry("event", EVENT_A.toString()),
@@ -453,9 +454,6 @@ class RedisHoldStoreTest {
                 Map.entry("user", USER.toString()),
                 Map.entry("seats", SEAT_1 + "," + SEAT_2),
                 Map.entry("reason", "SAGA_FAILED"));
-    }
-
-    record LiveHoldTimes(Instant created, Instant expires) {
     }
 
     // ---- helpers ----
@@ -480,8 +478,7 @@ class RedisHoldStoreTest {
 
     /** The absolute expiry of a key in milliseconds (PEXPIRETIME), -1 without one. */
     private long expireTimeMillis(String key) {
-        Long ttl = redis.execute((RedisCallback<Long>) connection ->
-                (Long) connection.execute("PEXPIRETIME", key.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
-        return ttl;
+        return redis.execute(new DefaultRedisScript<>("return redis.call('PEXPIRETIME', KEYS[1])", Long.class),
+                List.of(key));
     }
 }
