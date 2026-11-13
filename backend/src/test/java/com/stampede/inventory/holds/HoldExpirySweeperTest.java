@@ -25,6 +25,8 @@ import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.autoconfigure.ImportAutoConfiguration;
+import org.springframework.boot.autoconfigure.data.redis.RedisAutoConfiguration;
 import org.springframework.boot.test.autoconfigure.jdbc.AutoConfigureTestDatabase;
 import org.springframework.boot.test.autoconfigure.jdbc.JdbcTest;
 import org.springframework.boot.test.context.TestConfiguration;
@@ -44,6 +46,9 @@ import org.springframework.transaction.annotation.Transactional;
 @JdbcTest(properties = "stampede.holds.sweeper.batch-size=2")
 @AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
 @Import({HoldExpirySweeper.class, HoldExpirySweeperTest.Strategies.class})
+// The scan below also finds the Redis hold store (M2.2a), which needs a StringRedisTemplate that a
+// @JdbcTest slice doesn't configure, so add Boot's Redis auto-configuration to this slice.
+@ImportAutoConfiguration(RedisAutoConfiguration.class)
 @Transactional(propagation = Propagation.NOT_SUPPORTED)
 class HoldExpirySweeperTest {
 
@@ -57,6 +62,8 @@ class HoldExpirySweeperTest {
     @DynamicPropertySource
     static void database(DynamicPropertyRegistry registry) {
         TestDatabases.register(registry, "hold_expiry_sweeper");
+        // And its own key prefix on the shared test Redis (D-022).
+        TestDatabases.registerRedis(registry, "hold_expiry_sweeper");
     }
 
     static final ExecutorService THREADS = Executors.newFixedThreadPool(2);
