@@ -97,6 +97,11 @@ class SeatRows {
      * @return false if the seats don't fit (nothing was written)
      */
     boolean addToAllowance(HoldRequest request) {
+        return addToAllowance(request.eventId(), request.userId(), request.seatIds().size());
+    }
+
+    /** {@link #addToAllowance(HoldRequest)} for a hold that already exists in Redis (M2.2b). */
+    boolean addToAllowance(UUID eventId, UUID userId, int seatCount) {
         int written = jdbc.sql("""
                         INSERT INTO user_event_allowance (event_id, user_id, used)
                         SELECT e.id, :userId, :seats FROM events e
@@ -106,9 +111,9 @@ class SeatRows {
                         WHERE user_event_allowance.used + EXCLUDED.used
                               <= (SELECT per_user_limit FROM events WHERE id = EXCLUDED.event_id)
                         """)
-                .param("eventId", request.eventId())
-                .param("userId", request.userId())
-                .param("seats", request.seatIds().size())
+                .param("eventId", eventId)
+                .param("userId", userId)
+                .param("seats", seatCount)
                 .update();
         return written == 1;
     }
