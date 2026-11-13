@@ -410,7 +410,8 @@ end against the compose stack, and every concurrency harness scenario passed 100
       test JVM (`testsupport.TestDatabases`), a database per Spring test context (same isolation as a
       container per context), sweeper and monitor schedules off in every test context, idle pools
       shrink to zero. Measured per batch: 2 containers (was up to 21 per full run), 15 contexts (was
-      16). Open: `spring.test.context.cache.maxSize=8` only if a full run shows memory is still short.
+      16). Full suite 2026-11-13 (user): BUILD SUCCESSFUL in 13m 53s (was 15m 20s), no shutdown
+      errors. `spring.test.context.cache.maxSize=8` not needed: memory held for the full run.
 - [ ] M2.4 k6 scenarios: seat-collision, mixed-realistic; `scripts/k6.sh` runs k6 in Docker
       Note (from M1.8a, D-020): measure GET /events/{id}/layout (size raw and gzipped, latency) and
       GET /events/{id}/seatmap under polling load; the layout size (~240 KB raw) is only an estimate.

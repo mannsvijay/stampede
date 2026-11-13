@@ -791,3 +791,35 @@ the 1000-round proof.
 - CLAUDE.md and DEVELOPING.md still say the 1000-round proof takes about 11 min. Measured: 22 min 47 s
   for the pessimistic scenarios (M1), 18 min 11 s for the optimistic ones alone, so `*ConcurrencyTest`
   at 1000 rounds now takes roughly 40 min. Update those numbers.
+
+## 2026-11-13 - Test infrastructure cleanup (M2.1 note on M2.3, done before M2.2)
+
+**What changed**
+- `testsupport.TestDatabases`: one shared Postgres and one shared Redis container for the whole test
+  JVM, and a fresh Postgres database per Spring test context (same isolation as a container each).
+  All Testcontainers test bases and `TestcontainersConfiguration` use it; `SecretsAtRestTest` runs
+  `pg_dump` through it.
+- Test `application.properties`: hold expiry sweeper and invariant monitor schedules off in every test
+  context; Hikari `minimum-idle=0`, `idle-timeout=10000` (ms; Hikari's setter takes a long, so `10s`
+  failed to bind) so idle cached contexts release their connections. Harness bases set minimum-idle
+  back to their pool size.
+- Docs: PLAN notes on M2.2 (Redis keys must be isolated per test context once the Redis strategy
+  writes them) and M2.3; 1000-round timing (~40 min) in CLAUDE.md and DEVELOPING.md; DECISIONS.
+- Committed by the user: 817e616, 672259c, d2288d7, d0576a6. This entry and the PLAN result are a
+  separate docs commit.
+
+**Verified**
+- Measured per batch: 2 containers (was up to 21 per full run), 15 contexts (was 16).
+- By the user: full backend suite --rerun BUILD SUCCESSFUL in 13m 53s (was 15m 20s); the
+  "Connection refused" / "Pool is empty" shutdown errors are gone. `CheckoutFailureTest` run alone 3
+  times: all passed. An earlier full run that failed in `CheckoutFailureTest` and hung overlapped
+  with in-session batch runs and edits, so it is treated as invalid.
+- `spring.test.context.cache.maxSize=8` not needed (PLAN updated).
+
+**Next**: M2.2 Redis-first strategy (isolate Redis keys per test context first; see the PLAN note).
+
+**Open problems**
+- The invalid `CheckoutFailureTest` failure was not reproduced; if it shows up again in a clean full
+  run, investigate it as possible flakiness rather than interference.
+- `compileJava` "unchecked or unsafe operations" note for `OpenApiConfig`: still not checked.
+- D-021 and D-020 are drafts for you to rewrite in your own words.
