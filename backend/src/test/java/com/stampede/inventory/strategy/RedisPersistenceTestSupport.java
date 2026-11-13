@@ -9,7 +9,6 @@ import com.stampede.inventory.strategy.HoldOutcome.Held;
 import com.stampede.testsupport.TestDatabases;
 import com.stampede.testsupport.TestRedis;
 import io.micrometer.core.instrument.MeterRegistry;
-import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.nio.charset.StandardCharsets;
 import java.sql.Array;
 import java.sql.SQLException;
@@ -29,8 +28,6 @@ import org.springframework.boot.autoconfigure.ImportAutoConfiguration;
 import org.springframework.boot.autoconfigure.data.redis.RedisAutoConfiguration;
 import org.springframework.boot.test.autoconfigure.jdbc.AutoConfigureTestDatabase;
 import org.springframework.boot.test.autoconfigure.jdbc.JdbcTest;
-import org.springframework.boot.test.context.TestConfiguration;
-import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Import;
 import org.springframework.data.domain.Range;
 import org.springframework.data.redis.connection.stream.Consumer;
@@ -62,7 +59,11 @@ import org.springframework.transaction.annotation.Transactional;
         "stampede.inventory.redis.reconciler.min-age=1s"})
 @AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
 @ImportAutoConfiguration(RedisAutoConfiguration.class)
-@Import({RedisPersistenceTestSupport.Beans.class, InvariantChecker.class})
+// StrategyTestConfig brings SeatRows, HoldClosing and the meter registry. No @TestConfiguration of our
+// own: HoldExpirySweeperTest component-scans this package (test classes too), and a second
+// meterRegistry bean would break its context.
+@Import({StrategyTestConfig.class, RedisHoldStore.class, RedisStreamMetrics.class, RedisHoldWriter.class,
+        RedisEventLoader.class, RedisStreamConsumer.class, RedisReconciler.class, InvariantChecker.class})
 @Transactional(propagation = Propagation.NOT_SUPPORTED)
 abstract class RedisPersistenceTestSupport {
 
@@ -72,19 +73,6 @@ abstract class RedisPersistenceTestSupport {
     static void stores(DynamicPropertyRegistry registry) {
         TestDatabases.register(registry, PREFIX);
         TestDatabases.registerRedis(registry, PREFIX);
-    }
-
-    /** What the Redis-first persistence path needs, and a meter registry the tests can read. */
-    @TestConfiguration(proxyBeanMethods = false)
-    @Import({SeatRows.class, HoldClosing.class, InventoryStrategyConfig.class, RedisHoldStore.class,
-            RedisStreamMetrics.class, RedisHoldWriter.class, RedisEventLoader.class, RedisStreamConsumer.class,
-            RedisReconciler.class})
-    static class Beans {
-
-        @Bean
-        MeterRegistry meterRegistry() {
-            return new SimpleMeterRegistry();
-        }
     }
 
     static final Duration FIVE_MINUTES = Duration.ofMinutes(5);

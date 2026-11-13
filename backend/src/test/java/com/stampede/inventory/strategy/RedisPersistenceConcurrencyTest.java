@@ -63,6 +63,17 @@ class RedisPersistenceConcurrencyTest extends RedisPersistenceTestSupport {
                         + " -Dstampede.harness.rounds=1", e);
             }
         }
+        // Evidence that the race reached the interesting paths, not only the happy one.
+        System.out.printf("Redis persistence race, %d rounds: HELD applied=%.0f duplicate=%.0f stale=%.0f; "
+                        + "RELEASED applied=%.0f duplicate=%.0f stale=%.0f; reconciler R1=%.0f R2=%.0f%n", ROUNDS,
+                counter(RedisStreamMetrics.APPLIED, "type", "held", "result", "applied"),
+                counter(RedisStreamMetrics.APPLIED, "type", "held", "result", "duplicate"),
+                counter(RedisStreamMetrics.APPLIED, "type", "held", "result", "stale"),
+                counter(RedisStreamMetrics.APPLIED, "type", "released", "result", "applied"),
+                counter(RedisStreamMetrics.APPLIED, "type", "released", "result", "duplicate"),
+                counter(RedisStreamMetrics.APPLIED, "type", "released", "result", "stale"),
+                counter(RedisStreamMetrics.REPAIRS, "rule", "R1_roll_forward"),
+                counter(RedisStreamMetrics.REPAIRS, "rule", "R2_close"));
     }
 
     private void runRound(long seed) throws Exception {

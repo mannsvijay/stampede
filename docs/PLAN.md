@@ -430,6 +430,18 @@ end against the compose stack, and every concurrency harness scenario passed 100
         means that hold expired in Redis; close it as EXPIRED first, in its own transaction.
         Note (from M2.2a): `RedisHoldStore.loadEvent` only adds seats (SADD) and writes `meta` last;
         the real loader must also be safe to run while holds are being taken.
+        Implemented 2026-11-13 (D-022 M2.2b; not committed): `RedisEventLoader` + `load.lua`,
+        `RedisStreamConsumer` + `RedisConsumerLifecycle`, `RedisHoldWriter`, `RedisReconciler` +
+        schedule, `RedisStreamMetrics`; `HoldClosing.closeAsRedisDecided`; `release.lua` entry gains
+        `createdMs`/`expiresMs`; compose AOF/noeviction flags. Decisions: consumer on every instance,
+        dead-letter stream after 5 non-transient failures, reconciler every 30 s, cap disagreement =
+        Postgres wins. Tests: `RedisStreamConsumerTest` (11), `RedisHoldWriterTest` (10),
+        `RedisEventLoaderTest` (4), `RedisReconcilerTest` (8), `RedisPersistenceConcurrencyTest`
+        (100 rounds). Targeted run (one class per app context, CLAUDE.md): 281 tests green after
+        one fix. The first run broke `HoldExpirySweeperTest` (it scans `inventory.strategy` test
+        classes too and found a second `meterRegistry` bean from the new test base); the base now
+        reuses `StrategyTestConfig`. Rerun of the sweeper test, every `Redis*Test`,
+        `*InventoryStrategyTest` and ModularityTest: BUILD SUCCESSFUL in 4m 48s. Full suite: the user.
   - [ ] M2.2c Strategy, sell, invariants, harness: `RedisFirstInventoryStrategy` (hold, release, sell;
         `HoldMetrics` like the other two), catch-up of pending stream entries before checkout step 0
         and step 3, `sell` marks seats `S:<orderId>:<ms>` without a TTL and the user member `+inf`
@@ -453,6 +465,16 @@ end against the compose stack, and every concurrency harness scenario passed 100
         leave expired ACTIVE holds on purpose; decide its threshold then.
         Note (from M2.2a): Redis alone answers `GONE` for an expired, released or unknown hold;
         the strategy maps that to NotActive / NotFound from the Postgres row.
+        Note (from M2.2b): `release(…, EXPIRED)` delegates to `RedisHoldWriter.expire` (the sweeper
+        itself doesn't change). On `NOT_LOADED`, `hold()` calls `RedisEventLoader.ensureLoaded` and
+        retries once; `sell()` must do the same before touching Redis.
+        Note (from M2.2b): sell must replace the seat keys with `S:` markers, set the user member to
+        `+inf` AND delete the hold hash, in one script. If the hash survives, reconciler rule R4 sees a
+        Redis hold whose Postgres row is CONVERTED and calls release.lua, which keeps the `S:` keys but
+        ZREMs the `<holdId>:<n>` member and so un-counts bought seats from the cap.
+        Note (from M2.2b): invariant 5 can read `stampede.inventory.redis.stream.oldest.age` (or
+        `RedisStreamConsumer.refreshLag`) for its 2 s window; tests drain with `pollOnce` +
+        `reclaimOnce` (see `RedisPersistenceTestSupport.drain`).
 - [ ] M2.3 Strategy selectable per event (admin endpoint); concurrency test parameterised over all three
       Note (from M1.7, D-019): if an admin endpoint ever changes `per_user_limit`, it must refuse
       (409) a limit below any user's current `used`, checked under the allowance row locks; I8
