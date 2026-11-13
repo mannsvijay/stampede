@@ -15,7 +15,7 @@ local reason = ARGV[5]
 
 -- No hash: the hold expired (Redis deleted it), was released, or never existed. Redis alone can't
 -- tell which; Postgres can (M2.2c).
-local hold = redis.call('HMGET', KEYS[1], 'user', 'seats', 'n', 'expiresMs')
+local hold = redis.call('HMGET', KEYS[1], 'user', 'seats', 'n', 'expiresMs', 'createdMs')
 if not hold[1] then
     return {'GONE'}
 end
@@ -41,7 +41,9 @@ end
 redis.call('ZREM', userPrefix .. hold[1], holdId .. ':' .. hold[3])   -- gives the seats back to the cap
 redis.call('DEL', KEYS[1])
 
+-- createdMs and expiresMs (M2.2b): if this entry reaches Postgres before the hold's HELD entry, the
+-- consumer records the hold as already over (a tombstone row), and the holds row needs both times.
 redis.call('XADD', KEYS[2], '*', 'type', 'RELEASED', 'event', eventId, 'hold', holdId, 'user', hold[1],
-        'seats', hold[2], 'reason', reason)
+        'seats', hold[2], 'reason', reason, 'createdMs', hold[5], 'expiresMs', hold[4])
 
 return released

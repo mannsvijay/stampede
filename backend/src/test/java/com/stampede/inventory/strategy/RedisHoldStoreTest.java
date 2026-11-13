@@ -453,7 +453,9 @@ class RedisHoldStoreTest {
                 Map.entry("hold", holdId.toString()),
                 Map.entry("user", USER.toString()),
                 Map.entry("seats", SEAT_1 + "," + SEAT_2),
-                Map.entry("reason", "SAGA_FAILED"));
+                Map.entry("reason", "SAGA_FAILED"),
+                Map.entry("createdMs", Long.toString(expiresMs - FIVE_MINUTES.toMillis())),
+                Map.entry("expiresMs", Long.toString(expiresMs)));
     }
 
     // ---- helpers ----
