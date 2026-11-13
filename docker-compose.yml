@@ -24,7 +24,11 @@ services:
 
   redis:
     image: redis:7-alpine
-    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}", "--appendonly", "yes"]
+    # Durability for Redis-first holds (D-022): the append-only file is fsynced once a second, so a crash
+    # loses at most about the last second of writes. noeviction: when a memory limit is reached, Redis
+    # refuses writes instead of silently evicting hold keys (no maxmemory is set here, so no limit yet).
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}",
+              "--appendonly", "yes", "--appendfsync", "everysec", "--maxmemory-policy", "noeviction"]
     environment:
       REDIS_PASSWORD: ${REDIS_PASSWORD}
     ports:
