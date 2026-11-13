@@ -405,14 +405,20 @@ end against the compose stack, and every concurrency harness scenario passed 100
       Split into three sub-tasks (D-022, decided 2026-11-13: persistence = Redis Stream + consumer;
       on disagreement Postgres wins and Redis-only live holds roll forward; invariant 5 tolerance
       2 s at runtime, zero in tests after draining the stream). No new dependency.
-  - [ ] M2.2a Redis hold store: key namespace with a prefix per test context, `hold.lua` and
+  - [x] M2.2a Redis hold store: key namespace with a prefix per test context, `hold.lua` and
         `release.lua` (all-or-nothing, cap recounted from live holds, TTL, stream entry),
         `RedisHoldStore`. Not an `InventoryStrategy` bean yet, so no event can use it.
-        Implemented 2026-11-13 (main code in 0738886; the remaining tests and docs not yet
-        committed): `RedisHoldStoreTest` (25),
+        Done 2026-11-13 (D-022; commits 0738886, 5161aed, d62b56a): `RedisHoldStoreTest` (25),
         `RedisHoldStoreConcurrencyTest` (3 scenarios x 100 rounds, 16 threads),
         `RedisKeyIsolationTest` (6), `RedisKeyPrefixInAppContextTest` (1), ModularityTest green.
-        Full suite: to be run by the user.
+        Regression found by the user's first full run (512 tests, 6 failed): `HoldExpirySweeperTest`
+        component-scans `inventory.strategy` in a `@JdbcTest` slice, found the new `RedisHoldStore`
+        and had no `StringRedisTemplate`, so its context failed to load. Fixed in the test's setup
+        only (Redis auto-configuration + its own key prefix), no assertion changed; then the sweeper
+        test, both strategy contract tests, the four Postgres concurrency classes and the Redis
+        tests: BUILD SUCCESSFUL in 7m 40s.
+        Verified by the user: full suite with --rerun BUILD SUCCESSFUL in 13m 11s after the fix;
+        `RedisHoldStoreConcurrencyTest` at 1000 rounds BUILD SUCCESSFUL in 5m 47s.
   - [ ] M2.2b Persistence and reconciler: event loader (Postgres -> Redis: seats, limit, SOLD markers,
         unexpired ACTIVE holds; also the answer to `NOT_LOADED` after a Redis restart), stream consumer
         (consumer group, at-least-once, idempotent on the `holds` primary key) that applies HELD and

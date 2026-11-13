@@ -74,6 +74,8 @@ Git Bash forms, run from the repo root. PowerShell forms for me: docs/DEVELOPING
 - Multi-file changes: plan first, wait for my approval.
 - Keep each change scoped to the current task in docs/PLAN.md. Note unrelated issues; don't fix them.
 - Write or update tests with every change. Concurrency code gets a concurrency test.
+- A sub-task's targeted test run must include every test class whose Spring context loads a changed
+  package (grep the tests for `@ComponentScan` and `@Import` of that package), not only the new tests.
 - Show evidence when done: the commands you ran and their output.
 - Don't push to remote. I review and push myself.
 - When compacting, preserve: current task ID, files modified, test commands, open problems.

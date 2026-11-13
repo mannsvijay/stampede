@@ -823,3 +823,47 @@ the 1000-round proof.
   run, investigate it as possible flakiness rather than interference.
 - `compileJava` "unchecked or unsafe operations" note for `OpenApiConfig`: still not checked.
 - D-021 and D-020 are drafts for you to rewrite in your own words.
+
+## 2026-11-13 - M2.2a Redis hold store (first of three M2.2 sub-tasks)
+
+**What changed**
+- M2.2 split into M2.2a (Redis alone), M2.2b (persistence, reconciler) and M2.2c (strategy bean, sell,
+  invariants, harness). Decisions in D-022 (draft): Redis Stream + consumer; on disagreement Postgres
+  wins and Redis-only live holds roll forward; invariant 5 tolerates 2 s at runtime (zero in tests
+  after draining the stream) and compares by time, not by status.
+- `redis/hold.lua` and `redis/release.lua`: all checks before any write; every key of a hold expires
+  at the same millisecond by Redis' clock; the per-user cap is recounted from the user's live holds
+  (a change to D-005's counter key); one HELD / RELEASED stream entry per change.
+- `inventory.strategy`: `RedisHoldStore`, `RedisKeys`, `RedisInventoryProperties`
+  (`stampede.inventory.redis.key-prefix`). Not an `InventoryStrategy` bean: `forKind("REDIS_FIRST")`
+  still throws.
+- Test isolation: a Redis key prefix per Spring test context (`TestDatabases.registerRedis`,
+  `app_keys_N` in `TestcontainersConfiguration`), cleanup by prefix with `TestRedis.deleteKeys`.
+- CLAUDE.md: a targeted test run must include every test class whose Spring context loads a changed
+  package.
+- Committed by the user: 0738886, 5161aed, d62b56a. This entry, the PLAN tick and the CLAUDE.md rule
+  are a separate docs commit.
+
+**Verified**
+- In session: `RedisHoldStoreTest` (25), `RedisHoldStoreConcurrencyTest` (3 scenarios x 100 rounds),
+  `RedisKeyIsolationTest` (6), `RedisKeyPrefixInAppContextTest` (1), ModularityTest.
+- Regression: the user's first full run failed (512 tests, 6 failed, all `HoldExpirySweeperTest` at
+  context load). Its `@JdbcTest` slice component-scans `inventory.strategy`, found `RedisHoldStore`
+  and had no `StringRedisTemplate`. The first targeted run had not included it. Fixed in the test's
+  setup (Redis auto-configuration + its own key prefix), no assertion changed; sweeper, both strategy
+  contract tests, the four Postgres concurrency classes and the Redis tests then passed (7m 40s).
+- By the user: full suite --rerun BUILD SUCCESSFUL in 13m 11s after the fix;
+  `RedisHoldStoreConcurrencyTest` at 1000 rounds BUILD SUCCESSFUL in 5m 47s.
+
+**Next**: M2.2b (event loader, stream consumer to Postgres through `EventSeat`, expiry through the
+sweeper, reconciler, explicit AOF flags in compose). Notes are under M2.2b and M2.2c in PLAN.md.
+
+**Open problems**
+- 0738886 on its own has one failing test (`everyKeyOfAHoldExpiresAtTheSameMillisecond`, a test
+  helper that Lettuce could not run); 5161aed fixes it. History left as it is.
+- M2.2c needs approval of the contract-test split (behaviour contract for all three strategies,
+  Postgres-locking contract for two) before any test is moved, and a threshold for the stuck-sweeper
+  rule.
+- Single Redis node assumed by the scripts (D-022 known limits).
+- D-022, D-021 and D-020 are drafts for you to rewrite in your own words.
+- `compileJava` "unchecked or unsafe operations" note for `OpenApiConfig`: still not checked.
