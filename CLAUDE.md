@@ -76,6 +76,9 @@ Git Bash forms, run from the repo root. PowerShell forms for me: docs/DEVELOPING
 - Write or update tests with every change. Concurrency code gets a concurrency test.
 - A sub-task's targeted test run must include every test class whose Spring context loads a changed
   package (grep the tests for `@ComponentScan` and `@Import` of that package), not only the new tests.
+  For full application contexts, one class per distinct context is enough (classes sharing a context
+  load it identically): e.g. ApplicationHealthTest for the main API context, plus each class with its
+  own context (CheckoutFailureTest, OrderConcurrencyTest, OpenApiSpecTest). My full run covers the rest.
 - Show evidence when done: the commands you ran and their output.
 - Don't push to remote. I review and push myself.
 - When compacting, preserve: current task ID, files modified, test commands, open problems.
