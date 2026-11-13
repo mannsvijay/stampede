@@ -40,6 +40,22 @@ class HoldClosing {
 
     @Transactional
     ReleaseOutcome release(UUID eventId, UUID holdId, ReleaseReason reason) {
+        return close(eventId, holdId, reason, true);
+    }
+
+    /**
+     * Like {@link #release}, for a hold whose end Redis has already decided (Redis-first strategy,
+     * D-022): Redis no longer has the hold, so it is over whatever the database clock says. Expiry of a
+     * REDIS_FIRST hold is decided by Redis' clock (D-015), and the two clocks can differ by a few ms,
+     * so the "not expired yet by now()" re-check of {@link #release} would leave a hold ACTIVE in
+     * Postgres that Redis has already given away. Same lock order and same writes otherwise.
+     */
+    @Transactional
+    ReleaseOutcome closeAsRedisDecided(UUID eventId, UUID holdId, ReleaseReason reason) {
+        return close(eventId, holdId, reason, false);
+    }
+
+    private ReleaseOutcome close(UUID eventId, UUID holdId, ReleaseReason reason, boolean databaseClockDecides) {
         // Step 8: lock the hold row FIRST (lock order, D-015). A buyer's cancel and the expiry
         // sweeper for the same hold now take turns: the second one waits here, then sees the status
         // the first one wrote and returns NotActive.
@@ -53,7 +69,7 @@ class HoldClosing {
         // The sweeper decided "expired" before it had the lock. Check again now that we hold it: the
         // hold may have been extended in between (PRD 6.3), and then it must not be expired. The
         // comparison runs in SQL so the database clock decides, like everywhere else (D-015).
-        if (reason == ReleaseReason.EXPIRED && !hold.get().expired()) {
+        if (databaseClockDecides && reason == ReleaseReason.EXPIRED && !hold.get().expired()) {
             return new NotExpired(hold.get().expiresAt());
         }
 
