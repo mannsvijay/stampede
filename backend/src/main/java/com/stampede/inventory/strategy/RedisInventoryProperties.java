@@ -3,6 +3,7 @@ package com.stampede.inventory.strategy;
 import java.time.Duration;
 import java.util.regex.Pattern;
 import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.boot.context.properties.bind.ConstructorBinding;
 import org.springframework.boot.context.properties.bind.DefaultValue;
 
 /**
@@ -22,6 +23,8 @@ record RedisInventoryProperties(@DefaultValue("stampede") String keyPrefix,
     // No ':' (the separator inside keys) and no glob characters (cleanup scans by prefix).
     private static final Pattern PREFIX = Pattern.compile("[a-z][a-z0-9_]{0,62}");
 
+    // Two constructors, so tell Boot which one binds the properties.
+    @ConstructorBinding
     RedisInventoryProperties {
         if (keyPrefix == null || !PREFIX.matcher(keyPrefix).matches()) {
             throw new IllegalArgumentException("stampede.inventory.redis.key-prefix must be lowercase letters, "
