@@ -393,6 +393,9 @@ end against the compose stack, and every concurrency harness scenario passed 100
       "Optimistic*ConcurrencyTest" "-Dstampede.harness.rounds=1000"` BUILD SUCCESSFUL in 18m 11s.
 - [x] M2.2 Redis-first strategy (Lua: all-or-nothing hold keys with TTL, per-user cap inside Lua,
       async persistence + reconciler)
+      Done 2026-11-14 (M2.2a, M2.2b, M2.2c-1, M2.2c-2; D-022). Verified by the user: full suite with
+      --rerun BUILD SUCCESSFUL in 19m 28s; 1000-round proof `RedisFirst*ConcurrencyTest`
+      (`-Dstampede.harness.rounds=1000`: four scenarios + two cap scenarios) BUILD SUCCESSFUL in 25m 44s.
       Note (from M1.7, D-019): add PRD 6.10 #5 ("Redis hold state is consistent with Postgres") as an
       `InvariantCheck` in `InvariantChecker`'s list (the after-test listener, harness and monitor
       then run it). Add the stuck-sweeper rule then too: ACTIVE holds whose `expires_at` is older
@@ -504,8 +507,8 @@ end against the compose stack, and every concurrency harness scenario passed 100
         before it ends; two `RedisHoldWriterTest` tests annotated I10 (deliberate drift). `state.lua`: ~39 ms
         median on a loaded 2,000-seat event (note on M2.5). No new dependency, no API change.
         Targeted run (CLAUDE.md rule, 100 rounds): 34 classes, 433 tests, 0 failures, BUILD SUCCESSFUL in
-        24m 5s; all six REDIS_FIRST harness scenarios 100/100 rounds clean. Pending (user): full suite and
-        the 1000-round proof.
+        24m 5s; all six REDIS_FIRST harness scenarios 100/100 rounds clean.
+        Verified by the user: full suite with --rerun BUILD SUCCESSFUL in 19m 28s.
 - [ ] M2.3 Strategy selectable per event (admin endpoint); concurrency test parameterised over all three
       Note (from M1.7, D-019): if an admin endpoint ever changes `per_user_limit`, it must refuse
       (409) a limit below any user's current `used`, checked under the allowance row locks; I8

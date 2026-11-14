@@ -980,3 +980,43 @@ D-022 final). Plan and notes are under M2.2c-2 in PLAN.md.
 - Release and sell hold a Postgres row lock while calling Redis (up to the 2 s command timeout if
   Redis stalls); D-022 known limit.
 - D-022 is a draft for you to rewrite in your own words.
+
+## 2026-11-14 - M2.2c-2 Invariant 5, stuck-sweeper rule, REDIS_FIRST harness (M2.2 done)
+
+**Changed**
+- Decisions (user): rule id I10; at runtime a pinned Redis hold that Postgres shows CONVERTED is
+  excused while its order is younger than the grace (B, like O1/O5); D-022 completed but stays DRAFT;
+  split the harness bases; fix the three bugs below; annotate the lost-live-member test as a known limit.
+- Invariant 5 (I10): `inventory.api.RedisHoldState` (read-only, own prefix) implemented by
+  `RedisHoldStateReader` + `redis/state.lua` (one atomic read: TIME, limit, seat set, seat keys, hold
+  hashes with PTTL, user sets, unacknowledged stream entries under 2 s). `control.invariants.
+  RedisConsistencyCheck`: Redis read before the Postgres snapshot, compared by Redis time, disagreeing
+  keys re-read once; strict in tests; "cannot check" without a reader. `InvariantChecker` takes an
+  `ObjectProvider<RedisHoldState>` (no constructor without it); the after-test listener's fallback passes it.
+- I9 (stuck sweeper): ACTIVE hold > 2 min past expiry; `HoldExpirySweeperTest` annotation {"I8","I9"}.
+- Harness: `ConcurrencyHarness.RoundHooks` (Redis reset + load per round, drain before checks);
+  `RedisFirstConcurrencyTest` (4 scenarios), `RedisFirstHoldCapConcurrencyTest` (2), own database and
+  prefix each. Bases split into `StrategyRaceTest`/`HoldCapRaceTest` (a subclass's
+  `@DynamicPropertySource` can't override its parent's: measured twice). Cap fixture stores the strategy kind.
+- Bugs found and fixed: concurrent catch-up of one hold raised 23505 on `uq_holds_id_event`
+  (`ON CONFLICT DO NOTHING`; regression test failed first); Postgres-wins path now adds the buyers'
+  +inf cap members; `closeGone` (R2, consumer pre-close) removes a gone hold's finite cap member.
+- Tests: `RedisConsistencyCheckTest` (21, stub Redis), `RedisHoldStateReaderTest` (10, incl. timing),
+  `InvariantCheckerTest` +3, writer regression test; `RedisEventLoaderTest` drains before it ends; two
+  `RedisHoldWriterTest` tests annotated I10 (deliberate drift).
+- Docs: D-022 M2.2c-2 section and known limits; D-019 update note; PLAN note on M2.5.
+
+**Verified**
+- Targeted run (CLAUDE.md rule, 100 rounds): 34 classes, 433 tests, 0 failures, BUILD SUCCESSFUL in 24m 5s;
+  all six REDIS_FIRST scenarios 100/100 rounds clean.
+- By the user: full suite with --rerun BUILD SUCCESSFUL in 19m 28s; 1000-round proof
+  `RedisFirst*ConcurrencyTest` BUILD SUCCESSFUL in 25m 44s.
+
+**Next**: M2.3 strategy selectable per event (admin endpoint), concurrency test over all three.
+
+**Open problems**
+- `state.lua` blocks Redis ~39 ms (median, 33-55 ms) on a loaded 2,000-seat event; the monitor runs it
+  per open REDIS_FIRST event every 30 s. Must be measured in M2.5 (PLAN note with options).
+- A lost live cap member is never repaired (no reconciler rule); D-022 known limit, I10 shows it.
+- I10 compares nothing for an event not loaded in Redis (after a restart, until R0, up to 30 s).
+- D-022 is a draft for you to rewrite in your own words.
