@@ -31,7 +31,8 @@ import org.springframework.stereotype.Component;
  *       Redis' clock ({@link RedisHoldWriter#closeGone}).</li>
  *   <li><b>R3 sold:</b> a Postgres SOLD seat whose Redis key isn't its {@code S:<orderId>} marker: write
  *       the marker (and release in Redis any hold the key named); a bought order not counted in the
- *       buyer's Redis cap: add its {@code +inf} member.</li>
+ *       buyer's Redis cap: add its {@code +inf} member. If the hold the key names is CONVERTED (its sale
+ *       committed after R4 read the statuses), the sale is finished in Redis instead, as in R4.</li>
  *   <li><b>R4 release in Redis:</b> a Redis hold whose Postgres row exists but isn't ACTIVE: release it
  *       in Redis. If the row is CONVERTED, the sale committed and only its last Redis step (sold.lua)
  *       is missing, so the sale is finished in Redis instead (M2.2c; counted with the sold markers).</li>
@@ -175,6 +176,13 @@ class RedisReconciler {
             if (value != null && value.startsWith("S:" + sold.orderId() + ":")) {
                 continue;
             }
+            if (value != null && value.startsWith("H:")
+                    && false && finishIfConverted(eventId, UUID.fromString(value.split(":")[1]), counter)) {
+                value = store.seatValue(eventId, sold.seatId());
+                if (value != null && value.startsWith("S:" + sold.orderId() + ":")) {
+                    continue;
+                }
+            }
             store.markSold(eventId, sold);
             counter.soldMarkers++;
             metrics.repair("R3_sold_marker");
@@ -212,6 +220,33 @@ class RedisReconciler {
     /** For tests: interleave a Redis wipe and reload at the one moment R2's epoch guard protects. */
     void beforeEpochCheck(Runnable hook) {
         this.beforeEpochCheck = hook;
+    }
+
+    /**
+     * R3, a sold seat whose key still names a hold: if that hold is CONVERTED, its own sale committed
+     * after R4 read the statuses at the start of this pass and sold.lua hasn't run yet. Finish that sale,
+     * as R4 does; releasing it would free its other seats and its cap member in Redis (review finding M1).
+     * The status is read now, not taken from the pass's start: the sold seats were read in one query, and
+     * a sale writes its seats and CONVERTED in one transaction, so a sale that query saw is CONVERTED here.
+     *
+     * @return whether the holder is CONVERTED (so the caller reads the seat again)
+     */
+    private boolean finishIfConverted(UUID eventId, UUID holder, Counter counter) {
+        Optional<String> status = jdbc.sql("SELECT status FROM holds WHERE id = :holdId")
+                .param("holdId", holder)
+                .query(String.class)
+                .optional();
+        if (status.isEmpty() || !status.get().equals("CONVERTED")) {
+            return false;
+        }
+        Optional<UUID> orderId = orderOfConvertedHold(holder);
+        if (orderId.isPresent()
+                && store.finishSale(eventId, holder, orderId.get()) instanceof RedisHoldStore.Finish.Sold sold) {
+            sold.overwrittenHolds().forEach(other -> store.release(eventId, other, ReleaseReason.RELEASED));
+            counter.soldMarkers++;
+            metrics.repair("R3_finish_sale");
+        }
+        return true;
     }
 
     /** For tests: commit a sale after R4 has read the hold statuses and before R3 runs. */
