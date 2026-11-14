@@ -147,6 +147,48 @@ class RedisReconcilerTest extends RedisPersistenceTestSupport {
     }
 
     @Test
+    @ExpectInvariantViolations(rules = {"O1", "O5", "O7"},
+            reason = "Inventory-only test of a sale (D-017 step 3): the order is a bare PENDING row that booking's step 4 never marks PAID")
+    void r3FinishesASaleThatCommittedAfterR4ReadItsStatusInsteadOfReleasingIt() {
+        load();
+        UUID holdId = hold(USER, FIVE_MINUTES, SEATS.get(0), SEATS.get(1));
+        drain();
+        UUID orderId = UUID.randomUUID();
+        jdbc.sql("""
+                INSERT INTO orders (id, user_id, event_id, hold_id, status, total_paise, saga_state)
+                VALUES (?, ?, ?, ?, 'PENDING', 300000, 'ORDER_CREATED')
+                """).params(orderId, USER, EVENT, holdId).update();
+        store.pin(EVENT, holdId);   // step 1 of the sale
+        // Step 2 commits after R4 has read the hold as ACTIVE; step 3 (sold.lua) hasn't run yet.
+        reconciler.beforeSoldSeats(() ->
+                assertThat(closing.sell(EVENT, holdId, orderId)).isInstanceOf(SellOutcome.Sold.class));
+        Repairs repairs;
+        try {
+            repairs = reconciler.reconcile(EVENT);
+        } finally {
+            reconciler.beforeSoldSeats(() -> { });
+        }
+
+        // Finished like R4 would, not released: a release frees the hold's other seats and its cap
+        // member in Redis (and writes a RELEASED entry for a CONVERTED hold) until R3 catches up.
+        assertThat(repairs.releasedInRedis()).as("R3 released the sold hold in Redis").isZero();
+        assertThat(counter(RedisStreamMetrics.REPAIRS, "rule", "R3_release_in_redis")).isZero();
+        assertThat(counter(RedisStreamMetrics.REPAIRS, "rule", "R3_finish_sale")).isEqualTo(1);
+        assertThat(store.seatValue(EVENT, SEATS.get(0))).startsWith("S:" + orderId + ":");
+        assertThat(store.seatValue(EVENT, SEATS.get(1))).startsWith("S:" + orderId + ":");
+        assertThat(store.liveHold(EVENT, holdId)).isEmpty();
+        assertThat(store.hasSoldMember(EVENT, new RedisHoldStore.SoldMember(USER, holdId, 2))).isTrue();
+        assertThat(store.used(EVENT, USER)).isEqualTo(2);
+        assertThat(redis.opsForStream().range(store.keys().stream(), org.springframework.data.domain.Range.unbounded()))
+                .as("no RELEASED entry for the CONVERTED hold")
+                .noneMatch(record -> {
+                    StreamEntry entry = entry(record);
+                    return entry.type() == StreamEntry.Type.RELEASED && entry.hold().holdId().equals(holdId);
+                });
+        assertThat(reconciler.reconcileOnce()).isEqualTo(Repairs.NONE);
+    }
+
+    @Test
     void r3RestoresSoldMarkersAndTheBuyersCapAndReleasesARedisHoldOnASoldSeat() {
         load();
         UUID holdId = hold(USER, FIVE_MINUTES, SEATS.get(0));   // Redis doesn't know the seat is sold...
