@@ -348,6 +348,40 @@ class RedisConsistencyCheckTest {
     }
 
     @Test
+    void aPinnedHoldPastItsExpiryThatPostgresAlreadySoldIsExcusedOnlyWhileItsOrderIsYoung() {
+        // Review finding L1: as above, but the sale committed after the hold's expiry (or sold.lua failed
+        // and the time ran out since). By time the seat is "free" in Redis, yet its key still names the
+        // pinned hold (hold.lua treats it as taken), so the difference is that sale finishing too.
+        Instant expired = T.minus(Duration.ofSeconds(1));
+        UUID order = UUID.randomUUID();
+        jdbc.sql("UPDATE holds SET status = 'CONVERTED', expires_at = ? WHERE id = ?")
+                .params(expired.atOffset(ZoneOffset.UTC), H1).update();
+        order(order, ALICE, H1, "PENDING");
+        sold(S2, order);
+        redis.first = withHold(new Hold(H1, ALICE, List.of(S2), CREATED, expired, true))
+                .andThen(withMembers(ALICE, new CapMember(H1, 1, null))).apply(baselineRedis());
+
+        assertThat(i10(STRICT)).as("strict: always reported").hasSize(2)
+                .anyMatch(v -> v.contains("seat " + S2 + " is free in Redis but sold to " + order));
+        assertI10(GRACE);
+
+        jdbc.sql("UPDATE orders SET created_at = now() - interval '1 hour' WHERE id = ?").param(order).update();
+        assertThat(i10(GRACE)).as("past the grace: sold.lua and R4 both failed to finish it").hasSize(2);
+    }
+
+    @Test
+    void aPinnedHoldPastItsExpiryWhoseSaleRolledBackAgreesWithPostgres() {
+        // The other way a pinned hold outlives its expiry: the Postgres sale rolled back and no
+        // compensation ran, so the sweeper will free it. By time it is over on both sides: nothing to report.
+        Instant expired = T.minus(Duration.ofSeconds(1));
+        jdbc.sql("UPDATE holds SET expires_at = ? WHERE id = ?").params(expired.atOffset(ZoneOffset.UTC), H1).update();
+        redis.first = withHold(new Hold(H1, ALICE, List.of(S2), CREATED, expired, true))
+                .andThen(withMembers(ALICE, new CapMember(H1, 1, null))).apply(baselineRedis());
+
+        assertI10(STRICT);
+    }
+
+    @Test
     void anUnpinnedHoldThatPostgresSoldIsNotASaleFinishing() {
         UUID order = UUID.randomUUID();
         jdbc.sql("UPDATE holds SET status = 'CONVERTED' WHERE id = ?").param(H1).update();

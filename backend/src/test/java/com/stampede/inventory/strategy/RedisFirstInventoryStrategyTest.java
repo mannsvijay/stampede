@@ -357,6 +357,22 @@ class RedisFirstInventoryStrategyTest extends InventoryStrategyContractTest {
         assertThat(store.used(EVENT_A, USER)).isZero();
     }
 
+    @Test
+    void releaseOfAHoldRedisLostAlsoRemovesItsCapMember() {
+        // Review finding L5: Redis lost this one hold's hash and seat key (partial loss), but its cap
+        // member, scored with its expiry, would keep counting towards the user's cap for five minutes.
+        UUID holdId = UUID.randomUUID();
+        strategy.hold(request(holdId, EVENT_A, SEAT_1));
+        redis.delete(List.of(store.keys().hold(EVENT_A, holdId), store.keys().seat(EVENT_A, SEAT_1)));
+        assertThat(store.used(EVENT_A, USER)).as("the member is still there").isEqualTo(1);
+
+        assertThat(strategy.release(EVENT_A, holdId, ReleaseReason.RELEASED)).isEqualTo(new NotActive("RELEASED"));
+
+        assertThat(hold(holdId).orElseThrow().status()).isEqualTo("RELEASED");
+        assertThat(used(EVENT_A)).isZero();
+        assertThat(store.used(EVENT_A, USER)).as("Redis' cap agrees with the Postgres allowance").isZero();
+    }
+
     /** Wipes this context's Redis keys once, after catch-up; records the transaction of every load. */
     private List<String> wipeRedisBeforeTheGateAndRecordSnapshots() {
         AtomicBoolean wiped = new AtomicBoolean();

@@ -4,6 +4,7 @@ import com.stampede.inventory.strategy.HoldClosing.CloseDecision;
 import com.stampede.inventory.strategy.HoldClosing.LockedHold;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.function.Supplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -92,8 +93,8 @@ class RedisFirstInventoryStrategy implements InventoryStrategy {
             return writer.expire(eventId, holdId);   // the sweeper; Redis' clock decides (D-022)
         }
         catchUp.catchUp(eventId, holdId);
-        beforeGate.run();
-        return closing.closeWith(eventId, holdId, hold -> releaseInRedis(hold, reason));
+        return loadingOutsideTheLock(eventId,
+                () -> closing.closeWith(eventId, holdId, hold -> releaseInRedis(hold, reason)));
     }
 
     /**
@@ -112,6 +113,10 @@ class RedisFirstInventoryStrategy implements InventoryStrategy {
                         throw new IllegalStateException("release.lua answered NOT_EXPIRED for reason " + reason);
                 case RedisHoldStore.Release.Gone gone -> {
                     if (epoch.equals(store.loadEpoch(hold.eventId()))) {
+                        // Redis lost the hold's hash and seats, but its cap member may still count: remove
+                        // it, as closeGone does (review finding L5). Right even if this transaction rolls
+                        // back, since Redis no longer has the hold; a +inf (sold) member is never removed.
+                        store.removeGoneHoldMember(hold.eventId(), hold.userId(), hold.holdId(), hold.seatIds().size());
                         return new CloseDecision.Close(writer.reasonForGoneHold(hold.expiresAt()), true);
                     }
                     if (attempt == 2) {
@@ -126,9 +131,9 @@ class RedisFirstInventoryStrategy implements InventoryStrategy {
     @Override
     public SellOutcome sell(UUID eventId, UUID holdId, UUID orderId) {
         catchUp.catchUp(eventId, holdId);
-        beforeGate.run();
         // Steps 1 and 2: pin under the row lock, then the Postgres sale, in one transaction.
-        SellOutcome outcome = closing.sellWith(eventId, holdId, orderId, this::pinInRedis);
+        SellOutcome outcome = loadingOutsideTheLock(eventId,
+                () -> closing.sellWith(eventId, holdId, orderId, this::pinInRedis));
         if (outcome instanceof SellOutcome.Sold) {
             afterPostgresSale.run();
             finishInRedis(eventId, holdId, orderId);   // step 3, after the commit
@@ -190,17 +195,45 @@ class RedisFirstInventoryStrategy implements InventoryStrategy {
         }
     }
 
-    /** The event's load epoch, loading the event first if Redis doesn't have it. */
+    /**
+     * The event's load epoch, inside the row-locked gate. If Redis doesn't have the event (wiped after
+     * catch-up loaded it), throws {@link EventNotLoaded}: the transaction rolls back, having written
+     * nothing, and {@link #loadingOutsideTheLock} loads the event and tries once more. Never loads here:
+     * the loader would join this transaction, losing its own REPEATABLE READ snapshot, and run a whole
+     * event load while the hold row is locked (review finding L2).
+     */
     private Optional<String> loadedEpoch(UUID eventId) {
         Optional<String> epoch = store.loadEpoch(eventId);
         if (epoch.isEmpty()) {
-            loader.ensureLoaded(eventId);
-            epoch = store.loadEpoch(eventId);
-        }
-        if (epoch.isEmpty()) {
             // Never compare against "not loaded": an absent hold would then look like a real GONE.
-            throw new IllegalStateException("Event " + eventId + " is not loaded into Redis after loading it");
+            throw new EventNotLoaded(eventId);
         }
         return epoch;
+    }
+
+    /**
+     * Runs a row-locked release or sale (its own transaction). If its gate found the event missing from
+     * Redis, that transaction has rolled back; load the event now, outside any transaction and lock, and
+     * run it once more.
+     */
+    private <T> T loadingOutsideTheLock(UUID eventId, Supplier<T> lockedOperation) {
+        for (int attempt = 1; ; attempt++) {
+            beforeGate.run();
+            try {
+                return lockedOperation.get();
+            } catch (EventNotLoaded e) {
+                if (attempt == 2) {
+                    throw new IllegalStateException("Event " + eventId + " is not loaded into Redis after loading it", e);
+                }
+                loader.ensureLoaded(eventId);
+            }
+        }
+    }
+
+    /** The gate found the event missing from Redis; thrown before anything is written, so it only rolls back. */
+    private static final class EventNotLoaded extends RuntimeException {
+        EventNotLoaded(UUID eventId) {
+            super("Event " + eventId + " is not loaded into Redis", null, false, false);
+        }
     }
 }
