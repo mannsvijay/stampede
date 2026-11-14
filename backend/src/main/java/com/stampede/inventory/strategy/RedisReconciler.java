@@ -177,7 +177,7 @@ class RedisReconciler {
                 continue;
             }
             if (value != null && value.startsWith("H:")
-                    && false && finishIfConverted(eventId, UUID.fromString(value.split(":")[1]), counter)) {
+                    && finishIfConverted(eventId, UUID.fromString(value.split(":")[1]), counter)) {
                 value = store.seatValue(eventId, sold.seatId());
                 if (value != null && value.startsWith("S:" + sold.orderId() + ":")) {
                     continue;

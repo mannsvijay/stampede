@@ -19,11 +19,15 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 /**
  * The Redis-first strategy (M2.2c, D-022) against the behaviour contract ({@link InventoryStrategyContractTest},
@@ -52,6 +56,9 @@ class RedisFirstInventoryStrategyTest extends InventoryStrategyContractTest {
 
     @Autowired
     MeterRegistry meters;
+
+    @Autowired
+    RedisEventLoader loader;
 
     @Override
     protected InventoryStrategy strategyUnderTest() {
@@ -299,6 +306,70 @@ class RedisFirstInventoryStrategyTest extends InventoryStrategyContractTest {
 
         assertThat(seat(EVENT_A, SEAT_1)).isEqualTo(new SeatRow(SeatStatus.SOLD, null, orderId, 2));
         assertThat(store.seatValue(EVENT_A, SEAT_1)).startsWith("S:" + orderId + ":");
+    }
+
+    // Review finding L2: Redis lost the event after catch-up loaded it, so the row-locked gate finds it
+    // missing. The load must not run inside the sale's or release's transaction (it would join it, losing
+    // its own REPEATABLE READ snapshot, and run while the hold row is locked): roll back, load, retry.
+
+    @Test
+    @ExpectInvariantViolations(rules = {"O1", "O5", "O7"},
+            reason = "Strategy unit test of step 3 only (D-017): the order is a bare PENDING row and step 4 (booking marks it PAID) never runs, so its seats are SOLD to a PENDING order")
+    void aSaleThatFindsTheEventGoneUnderTheRowLockLoadsItInItsOwnSnapshotAndSells() {
+        UUID holdId = UUID.randomUUID();
+        strategy.hold(request(holdId, EVENT_A, SEAT_1));
+        UUID orderId = pendingOrder(holdId, EVENT_A);
+        List<String> snapshots = wipeRedisBeforeTheGateAndRecordSnapshots();
+        SellOutcome outcome;
+        try {
+            outcome = strategy.sell(EVENT_A, holdId, orderId);
+        } finally {
+            redisFirst.beforeGate(() -> { });
+            loader.inSnapshot(() -> { });
+        }
+
+        assertThat(snapshots).as("the reload ran in its own read-only REPEATABLE READ transaction")
+                .containsExactly("isolation=" + TransactionDefinition.ISOLATION_REPEATABLE_READ + " readOnly=true");
+        assertThat(outcome).isInstanceOf(SellOutcome.Sold.class);
+        assertThat(seat(EVENT_A, SEAT_1)).isEqualTo(new SeatRow(SeatStatus.SOLD, null, orderId, 2));
+        assertThat(store.seatValue(EVENT_A, SEAT_1)).startsWith("S:" + orderId + ":");
+    }
+
+    @Test
+    void aReleaseThatFindsTheEventGoneUnderTheRowLockLoadsItInItsOwnSnapshotAndReleases() {
+        UUID holdId = UUID.randomUUID();
+        strategy.hold(request(holdId, EVENT_A, SEAT_1));
+        List<String> snapshots = wipeRedisBeforeTheGateAndRecordSnapshots();
+        ReleaseOutcome outcome;
+        try {
+            outcome = strategy.release(EVENT_A, holdId, ReleaseReason.RELEASED);
+        } finally {
+            redisFirst.beforeGate(() -> { });
+            loader.inSnapshot(() -> { });
+        }
+
+        assertThat(snapshots).as("the reload ran in its own read-only REPEATABLE READ transaction")
+                .containsExactly("isolation=" + TransactionDefinition.ISOLATION_REPEATABLE_READ + " readOnly=true");
+        assertThat(outcome).isInstanceOf(Released.class);
+        assertThat(hold(holdId).orElseThrow().status()).isEqualTo("RELEASED");
+        assertThat(store.liveHold(EVENT_A, holdId)).isEmpty();
+        assertThat(store.seatValue(EVENT_A, SEAT_1)).isNull();
+        assertThat(store.used(EVENT_A, USER)).isZero();
+    }
+
+    /** Wipes this context's Redis keys once, after catch-up; records the transaction of every load. */
+    private List<String> wipeRedisBeforeTheGateAndRecordSnapshots() {
+        AtomicBoolean wiped = new AtomicBoolean();
+        redisFirst.beforeGate(() -> {
+            if (wiped.compareAndSet(false, true)) {
+                TestRedis.deleteKeys(redis, REDIS_PREFIX);
+            }
+        });
+        List<String> snapshots = new CopyOnWriteArrayList<>();
+        loader.inSnapshot(() -> snapshots.add("isolation="
+                + TransactionSynchronizationManager.getCurrentTransactionIsolationLevel()
+                + " readOnly=" + TransactionSynchronizationManager.isCurrentTransactionReadOnly()));
+        return snapshots;
     }
 
     @Test

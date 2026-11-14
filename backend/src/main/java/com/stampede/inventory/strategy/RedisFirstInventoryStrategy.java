@@ -44,6 +44,8 @@ class RedisFirstInventoryStrategy implements InventoryStrategy {
     private final HoldMetrics metrics;
     /** Test hook only: runs after the Postgres sale committed, before sold.lua (a slow network, say). */
     private volatile Runnable afterPostgresSale = () -> { };
+    /** Test hook only: runs after catch-up, just before the row-locked release or sale starts. */
+    private volatile Runnable beforeGate = () -> { };
 
     RedisFirstInventoryStrategy(RedisHoldStore store, RedisEventLoader loader, RedisCatchUp catchUp,
                                 RedisHoldWriter writer, HoldClosing closing, HoldMetrics metrics) {
@@ -90,6 +92,7 @@ class RedisFirstInventoryStrategy implements InventoryStrategy {
             return writer.expire(eventId, holdId);   // the sweeper; Redis' clock decides (D-022)
         }
         catchUp.catchUp(eventId, holdId);
+        beforeGate.run();
         return closing.closeWith(eventId, holdId, hold -> releaseInRedis(hold, reason));
     }
 
@@ -123,6 +126,7 @@ class RedisFirstInventoryStrategy implements InventoryStrategy {
     @Override
     public SellOutcome sell(UUID eventId, UUID holdId, UUID orderId) {
         catchUp.catchUp(eventId, holdId);
+        beforeGate.run();
         // Steps 1 and 2: pin under the row lock, then the Postgres sale, in one transaction.
         SellOutcome outcome = closing.sellWith(eventId, holdId, orderId, this::pinInRedis);
         if (outcome instanceof SellOutcome.Sold) {
@@ -135,6 +139,11 @@ class RedisFirstInventoryStrategy implements InventoryStrategy {
     /** For tests: widen the window between the Postgres commit and sold.lua. */
     void afterPostgresSale(Runnable hook) {
         this.afterPostgresSale = hook;
+    }
+
+    /** For tests: wipe Redis between catch-up (which loads the event) and the row-locked gate. */
+    void beforeGate(Runnable hook) {
+        this.beforeGate = hook;
     }
 
     /** Step 1, under the hold row lock: empty = go ahead and sell in Postgres. */

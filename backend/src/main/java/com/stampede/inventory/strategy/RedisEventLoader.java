@@ -34,6 +34,8 @@ class RedisEventLoader {
     private final JdbcClient jdbc;
     private final RedisHoldStore store;
     private final TransactionTemplate snapshotTransaction;
+    /** Test hook only: runs inside the snapshot transaction, before its queries. */
+    private volatile Runnable inSnapshot = () -> { };
 
     RedisEventLoader(JdbcClient jdbc, RedisHoldStore store, PlatformTransactionManager transactions) {
         this.jdbc = jdbc;
@@ -64,7 +66,10 @@ class RedisEventLoader {
         if (store.isLoaded(eventId)) {
             return false;
         }
-        EventSnapshot snapshot = snapshotTransaction.execute(status -> snapshot(eventId));
+        EventSnapshot snapshot = snapshotTransaction.execute(status -> {
+            inSnapshot.run();
+            return snapshot(eventId);
+        });
         Load result = store.load(eventId, snapshot);
         if (result instanceof Load.Loaded loaded) {
             log.info("Loaded event {} into Redis: {} seats, {} sold, {} holds restored, {} already expired",
@@ -73,6 +78,11 @@ class RedisEventLoader {
             return true;
         }
         return false;
+    }
+
+    /** For tests: observe the transaction the snapshot runs in. */
+    void inSnapshot(Runnable hook) {
+        this.inSnapshot = hook;
     }
 
     private EventSnapshot snapshot(UUID eventId) {
