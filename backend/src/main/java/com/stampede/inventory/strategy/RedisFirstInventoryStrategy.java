@@ -42,6 +42,8 @@ class RedisFirstInventoryStrategy implements InventoryStrategy {
     private final RedisHoldWriter writer;
     private final HoldClosing closing;
     private final HoldMetrics metrics;
+    /** Test hook only: runs after the Postgres sale committed, before sold.lua (a slow network, say). */
+    private volatile Runnable afterPostgresSale = () -> { };
 
     RedisFirstInventoryStrategy(RedisHoldStore store, RedisEventLoader loader, RedisCatchUp catchUp,
                                 RedisHoldWriter writer, HoldClosing closing, HoldMetrics metrics) {
@@ -124,9 +126,15 @@ class RedisFirstInventoryStrategy implements InventoryStrategy {
         // Steps 1 and 2: pin under the row lock, then the Postgres sale, in one transaction.
         SellOutcome outcome = closing.sellWith(eventId, holdId, orderId, this::pinInRedis);
         if (outcome instanceof SellOutcome.Sold) {
+            afterPostgresSale.run();
             finishInRedis(eventId, holdId, orderId);   // step 3, after the commit
         }
         return outcome;
+    }
+
+    /** For tests: widen the window between the Postgres commit and sold.lua. */
+    void afterPostgresSale(Runnable hook) {
+        this.afterPostgresSale = hook;
     }
 
     /** Step 1, under the hold row lock: empty = go ahead and sell in Postgres. */
