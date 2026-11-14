@@ -2,6 +2,7 @@ package com.stampede.testsupport;
 
 import com.stampede.control.invariants.InvariantChecker;
 import com.stampede.control.invariants.Violation;
+import com.stampede.inventory.api.RedisHoldState;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.lang.reflect.Method;
@@ -149,10 +150,15 @@ public class InvariantAssertionListener extends AbstractTestExecutionListener {
         return String.join("; ", wrong);
     }
 
-    /** The app's checker when the context has one; a @JdbcTest slice builds its own. */
+    /**
+     * The app's checker when the context has one; a @JdbcTest slice builds its own, with the context's
+     * Redis reader if it has one. Without a reader the Redis rule (I10) is not skipped: it reports
+     * "cannot check" for every REDIS_FIRST event (D-022, M2.2c-2).
+     */
     private static InvariantChecker checker(ApplicationContext context) {
         return context.getBeanProvider(InvariantChecker.class).getIfAvailable(
-                () -> new InvariantChecker(jdbc(context), context.getBean(PlatformTransactionManager.class)));
+                () -> new InvariantChecker(jdbc(context), context.getBean(PlatformTransactionManager.class),
+                        context.getBeanProvider(RedisHoldState.class)));
     }
 
     private static JdbcClient jdbc(ApplicationContext context) {

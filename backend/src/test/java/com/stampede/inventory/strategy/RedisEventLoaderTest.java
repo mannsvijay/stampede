@@ -61,6 +61,9 @@ class RedisEventLoaderTest extends RedisPersistenceTestSupport {
         assertThat(((Rejected) store.hold(request(USER, SEATS.get(4), SEATS.get(5)))).reason())
                 .isEqualTo(HoldRejection.LIMIT_EXCEEDED);
         assertThat(store.hold(request(USER, SEATS.get(4)))).isInstanceOf(Held.class);
+        // That last hold's HELD entry reaches Postgres too, so the strict after-test check of invariant
+        // 5 (I10, zero tolerance after draining) sees both stores agree.
+        drain();
     }
 
     @Test

@@ -70,7 +70,7 @@ import org.springframework.transaction.annotation.Transactional;
 @AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
 @ImportAutoConfiguration(RedisAutoConfiguration.class)
 @Import({StrategyTestConfig.class, RedisHoldStore.class, RedisStreamMetrics.class, RedisHoldWriter.class,
-        RedisEventLoader.class, RedisStreamConsumer.class, RedisCatchUp.class, RedisFirstInventoryStrategy.class})
+        RedisEventLoader.class, RedisStreamConsumer.class, RedisCatchUp.class, RedisFirstInventoryStrategy.class, RedisHoldStateReader.class})
 @Transactional(propagation = Propagation.NOT_SUPPORTED)
 abstract class InventoryStrategyContractTest {
 

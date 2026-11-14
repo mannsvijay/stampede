@@ -373,6 +373,23 @@ class RedisHoldStore {
         redis.persist(key);
     }
 
+    /**
+     * Removes the cap member of a hold Redis no longer has (M2.2c-2): its hash and seat keys are gone (lost,
+     * or deleted without release.lua), but a member with a future score would keep counting towards the
+     * user's cap until that score passes. A {@code +inf} member is never removed: it counts a sale.
+     * Returns whether a member was removed.
+     */
+    boolean removeGoneHoldMember(UUID eventId, UUID userId, UUID holdId, int seatCount) {
+        String key = keys.user(eventId, userId);
+        String member = holdId + ":" + seatCount;
+        Double score = redis.opsForZSet().score(key, member);
+        if (score == null || score.isInfinite()) {
+            return false;
+        }
+        Long removed = redis.opsForZSet().remove(key, member);
+        return removed != null && removed > 0;
+    }
+
     RedisKeys keys() {
         return keys;
     }

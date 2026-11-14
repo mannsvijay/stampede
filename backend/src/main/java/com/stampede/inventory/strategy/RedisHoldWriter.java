@@ -3,6 +3,7 @@ package com.stampede.inventory.strategy;
 import com.stampede.inventory.seat.EventSeat;
 import com.stampede.inventory.seat.IllegalSeatTransitionException;
 import com.stampede.inventory.seat.SeatStatus;
+import com.stampede.inventory.strategy.RedisHoldStore.SoldMember;
 import com.stampede.inventory.strategy.RedisHoldStore.SoldSeat;
 import com.stampede.inventory.strategy.StreamEntry.HoldFacts;
 import java.time.Instant;
@@ -30,7 +31,7 @@ import org.springframework.transaction.support.TransactionTemplate;
  * (a reclaimed HELD after its RELEASED), and the consumer and the reconciler may do the same work.
  * The {@code holds} row is the gate:
  * <ol>
- *   <li>A HELD inserts the row with {@code ON CONFLICT (id) DO NOTHING}. If a row with that id exists,
+ *   <li>A HELD inserts the row with {@code ON CONFLICT DO NOTHING}. If a row with that id exists,
  *       in any status, the HELD was already handled and changes nothing.</li>
  *   <li>A RELEASED for a hold Postgres doesn't have yet inserts the row as already over (a
  *       "tombstone": status RELEASED, no seat points at it), so a HELD redelivered later finds it.</li>
@@ -155,7 +156,17 @@ class RedisHoldWriter {
         if (!store.isLoaded(eventId)) {
             return new ReleaseOutcome.NotExpired(expiresAt.get());
         }
-        return closing.closeAsRedisDecided(eventId, holdId, reasonForGoneHold(expiresAt.get()));
+        ReleaseOutcome outcome = closing.closeAsRedisDecided(eventId, holdId, reasonForGoneHold(expiresAt.get()));
+        if (outcome instanceof ReleaseOutcome.Released) {
+            // Redis lost the hold's hash and seats, but its cap member may still count (M2.2c-2, found by
+            // invariant 5): remove it, so Redis' cap agrees with the Postgres allowance just decremented.
+            jdbc.sql("SELECT user_id, cardinality(seat_ids) AS seats FROM holds WHERE id = ?")
+                    .param(holdId)
+                    .query((rs, n) -> store.removeGoneHoldMember(eventId, rs.getObject("user_id", UUID.class), holdId,
+                            rs.getInt("seats")))
+                    .optional();
+        }
+        return outcome;
     }
 
     /**
@@ -314,7 +325,8 @@ class RedisHoldWriter {
     /**
      * Postgres disagrees with a live Redis hold and wins (D-022): a seat is sold or held by a hold Redis
      * still has, a seat isn't in the event, or the cap is full. The hold is recorded as RELEASED, sold
-     * seats get their marker back in Redis, and the hold is released in Redis. The marker goes first:
+     * seats get their marker back in Redis (and their buyers' {@code +inf} cap members), and the hold is
+     * released in Redis. The marker goes first:
      * release.lua deletes only seat keys that still name this hold, so the sold seats stay taken.
      */
     private Applied postgresWins(HoldFacts hold, Blocked blocked) {
@@ -323,8 +335,16 @@ class RedisHoldWriter {
                 blocked.heldBy(), blocked.soldSeats(), blocked.unknownSeats(), blocked.overCap());
         insertRow(hold, "RELEASED");
         if (!blocked.soldSeats().isEmpty()) {
-            for (SoldSeat sold : soldSeats(hold.eventId(), blocked.soldSeats())) {
-                store.markSold(hold.eventId(), sold);
+            List<SoldSeat> sold = soldSeats(hold.eventId(), blocked.soldSeats());
+            for (SoldSeat seat : sold) {
+                store.markSold(hold.eventId(), seat);
+            }
+            // The buyers' caps count those seats too, as R3 would repair later (M2.2c-2, found by
+            // invariant 5): Redis didn't know the seats were sold, so it didn't count them either.
+            for (SoldMember member : soldMembers(hold.eventId(), sold.stream().map(SoldSeat::orderId).distinct().toList())) {
+                if (!store.hasSoldMember(hold.eventId(), member)) {
+                    store.addSoldMember(hold.eventId(), member);
+                }
             }
         }
         store.release(hold.eventId(), hold.holdId(), ReleaseReason.RELEASED);
@@ -333,12 +353,18 @@ class RedisHoldWriter {
 
     // ---- SQL ----
 
-    /** Inserts the hold row with Redis' times. Returns false if a row with this id already exists. */
+    /**
+     * Inserts the hold row with Redis' times. Returns false if a row with this id already exists.
+     * {@code ON CONFLICT DO NOTHING} without a target (M2.2c-2): with {@code (id)}, Postgres absorbs only
+     * conflicts on the primary key, and two concurrent inserts of one hold could fail on the table's other
+     * unique constraint, {@code uq_holds_id_event (id, event_id)}, with 23505 instead. Both constraints are
+     * keyed on the id, so any conflict still means "this hold's row exists".
+     */
     private boolean insertRow(HoldFacts hold, String status) {
         int inserted = jdbc.sql("""
                         INSERT INTO holds (id, event_id, user_id, seat_ids, created_at, expires_at, status)
                         VALUES (:holdId, :eventId, :userId, :seatIds, :createdAt, :expiresAt, :status)
-                        ON CONFLICT (id) DO NOTHING
+                        ON CONFLICT DO NOTHING
                         """)
                 .param("holdId", hold.holdId())
                 .param("eventId", hold.eventId())
@@ -387,6 +413,21 @@ class RedisHoldWriter {
                 .query((rs, n) -> new SoldSeat(rs.getObject("seat_id", UUID.class),
                         rs.getObject("order_id", UUID.class),
                         rs.getObject("created_at", OffsetDateTime.class).toInstant()))
+                .list();
+    }
+
+    /** The bought seats of these orders, per buyer and hold, as R3 counts them ({@code <holdId>:<seats>}, +inf). */
+    private List<SoldMember> soldMembers(UUID eventId, List<UUID> orderIds) {
+        return jdbc.sql("""
+                        SELECT o.user_id, o.hold_id, count(*) AS seats
+                        FROM event_seats es JOIN orders o ON o.id = es.order_id
+                        WHERE es.event_id = :eventId AND es.status = 'SOLD' AND es.order_id IN (:orderIds)
+                        GROUP BY o.user_id, o.hold_id
+                        """)
+                .param("eventId", eventId)
+                .param("orderIds", orderIds)
+                .query((rs, n) -> new SoldMember(rs.getObject("user_id", UUID.class),
+                        rs.getObject("hold_id", UUID.class), rs.getInt("seats")))
                 .list();
     }
 

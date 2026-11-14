@@ -63,7 +63,7 @@ import org.springframework.transaction.annotation.Transactional;
 // own: HoldExpirySweeperTest component-scans this package (test classes too), and a second
 // meterRegistry bean would break its context.
 @Import({StrategyTestConfig.class, RedisHoldStore.class, RedisStreamMetrics.class, RedisHoldWriter.class,
-        RedisEventLoader.class, RedisStreamConsumer.class, RedisReconciler.class, InvariantChecker.class})
+        RedisEventLoader.class, RedisStreamConsumer.class, RedisReconciler.class, InvariantChecker.class, RedisHoldStateReader.class})
 @Transactional(propagation = Propagation.NOT_SUPPORTED)
 abstract class RedisPersistenceTestSupport {
 

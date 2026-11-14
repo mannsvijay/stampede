@@ -77,6 +77,11 @@ final class RedisKeys {
         return prefix + ":inv:dead";
     }
 
+    /** Every key of one event starts with this ({@code redis/state.lua} scans for {@code eventPrefix*}). */
+    String eventPrefix(UUID eventId) {
+        return event(eventId);
+    }
+
     private String event(UUID eventId) {
         return prefix + ":ev:" + eventId + ":";
     }

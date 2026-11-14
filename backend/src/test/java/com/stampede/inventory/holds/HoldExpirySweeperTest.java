@@ -208,8 +208,9 @@ class HoldExpirySweeperTest {
     }
 
     @Test
-    @ExpectInvariantViolations(rules = {"I8"},
-            reason = "Deliberate drift: the allowance row is deleted so the sweeper's release must refuse these holds")
+    @ExpectInvariantViolations(rules = {"I8", "I9"},
+            reason = "Deliberate drift: the allowance row is deleted so the sweeper's release must refuse these "
+                    + "holds, which therefore stay ACTIVE 10 minutes past expiry (I9, stuck sweeper)")
     void brokenHoldsDoNotStarveHealthyOnesBehindThem() {
         // Three holds that can't be released are the OLDEST, so they fill the first page (size 2)
         // and half the second on every sweep. Keyset paging must still reach the healthy ones.

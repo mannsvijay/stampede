@@ -60,6 +60,7 @@ class RedisReconcilerTest extends RedisPersistenceTestSupport {
         assertThat(holdStatus(holdId)).isEqualTo("RELEASED");
         assertThat(seat(SEATS.get(0)).status()).isEqualTo(SeatStatus.AVAILABLE);
         assertThat(allowance(USER)).isZero();
+        assertThat(store.used(EVENT, USER)).as("the gone hold's cap member is removed too").isZero();
         assertThat(violations()).isEmpty();
     }
 

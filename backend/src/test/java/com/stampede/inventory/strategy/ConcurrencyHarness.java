@@ -93,6 +93,25 @@ final class ConcurrencyHarness {
         }
     }
 
+    /**
+     * What a strategy with state outside Postgres adds to each round (M2.2c-2). The Postgres strategies
+     * use {@link #NONE}. The Redis-first strategy wipes and reloads its Redis keys after the reset, and
+     * drains its stream (so Postgres has every hold) before any check runs: the checks then compare the
+     * two stores strictly (invariant 5, I10).
+     */
+    interface RoundHooks {
+        RoundHooks NONE = new RoundHooks() {
+        };
+
+        /** Right after the Postgres reset, before the round's setup holds. */
+        default void afterReset() {
+        }
+
+        /** After every call has returned, before I4-I7 and the invariant checker. */
+        default void beforeChecks() {
+        }
+    }
+
     /** The result of one call: exactly one of outcome / error is set. */
     record CallResult(Action action, Object outcome, Throwable error, long nanos) {
     }
@@ -105,9 +124,16 @@ final class ConcurrencyHarness {
     private final Fixture fixture;
     private final Config config;
     private final ExecutorService threads;
+    private final RoundHooks hooks;
 
     ConcurrencyHarness(InventoryStrategy strategy, JdbcClient jdbc, InvariantChecker invariants, Fixture fixture,
             Config config, ExecutorService threads) {
+        this(strategy, jdbc, invariants, fixture, config, threads, RoundHooks.NONE);
+    }
+
+    ConcurrencyHarness(InventoryStrategy strategy, JdbcClient jdbc, InvariantChecker invariants, Fixture fixture,
+            Config config, ExecutorService threads, RoundHooks hooks) {
+        this.hooks = hooks;
         this.strategy = strategy;
         this.jdbc = jdbc;
         this.invariants = invariants;
@@ -124,6 +150,7 @@ final class ConcurrencyHarness {
         for (int round = 0; round < config.rounds(); round++) {
             long seed = config.baseSeed() + round;
             reset();
+            hooks.afterReset();
             RoundPlan plan = scenario.plan(new Random(seed), fixture, config.threads());
 
             List<CallResult> setup = new ArrayList<>();
@@ -139,6 +166,7 @@ final class ConcurrencyHarness {
                 break;
             }
 
+            hooks.beforeChecks();
             List<String> violations = new ArrayList<>();
             for (CallResult result : setup) {
                 if (!(result.outcome() instanceof Held)) {

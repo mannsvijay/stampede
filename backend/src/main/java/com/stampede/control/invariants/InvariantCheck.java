@@ -9,9 +9,9 @@ import org.springframework.jdbc.core.simple.JdbcClient;
  * One invariant rule (M1.7, D-019). It returns a description of every row that breaks the rule for
  * one event, so an empty list means the rule holds.
  * <p>
- * Today every rule is a {@link SqlCheck}. M2.2 adds the Redis rule (PRD 6.10 invariant 5, "Redis hold
- * state is consistent with Postgres") as another implementation of this interface and adds it to
- * the list in {@link InvariantChecker}; the checker itself does not change.
+ * Every rule in the list is a {@link SqlCheck}. The Redis rule (PRD 6.10 invariant 5, I10,
+ * {@link RedisConsistencyCheck}) is not one of them: it must read Redis before the checker's Postgres
+ * snapshot exists, so {@link InvariantChecker} runs it in two phases around the snapshot.
  */
 public interface InvariantCheck {
 

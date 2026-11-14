@@ -9,7 +9,8 @@ import java.util.List;
  * Taken over from the tests: I1-I3 (M1.3) and I8 (M1.4) from {@code HoldInvariants}; O1-O5 (M1.5)
  * and T1-T3 (M1.6) from {@code CheckoutTestSupport}. New in M1.7: V1, O6, O7, C1.
  * <p>
- * PRD 6.10's five invariants: 1 = O6 (and O1), 2 = C1, 3 = T3, 4 = O1, 5 = the Redis rule (M2.2).
+ * PRD 6.10's five invariants: 1 = O6 (and O1), 2 = C1, 3 = T3, 4 = O1, 5 = I10, the Redis rule
+ * ({@link RedisConsistencyCheck}, M2.2c-2). New in M2.2c-2: I9.
  * <p>
  * <b>Grace.</b> The checkout runs one transaction per step (D-017), so between steps a few states are
  * briefly legitimate: seats SOLD and hold CONVERTED while the order is still PENDING (steps 3-4, O1
@@ -88,6 +89,21 @@ final class SqlRules {
             WHERE c.user_id IS NULL
                OR c.used <> coalesce(h.seats, 0)
                OR c.used > ev.per_user_limit
+            """);
+
+    /**
+     * I9 (M2.2c-2, decision C1): an ACTIVE hold more than 2 minutes past its expiry: the expiry
+     * sweeper (5 s tick) is stuck or keeps failing on it. For REDIS_FIRST events the sweeper is the
+     * safety net behind Redis' TTL, which frees the seats in Redis but writes nothing to Postgres. The
+     * same threshold at runtime and in tests, independent of grace: a test that leaves a hold ACTIVE
+     * and just expired is not a stuck sweeper (the sweeper is off in tests).
+     */
+    static final SqlCheck I9 = new SqlCheck("I9", "active hold long past its expiry (stuck sweeper)", """
+            SELECT 'hold ' || h.id::text || ' is ACTIVE but expired '
+                   || round(extract(epoch FROM now() - h.expires_at))::text || ' s ago'
+            FROM holds h
+            WHERE h.event_id = :eventId AND h.status = 'ACTIVE'
+              AND h.expires_at < now() - interval '2 minutes'
             """);
 
     /** V1 (M0.2 note): every event_seat's seat belongs to the event's venue. No FK can say this. */
@@ -275,7 +291,7 @@ final class SqlRules {
             """.formatted(young("o")));
 
     /** Every SQL rule, in report order. */
-    static final List<InvariantCheck> ALL = List.of(I1, I2, I3, I8, V1, O1, O2, O3, O4, O5, O6, O7, C1, T1, T2, T3);
+    static final List<InvariantCheck> ALL = List.of(I1, I2, I3, I8, I9, V1, O1, O2, O3, O4, O5, O6, O7, C1, T1, T2, T3);
 
     private SqlRules() {
     }

@@ -391,7 +391,7 @@ end against the compose stack, and every concurrency harness scenario passed 100
       and OpenApiSpecTest BUILD SUCCESSFUL in 6m 27s; full suite with --rerun (100 rounds) BUILD
       SUCCESSFUL in 15m 20s. 1000-round proof (user): `.\gradlew.bat test --rerun --tests
       "Optimistic*ConcurrencyTest" "-Dstampede.harness.rounds=1000"` BUILD SUCCESSFUL in 18m 11s.
-- [ ] M2.2 Redis-first strategy (Lua: all-or-nothing hold keys with TTL, per-user cap inside Lua,
+- [x] M2.2 Redis-first strategy (Lua: all-or-nothing hold keys with TTL, per-user cap inside Lua,
       async persistence + reconciler)
       Note (from M1.7, D-019): add PRD 6.10 #5 ("Redis hold state is consistent with Postgres") as an
       `InvariantCheck` in `InvariantChecker`'s list (the after-test listener, harness and monitor
@@ -443,7 +443,7 @@ end against the compose stack, and every concurrency harness scenario passed 100
         reuses `StrategyTestConfig`. Rerun of the sweeper test, every `Redis*Test`,
         `*InventoryStrategyTest` and ModularityTest: BUILD SUCCESSFUL in 4m 48s.
         Verified by the user: full suite with --rerun BUILD SUCCESSFUL in 15m 28s.
-  - [ ] M2.2c Strategy, sell, invariants, harness. Split (approved 2026-11-14) into M2.2c-1 and M2.2c-2.
+  - [x] M2.2c Strategy, sell, invariants, harness. Split (approved 2026-11-14) into M2.2c-1 and M2.2c-2.
   - [x] M2.2c-1 Strategy, sell, catch-up, contract split (D-022 "M2.2c-1"). Decisions 2026-11-14: sell =
         pin.lua, Postgres sale, sold.lua (A1); catch-up = this hold only through `applyHeld`, also from
         `HoldService.cancel` (B1); the D-016 retry rule reads Redis for REDIS_FIRST (fixed, not a limit).
@@ -463,7 +463,7 @@ end against the compose stack, and every concurrency harness scenario passed 100
         HoldApiTest, ModularityTest): 26 classes, 355 tests, 0 failures, BUILD SUCCESSFUL in 15m 5s.
         Both epoch-guard tests shown to fail with the guard removed.
         Verified by the user: full suite with --rerun BUILD SUCCESSFUL in 14m 20s.
-  - [ ] M2.2c-2 Invariant 5, the stuck-sweeper rule, the REDIS_FIRST harness, D-022 final.
+  - [x] M2.2c-2 Invariant 5, the stuck-sweeper rule, the REDIS_FIRST harness, D-022 final.
         Decision (2026-11-14, C1): stuck-sweeper rule `I9` = ACTIVE hold whose `expires_at` is more than
         **2 minutes** in the past, the same threshold at runtime and in tests (independent of grace).
         Fires in `HoldExpirySweeperTest#brokenHoldsDoNotStarveHealthyOnesBehindThem` (10-minute holds):
@@ -490,6 +490,22 @@ end against the compose stack, and every concurrency harness scenario passed 100
         Note (from M2.2b): invariant 5 can read `stampede.inventory.redis.stream.oldest.age` (or
         `RedisStreamConsumer.refreshLag`) for its 2 s window; tests drain with `pollOnce` +
         `reclaimOnce` (see `RedisPersistenceTestSupport.drain`).
+        Done 2026-11-14 (D-022 "M2.2c-2"; decisions: rule id I10; a pinned hold CONVERTED in Postgres is
+        excused at runtime while its order is younger than the grace (B); D-022 stays DRAFT):
+        `inventory.api.RedisHoldState` + `RedisHoldStateReader` + `redis/state.lua`;
+        `control.invariants.RedisConsistencyCheck` (I10) run by `InvariantChecker` in two phases around its
+        snapshot; `SqlRules.I9`; `ConcurrencyHarness.RoundHooks` + `RedisRoundHooks`;
+        `RedisFirstConcurrencyTest`, `RedisFirstHoldCapConcurrencyTest` (own database and prefix; the bases
+        were split into `StrategyRaceTest`/`HoldCapRaceTest` because a subclass's `@DynamicPropertySource`
+        can't override its parent's). Tests: `RedisConsistencyCheckTest` (21), `RedisHoldStateReaderTest`
+        (10), `InvariantCheckerTest` +3. Bugs found and fixed (approved): concurrent catch-up 23505
+        (`ON CONFLICT DO NOTHING`, regression test shown to fail first); Postgres-wins path missing the
+        buyers' `+inf` members; R2/`closeGone` leaving the gone hold's cap member. Ripple: one test drains
+        before it ends; two `RedisHoldWriterTest` tests annotated I10 (deliberate drift). `state.lua`: ~39 ms
+        median on a loaded 2,000-seat event (note on M2.5). No new dependency, no API change.
+        Targeted run (CLAUDE.md rule, 100 rounds): 34 classes, 433 tests, 0 failures, BUILD SUCCESSFUL in
+        24m 5s; all six REDIS_FIRST harness scenarios 100/100 rounds clean. Pending (user): full suite and
+        the 1000-round proof.
 - [ ] M2.3 Strategy selectable per event (admin endpoint); concurrency test parameterised over all three
       Note (from M1.7, D-019): if an admin endpoint ever changes `per_user_limit`, it must refuse
       (409) a limit below any user's current `used`, checked under the allowance row locks; I8
@@ -511,6 +527,12 @@ end against the compose stack, and every concurrency harness scenario passed 100
       exhaustion in seat-collision; decide on `SET LOCAL lock_timeout` plus a rejection.
 - [ ] M2.5 `scripts/bench.sh`: runs each strategy, collects k6 JSON + Postgres CPU, writes
       `benchmarks/results/<date>/` and a markdown results table
+      Note (from M2.2c-2, D-022): invariant 5's `state.lua` blocks Redis for ~40 ms (median, 33-55 ms) on
+      a loaded 2,000-seat event with every seat held; the monitor runs it per open REDIS_FIRST event every
+      30 s, and its SCAN cost grows with every key in the Redis database. Measure REDIS_FIRST hold latency
+      with the monitor on and off. If the spikes show, options: read in pages (several short scripts,
+      accepting a non-atomic read and relying on the re-read), check fewer events per tick, or index hold
+      and user ids per event in a set so the script needn't SCAN.
 - [ ] M2.6 Benchmark report v1 in `benchmarks/README.md` with your own analysis of why the numbers differ
       Note (from M0.4): generate module diagrams now that modules have real edges: run Modulith's
       `Documenter` from a test (`spring-modulith-docs` is already on the test classpath via

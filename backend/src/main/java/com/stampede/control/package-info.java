@@ -5,6 +5,8 @@
  * Reads, and never writes, every table of inventory, booking, payments and ticketing in
  * {@code control.invariants} (the invariant checker): the one exception to D-007's table ownership,
  * recorded in D-019. Its rules are joins across modules, so it runs them in a read-only transaction.
+ * Invariant 5 (I10, M2.2c-2) also reads inventory's Redis state, only through the read-only
+ * {@code inventory.api.RedisHoldState}, never Redis keys directly.
  * <p>
  * Allowed dependencies are the D-007 table in docs/DECISIONS.md (plus shared, D-009); ModularityTest
  * enforces them.

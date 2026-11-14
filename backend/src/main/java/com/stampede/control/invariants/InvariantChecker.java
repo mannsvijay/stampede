@@ -4,6 +4,8 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
+import com.stampede.inventory.api.RedisHoldState;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Component;
@@ -20,6 +22,9 @@ import org.springframework.transaction.support.TransactionTemplate;
  * committed between them, and the checker can't write. Called inside an existing transaction (a
  * {@code @Transactional} test), it joins that transaction instead and sees its uncommitted rows.
  * <p>
+ * Called inside an existing transaction, the Redis read of I10 happens after that transaction's
+ * snapshot; that is only done where nothing runs concurrently (after a test, in the harness).
+ * <p>
  * Used by the after-test assertion and the concurrency harness (strict, grace {@link Duration#ZERO})
  * and by the scheduled run (with a grace period for checkouts still running).
  */
@@ -30,15 +35,24 @@ public class InvariantChecker {
     private final TransactionTemplate snapshot;
     private final List<InvariantCheck> checks;
 
-    /** Every SQL rule. M2.2: add the Redis hold-consistency check (PRD 6.10 #5) to this list. */
+    private final RedisConsistencyCheck redisCheck;
+
+    /**
+     * Every SQL rule plus the Redis rule I10 (PRD 6.10 #5, D-022 M2.2c-2). The reader is optional: a
+     * context without one (a slice without Redis) still runs I10, which then reports "cannot check" for
+     * every REDIS_FIRST event instead of passing it. There is deliberately no constructor without it.
+     */
     @Autowired
-    public InvariantChecker(JdbcClient jdbc, PlatformTransactionManager transactions) {
-        this(jdbc, transactions, SqlRules.ALL);
+    public InvariantChecker(JdbcClient jdbc, PlatformTransactionManager transactions,
+                            ObjectProvider<RedisHoldState> redisHoldState) {
+        this(jdbc, transactions, SqlRules.ALL, new RedisConsistencyCheck(redisHoldState.getIfAvailable()));
     }
 
-    InvariantChecker(JdbcClient jdbc, PlatformTransactionManager transactions, List<InvariantCheck> checks) {
+    InvariantChecker(JdbcClient jdbc, PlatformTransactionManager transactions, List<InvariantCheck> checks,
+                     RedisConsistencyCheck redisCheck) {
         this.jdbc = jdbc;
         this.checks = List.copyOf(checks);
+        this.redisCheck = redisCheck;
         this.snapshot = new TransactionTemplate(transactions);
         snapshot.setReadOnly(true);
         snapshot.setIsolationLevel(TransactionDefinition.ISOLATION_REPEATABLE_READ);
@@ -46,7 +60,9 @@ public class InvariantChecker {
 
     /** The ids of every rule this checker runs, in report order. */
     public List<String> ruleIds() {
-        return checks.stream().map(InvariantCheck::id).toList();
+        List<String> ids = new ArrayList<>(checks.stream().map(InvariantCheck::id).toList());
+        ids.add(RedisConsistencyCheck.ID);
+        return List.copyOf(ids);
     }
 
     /** Every violation for one event. {@code grace} ZERO = strict. */
@@ -54,12 +70,18 @@ public class InvariantChecker {
         if (grace.isNegative()) {
             throw new IllegalArgumentException("grace must not be negative: " + grace);
         }
+        // Redis first, BEFORE the snapshot exists: Postgres REPEATABLE READ takes its snapshot at the
+        // first query, so Postgres can then only be behind Redis, never ahead (RedisConsistencyCheck).
+        RedisConsistencyCheck.FirstRead redisRead = redisCheck.readFirst(jdbc, eventId);
         return snapshot.execute(status -> {
             List<Violation> violations = new ArrayList<>();
             for (InvariantCheck check : checks) {
                 for (String detail : check.findViolations(jdbc, eventId, grace)) {
                     violations.add(new Violation(check.id(), check.name(), eventId, detail));
                 }
+            }
+            for (String detail : redisCheck.findViolations(jdbc, eventId, grace, redisRead)) {
+                violations.add(new Violation(RedisConsistencyCheck.ID, RedisConsistencyCheck.NAME, eventId, detail));
             }
             return violations;
         });

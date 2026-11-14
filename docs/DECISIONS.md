@@ -1042,6 +1042,7 @@ Write these yourself, in your own words. Each one is an interview answer you've 
   - `/actuator/metrics` isn't exposed (only health), so today the gauge is visible only inside the
     app; the ERROR log repeats every 30 s while a violation lasts.
   - Not checked yet: ACTIVE holds long past their expiry, i.e. a stuck sweeper (PLAN.md, M1.7).
+    Resolved in M2.2c-2: rule I9 (see the update below).
   - O6 and C1 are tripwires behind constraints and V1: C1 can't fire unless V1 or an index breaks
     first. O5 filters a FULL JOIN by `coalesce(event_id)`, which no index serves; fine at today's
     sizes (3 ms on the 2,000-seat event).
@@ -1051,6 +1052,14 @@ Write these yourself, in your own words. Each one is an interview answer you've 
   when run after another class (a leak between tests); the check takes long enough on a real event
   to matter (time it per event, then consider spreading rules over ticks); or the annotation list
   keeps growing (tests are building fake states instead of using the real paths).
+- **Update 2026-11-14 (M2.2c-2, D-022):** two rules added, 18 in all. **I9** (SQL): an ACTIVE hold more
+  than 2 minutes past its expiry, a stuck sweeper; the same threshold strict and graced. **I10**: PRD
+  6.10 #5, "Redis hold state is consistent with Postgres", for REDIS_FIRST events loaded in Redis. It is
+  not an `InvariantCheck` in the list: it reads Redis (through `inventory.api.RedisHoldState`) before the
+  snapshot transaction starts, then compares inside it. `InvariantChecker`'s only public constructor
+  now takes an `ObjectProvider<RedisHoldState>`; without a reader, I10 reports "cannot check" for every
+  REDIS_FIRST event instead of passing. Annotations: `HoldExpirySweeperTest`'s existing one gained I9;
+  two `RedisHoldWriterTest` tests with deliberate Redis drift name I10.
 
 ### D-020 Seat map API: static layout plus an availability bitset (DRAFT)
 - **Date:** 2026-11-11
@@ -1182,7 +1191,7 @@ Write these yourself, in your own words. Each one is an interview answer you've 
   6.10) tolerates (PLAN change 6). Split into M2.2a (Redis alone), M2.2b (persistence, reconciler)
   and M2.2c (strategy bean, sell, invariants, harness), M2.2c itself split into M2.2c-1 (strategy,
   sell, catch-up, contract split) and M2.2c-2 (invariant 5, stuck-sweeper rule, harness).
-  **Implemented so far: M2.2a, M2.2b, M2.2c-1.**
+  **Implemented: M2.2a, M2.2b, M2.2c-1, M2.2c-2 (all of M2.2).**
 - **Options considered:**
   - Persistence: a Redis Stream with a consumer; synchronous write-through in the request; an
     in-process queue.
@@ -1348,6 +1357,49 @@ Write these yourself, in your own words. Each one is an interview answer you've 
       call). `PostgresLockingContractTest` holds the 34 tests that set state up with SQL or probe
       Postgres locks (moved unchanged, checked byte for byte). `RedisFirstInventoryStrategyTest`
       covers those behaviours through Redis-first's real paths, plus a 100-round sell-versus-release race.
+  - **M2.2c-2, invariant 5, the stuck-sweeper rule and the harness** (decided 2026-11-14: stuck = 2 min,
+    the same at runtime and in tests (C1); rule id I10; a sale between its Postgres commit and `sold.lua`
+    is excused at runtime like O1/O5 (option B)):
+    - **Reader:** `inventory.api.RedisHoldState` (read-only), implemented by `inventory.strategy.RedisHoldStateReader`
+      with one script, `redis/state.lua`: Redis `TIME`, limit, seat set, every seat key (`MGET` in
+      chunks), every hold hash with its PTTL (-1 = pinned), every user set, and this event's stream
+      entries the group hasn't acknowledged (pending, plus after `last-delivered-id`) younger than the
+      window. Whole event (`SCAN MATCH <p>:ev:<event>:*` inside the script) or only listed keys (a
+      re-read, plus the holds their values name). Keys come from `RedisKeys`: own prefix only.
+    - **Rule I10** (`control.invariants.RedisConsistencyCheck`), REDIS_FIRST events loaded in Redis only:
+      1. Redis is read **before** the checker's Postgres snapshot exists (REPEATABLE READ takes it at the
+         first query), so Postgres can only be behind Redis. Inside the snapshot: limit, `event_seats`,
+         ACTIVE and CONVERTED holds (with their newest order's age).
+      2. Both sides normalised **by Redis time**: a hold is live while its expiry is in the future (a
+         pinned hash past its expiry is expired); a seat is held only by a live hold; cap = live members
+         vs live ACTIVE + CONVERTED holds. Compared: limit, seat set, live holds (user, seats, created,
+         expiry), every seat, every user's cap. An `H:` key naming a missing hash is reported.
+      3. What disagrees is **re-read from Redis** (those keys only) after the snapshot and compared again
+         at the new time: a release or an applied hold that landed between the read and the snapshot.
+      4. Grace zero (tests): nothing excused. Grace positive (the monitor): excused only if every hold the
+         difference involves has an unacknowledged stream entry younger than **2 s**, or is pinned in Redis
+         while Postgres shows it CONVERTED and its order is younger than the grace.
+      5. No reader in the context: "cannot check" for every REDIS_FIRST event; a failed Redis read is
+         reported the same way. `InvariantChecker` has no constructor without the reader's
+         `ObjectProvider`, and the after-test listener's fallback passes the context's.
+    - **I9** (`SqlRules`): an ACTIVE hold more than 2 minutes past `expires_at`. Fires in
+      `HoldExpirySweeperTest#brokenHoldsDoNotStarveHealthyOnesBehindThem` (annotation now {"I8","I9"}).
+    - **Harness:** `RedisFirstConcurrencyTest` (the four scenarios) and `RedisFirstHoldCapConcurrencyTest`
+      (both cap scenarios), each with its own database and prefix. `ConcurrencyHarness.RoundHooks`:
+      after the Postgres reset, delete the prefix's keys, recreate the group, load the event; before the
+      checks, drain the stream. The base classes were split (`StrategyRaceTest`, `HoldCapRaceTest`) because
+      a subclass's `@DynamicPropertySource` can't override its parent's (measured: the parent's wins,
+      with a different name and with a hiding static method). The cap fixture now stores the strategy's
+      kind instead of a hard-coded PESSIMISTIC.
+    - **Bugs found and fixed:**
+      - The harness's churn found concurrent catch-ups of one hold (several releases of a not yet persisted
+        hold) failing with 23505: `ON CONFLICT (id)` absorbs only primary-key conflicts, and the other
+        unique constraint `uq_holds_id_event` could fire first. Now `ON CONFLICT DO NOTHING` (both
+        constraints are keyed on the id); regression test with 8 concurrent callers, shown to fail before.
+      - Invariant 5 found the Postgres-wins path writing `S:` markers back without the buyers' `+inf` cap
+        members (Redis undercounted them until R3), and R2 (and the consumer's pre-close) closing a hold
+        Redis had lost while its cap member kept counting until its old expiry. Both fixed:
+        `postgresWins` adds the members, `closeGone` removes the gone hold's finite member.
 - **Why:**
   - Redis runs commands on one thread and a whole script as one command, so nothing can happen
     between a script's checks and its writes: that is the entire locking story of this strategy.
@@ -1386,9 +1438,25 @@ Write these yourself, in your own words. Each one is an interview answer you've 
   - Redis' clock and Postgres' clock are two clocks; for REDIS_FIRST events Redis decides expiry and
     Postgres stores Redis' times.
   - After a crash inside the AOF window, a buyer can lose an acknowledged hold (410 at checkout).
+  - (M2.2c-2) **`state.lua` blocks Redis for about 40 ms** on a loaded 2,000-seat event with every seat
+    held (500 holds, 500 users, ~3,000 keys): server-side median 39 ms over 10 runs, 33-55 ms (SLOWLOG,
+    Redis 7 in Docker Desktop on Windows; 54 ms before seat keys were read with `MGET`). Most of it is the
+    per-call cost of one `HMGET` + `PTTL` per hold and one `ZRANGE` per user, plus a `SCAN` over the whole
+    keyspace (it grows with every event in the Redis database, not only this one). The monitor runs it per
+    open REDIS_FIRST event every 30 s, so every hold attempt in that window waits; M2.5 must measure it.
+  - (M2.2c-2) A lost live cap member (partial Redis data loss) is never put back: no reconciler rule
+    does it. Postgres still wins at persistence, so the cap holds in Postgres; invariant 5 reports the
+    undercount for as long as the hold lives (`RedisHoldWriterTest#whenRedisUndercountsTheCapPostgresWins`
+    documents it with `@ExpectInvariantViolations({"I10"})`).
+  - (M2.2c-2) I10 is checked only for events loaded in Redis: after a Redis restart, nothing is compared
+    until the reconciler's R0 reloads the event (up to 30 s).
+  - (M2.2c-2) Called inside an existing transaction (the after-test listener, the harness), I10 reads
+    Redis after that transaction's snapshot. Fine where nothing runs concurrently; the monitor opens a
+    fresh transaction per event, so its order is right.
 - **How I'd know it was wrong:** the harness (M2.2c) or invariant 5 finds a seat with two live
   holders or a user over the cap; invariant 5 fires in normal load (the consumer can't keep up, or
-  2 s is too tight); the M2.5 benchmark shows no gain over the Postgres strategies (the consumer or
+  2 s is too tight); I9 fires at runtime (the sweeper is stuck or keeps failing on a hold); the M2.5
+  benchmark shows latency spikes every 30 s per REDIS_FIRST event (the monitor's `state.lua`); the M2.5 benchmark shows no gain over the Postgres strategies (the consumer or
   the catch-up before checkout dominates); buyers report holds that vanished without a Redis crash;
   or the seat map's staleness shows up as repeated SEAT_TAKEN on seats that look free (then read
   Redis for REDIS_FIRST events).

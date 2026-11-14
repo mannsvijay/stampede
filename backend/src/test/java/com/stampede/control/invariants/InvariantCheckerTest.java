@@ -134,8 +134,11 @@ class InvariantCheckerTest {
     @Test
     void everyRuleHasATestHere() {
         // Adding a rule without a test that makes it fire must fail here first.
+        // I10 (Redis) fires here only as "cannot check" (this slice has no Redis reader); every way it
+        // compares the two stores is made to fire in RedisConsistencyCheckTest.
         assertThat(checker.ruleIds()).containsExactly(
-                "I1", "I2", "I3", "I8", "V1", "O1", "O2", "O3", "O4", "O5", "O6", "O7", "C1", "T1", "T2", "T3");
+                "I1", "I2", "I3", "I8", "I9", "V1", "O1", "O2", "O3", "O4", "O5", "O6", "O7", "C1", "T1", "T2", "T3",
+                "I10");
     }
 
     // --- holds -----------------------------------------------------------------------------------
@@ -184,6 +187,36 @@ class InvariantCheckerTest {
         allowance(ALICE, 2);
         jdbc.sql("UPDATE events SET per_user_limit = 1 WHERE id = ?").param(EVENT).update();
         assertRules(STRICT, "I8");
+    }
+
+    @Test
+    void i9ActiveHoldMoreThanTwoMinutesPastItsExpiryIsAStuckSweeper() {
+        // The same 2-minute threshold strict and graced (M2.2c-2, decision C1): just expired is not stuck.
+        jdbc.sql("UPDATE holds SET created_at = now() - interval '2 hours', expires_at = now() - interval '1 minute' WHERE id = ?").param(H1).update();
+        assertRules(STRICT);
+        assertRules(GRACE);
+        jdbc.sql("UPDATE holds SET created_at = now() - interval '2 hours', expires_at = now() - interval '3 minutes' WHERE id = ?").param(H1).update();
+        assertRules(STRICT, "I9");
+        assertRules(GRACE, "I9");
+    }
+
+    @Test
+    void i9IgnoresHoldsThatAreNoLongerActive() {
+        // H2 is CONVERTED: its expiry long passed is normal, a sold hold never expires.
+        jdbc.sql("UPDATE holds SET created_at = now() - interval '2 hours', expires_at = now() - interval '1 hour' WHERE id = ?").param(H2).update();
+        assertRules(STRICT);
+    }
+
+    // --- Redis (PRD 6.10 #5) ---------------------------------------------------------------------
+
+    @Test
+    void i10ReportsCannotCheckForARedisFirstEventWhenThereIsNoRedisReader() {
+        // This slice has no RedisHoldState bean: the Redis rule must say so, never pass silently (M2.2c-2).
+        jdbc.sql("UPDATE events SET strategy = 'REDIS_FIRST' WHERE id = ?").param(EVENT).update();
+        List<Violation> violations = checker.check(EVENT, STRICT);
+        assertThat(violations).singleElement().asString().startsWith("I10 Redis hold state disagrees with Postgres: "
+                + "cannot check: the event is REDIS_FIRST but this context has no RedisHoldState reader");
+        assertRules(GRACE, "I10");
     }
 
     // --- venue and capacity ----------------------------------------------------------------------

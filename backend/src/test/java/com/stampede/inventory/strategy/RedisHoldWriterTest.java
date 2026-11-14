@@ -1,5 +1,6 @@
 package com.stampede.inventory.strategy;
 
+import com.stampede.testsupport.ExpectInvariantViolations;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.stampede.inventory.seat.SeatStatus;
@@ -120,6 +121,45 @@ class RedisHoldWriterTest extends RedisPersistenceTestSupport {
         assertThat(violations()).isEmpty();
     }
 
+    /**
+     * M2.2c-2, found by the REDIS_FIRST harness (churn): several callers persist the same hold at the same
+     * moment (catch-up from concurrent releases, the consumer, the reconciler). Exactly one inserts the
+     * row; every other call must be a quiet DUPLICATE. With {@code ON CONFLICT (id)} a concurrent insert
+     * could fail on the table's other unique constraint ({@code uq_holds_id_event}) with SQLState 23505.
+     */
+    @Test
+    void manyCallersPersistingTheSameHoldAtOnceInsertItOnceWithoutErrors() throws Exception {
+        load();
+        int callers = 8;
+        java.util.concurrent.ExecutorService pool = java.util.concurrent.Executors.newFixedThreadPool(callers);
+        try {
+            for (int round = 0; round < 30; round++) {
+                UUID holdId = hold(USER, FIVE_MINUTES, SEATS.get(round % SEATS.size()));
+                StreamEntry.HoldFacts facts = StreamEntry.HoldFacts.of(EVENT, store.liveHold(EVENT, holdId).orElseThrow());
+                java.util.concurrent.CountDownLatch start = new java.util.concurrent.CountDownLatch(1);
+                List<java.util.concurrent.Future<Applied>> results = new java.util.ArrayList<>();
+                for (int c = 0; c < callers; c++) {
+                    results.add(pool.submit(() -> {
+                        start.await();
+                        return writer.applyHeld(facts);
+                    }));
+                }
+                start.countDown();
+                List<Applied> applied = new java.util.ArrayList<>();
+                for (java.util.concurrent.Future<Applied> result : results) {
+                    applied.add(result.get(10, java.util.concurrent.TimeUnit.SECONDS));  // throws if a call threw
+                }
+                assertThat(applied).as("round %d", round).containsOnlyOnce(Applied.APPLIED)
+                        .containsOnly(Applied.APPLIED, Applied.DUPLICATE);
+                releaseInRedis(holdId);
+                drain();
+            }
+        } finally {
+            pool.shutdownNow();
+        }
+        assertThat(violations()).isEmpty();
+    }
+
     // ---- Postgres wins ----
 
     @Test
@@ -138,12 +178,17 @@ class RedisHoldWriterTest extends RedisPersistenceTestSupport {
         assertThat(store.seatValue(EVENT, SEATS.get(0))).startsWith("S:" + orderId + ":");
         assertThat(store.seatValue(EVENT, SEATS.get(1))).isNull();
         assertThat(store.used(EVENT, USER)).isZero();
+        assertThat(store.used(EVENT, OTHER_USER)).as("the buyer's cap counts the seat Redis didn't know was sold")
+                .isEqualTo(1);
         assertThat(allowance(USER)).isZero();
         assertThat(counter(RedisStreamMetrics.APPLIED, "type", "held", "result", "conflict")).isEqualTo(1);
         assertThat(violations()).isEmpty();
     }
 
     @Test
+    @ExpectInvariantViolations(rules = {"I10"},
+            reason = "Deliberate drift (D-022 known limit): Redis lost a live hold's cap member, which nothing "
+                    + "puts back; Postgres wins at persistence, and invariant 5 shows the undercount")
     void whenRedisUndercountsTheCapPostgresWins() {
         load();
         UUID first = hold(USER, FIVE_MINUTES, SEATS.get(0), SEATS.get(1), SEATS.get(2), SEATS.get(3));
@@ -159,10 +204,18 @@ class RedisHoldWriterTest extends RedisPersistenceTestSupport {
         assertThat(store.liveHold(EVENT, second)).isEmpty();
         assertThat(seat(SEATS.get(4)).status()).isEqualTo(SeatStatus.AVAILABLE);
         assertThat(allowance(USER)).isEqualTo(4);
-        assertThat(violations()).isEmpty();
+        // Every Postgres rule holds; invariant 5 reports exactly the lost member, and nothing else.
+        assertThat(violations()).singleElement().satisfies(v -> {
+            assertThat(v.ruleId()).isEqualTo("I10");
+            assertThat(v.detail()).isEqualTo("user " + USER + "'s cap counts [] in Redis but [" + first
+                    + ":4] in Postgres (hold:seats)");
+        });
     }
 
     @Test
+    @ExpectInvariantViolations(rules = {"I10"},
+            reason = "Deliberate drift (D-022): Redis is loaded with a seat set Postgres doesn't have, and the "
+                    + "loader never rewrites a loaded event, so invariant 5 reports the seat set until a reload")
     void aSeatRedisHasButPostgresDoesNotIsAConflict() {
         UUID extra = id("not-in-postgres");
         store.loadEvent(EVENT, List.of(SEATS.get(0), extra), LIMIT);
