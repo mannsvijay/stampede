@@ -55,6 +55,8 @@ class RedisReconciler {
     private final long minAgeMillis;
     /** Test hook only: runs in R2 between "Redis doesn't have this hold" and the epoch comparison. */
     private volatile Runnable beforeEpochCheck = () -> { };
+    /** Test hook only: runs after R4 and R2, just before R3 reads the sold seats. */
+    private volatile Runnable beforeSoldSeats = () -> { };
 
     RedisReconciler(JdbcClient jdbc, RedisHoldStore store, RedisHoldWriter writer, RedisEventLoader loader,
                     RedisStreamMetrics metrics, RedisInventoryProperties properties) {
@@ -167,6 +169,7 @@ class RedisReconciler {
         }
 
         // R3
+        beforeSoldSeats.run();
         for (SoldSeat sold : soldSeats(eventId)) {
             String value = store.seatValue(eventId, sold.seatId());
             if (value != null && value.startsWith("S:" + sold.orderId() + ":")) {
@@ -179,6 +182,7 @@ class RedisReconciler {
                 UUID holder = UUID.fromString(value.split(":")[1]);
                 if (store.release(eventId, holder, ReleaseReason.RELEASED) instanceof RedisHoldStore.Release.Released) {
                     counter.releasedInRedis++;
+                    metrics.repair("R3_release_in_redis");
                 }
             }
         }
@@ -208,6 +212,11 @@ class RedisReconciler {
     /** For tests: interleave a Redis wipe and reload at the one moment R2's epoch guard protects. */
     void beforeEpochCheck(Runnable hook) {
         this.beforeEpochCheck = hook;
+    }
+
+    /** For tests: commit a sale after R4 has read the hold statuses and before R3 runs. */
+    void beforeSoldSeats(Runnable hook) {
+        this.beforeSoldSeats = hook;
     }
 
     /**
