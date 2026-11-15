@@ -1020,3 +1020,44 @@ D-022 final). Plan and notes are under M2.2c-2 in PLAN.md.
 - A lost live cap member is never repaired (no reconciler rule); D-022 known limit, I10 shows it.
 - I10 compares nothing for an event not loaded in Redis (after a restart, until R0, up to 30 s).
 - D-022 is a draft for you to rewrite in your own words.
+
+## 2026-11-15 - M2.2 review follow-up (correctness review of M2.2a to M2.2c-2)
+
+**Changed** (D-022 "Review follow-up"; each fix has a test shown failing first)
+- M1: R3 released in Redis a CONVERTED hold whose sale committed after R4 read the statuses (before
+  `sold.lua`). R3 now reads the holder's status when it finds the key and finishes the sale with
+  `sold.lua` if CONVERTED (metric `R3_finish_sale`; new `R3_release_in_redis` for the release path).
+  Test: `RedisReconcilerTest#r3FinishesASaleThatCommittedAfterR4ReadItsStatusInsteadOfReleasingIt`
+  (hook `beforeSoldSeats` commits the sale between R4 and R3).
+- M2: `RedisSaleRaceConcurrencyTest` (new; 100 rounds, honours `stampede.harness.rounds`/`seed`):
+  6 buyers hold, sell and release through the strategy near expiry, with a sweeper thread, two
+  consumers and the reconciler looping; hook `afterPostgresSale` waits 0-20 ms before `sold.lua`.
+  Strict after draining. Failed in round 8 (final form: round 13) before the M1 fix.
+- L1: I10 false positive on a pinned hold past its expiry; the seat key's hold is now named in the
+  difference so the sale-finishing excuse applies. `RedisConsistencyCheckTest` +2.
+- L2: a release/sale gate loaded a missing event under the hold row lock, joining the caller's
+  transaction (so the loader's REPEATABLE READ/read-only settings were ignored). Now the gate throws
+  before any write, the transaction rolls back, the strategy loads outside it and retries once
+  (`REQUIRES_NEW` rejected: a second connection per locked row). Hooks `beforeGate`,
+  `RedisEventLoader.inSnapshot`; `RedisFirstInventoryStrategyTest` +2.
+- L5 (first half): the strategy's GONE release removes the hold's finite cap member;
+  `RedisFirstInventoryStrategyTest` +1.
+- Docs: D-022 review follow-up section; known limits L3, L4, L5 second half, L6, L1 cap half; I10
+  "Postgres can be ahead" wording; sell failure table step 1. Javadoc of `RedisHoldStore.release`.
+- No new dependency, no API change. Committed mid-task by the user (7a53b79..08114b8); the docs
+  entries here are committed at the end.
+
+**Verified**
+- Not run by Claude this session (user's instruction); the user runs the full suite with --rerun
+  and the 1000-round proof `*ConcurrencyTest` (now includes `RedisSaleRaceConcurrencyTest`).
+- The "failing first" results above are as recorded in D-022 during the task, not re-run here.
+
+**Next**: after both runs pass, tick the review follow-up in PLAN.md; then M2.3.
+
+**Open problems**
+- Known limits documented, not fixed: L3 (epoch-guard window spans the wait for the hold row lock;
+  a wipe and reload there can close a restored hold), L4 (AOF-window loss of `pin`/`sold`/`release`
+  writes; fix idea: run R3/R4 at once on a Redis `run_id` change), L5 second half (two-command
+  member changes, crash only), L6 (`state.lua` reads at most 10,000 stream entries), L1 cap half.
+- Carried over: `state.lua` ~39 ms on a loaded event (M2.5); lost live cap member never repaired;
+  I10 blind to unloaded events; D-022 is a draft for you to rewrite in your own words.

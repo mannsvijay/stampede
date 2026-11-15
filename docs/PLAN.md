@@ -509,6 +509,27 @@ end against the compose stack, and every concurrency harness scenario passed 100
         Targeted run (CLAUDE.md rule, 100 rounds): 34 classes, 433 tests, 0 failures, BUILD SUCCESSFUL in
         24m 5s; all six REDIS_FIRST harness scenarios 100/100 rounds clean.
         Verified by the user: full suite with --rerun BUILD SUCCESSFUL in 19m 28s.
+  - [ ] M2.2 review follow-up (2026-11-15): a correctness review of M2.2a to M2.2c-2 (D-022 "Review
+        follow-up"). Each fix has a test shown failing first.
+        Fixed: M1 (R3 released a CONVERTED hold whose sale committed after R4's status read; R3 now reads
+        the holder's status and finishes the sale with `sold.lua`, metric `R3_finish_sale`); M2 (no race
+        covered sales: `RedisSaleRaceConcurrencyTest`, 100 rounds as CI, honours
+        `-Dstampede.harness.rounds`; failed in round 8, later 13, before M1); L1 (I10 false positive on a
+        pinned hold past its expiry: the seat key's hold is named in the difference); L2 (a release or
+        sale gate loaded a missing event under the hold row lock, inside the caller's transaction; now it
+        throws, rolls back, loads outside and retries once); L5 first half (the strategy's GONE release
+        removes the hold's finite cap member).
+        Documented as known limits, not fixed: L3 (epoch-guard window is wider than milliseconds), L4
+        (AOF-window loss of `pin`/`sold`/`release` writes), L5 second half (two-command member changes),
+        L6 (`state.lua` reads at most 10,000 stream entries), L1 cap half.
+        Tests: `RedisReconcilerTest` +1 (sale committed between R4 and R3), `RedisFirstInventoryStrategyTest`
+        +3 (sale and release finding the event gone under the lock; GONE release removes the cap member),
+        `RedisConsistencyCheckTest` +2, `RedisSaleRaceConcurrencyTest` (new). Test hooks:
+        `RedisEventLoader.inSnapshot`, `RedisReconciler.beforeSoldSeats`, strategy `afterPostgresSale`
+        and `beforeGate`; new metric `R3_release_in_redis`. Main code changed
+        in `inventory.strategy` and `control.invariants` only. No new dependency, no API change.
+        Not run by Claude this session (the user runs them). To verify: full suite with --rerun; 1000-round
+        proof `*ConcurrencyTest` (now includes `RedisSaleRaceConcurrencyTest`). Tick after both pass.
 - [ ] M2.3 Strategy selectable per event (admin endpoint); concurrency test parameterised over all three
       Note (from M1.7, D-019): if an admin endpoint ever changes `per_user_limit`, it must refuse
       (409) a limit below any user's current `used`, checked under the allowance row locks; I8
