@@ -193,8 +193,9 @@ class RedisHoldStore {
     }
 
     /**
-     * Releases a live hold. With {@link ReleaseReason#EXPIRED} nothing is ever deleted: a hold Redis
-     * still has is not expired by Redis' clock, and one that did expire is already gone.
+     * Releases a live hold. With {@link ReleaseReason#EXPIRED}, a hold Redis still has is released only
+     * if it is pinned (no TTL, by a sale that never finished) and its {@code expiresMs} has passed;
+     * otherwise NOT_EXPIRED. A hold whose TTL ran out is already gone.
      */
     Release release(UUID eventId, UUID holdId, ReleaseReason reason) {
         List<String> scriptKeys = List.of(keys.hold(eventId, holdId), keys.stream());

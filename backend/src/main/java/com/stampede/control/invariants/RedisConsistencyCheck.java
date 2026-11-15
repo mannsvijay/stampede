@@ -31,8 +31,10 @@ import org.springframework.jdbc.core.simple.JdbcClient;
  * <p>
  * <b>Two phases, in this order.</b> {@link #readFirst} reads Redis (one atomic script) BEFORE the
  * checker opens its Postgres snapshot; {@link #findViolations} then reads Postgres inside the snapshot
- * and compares. Redis is always ahead of Postgres (a hold is taken in Redis first), so reading Redis
- * first and Postgres second can only show Postgres "behind", never "ahead". Whatever still disagrees is
+ * and compares. For holds, Redis is ahead of Postgres (a hold is taken in Redis first), so reading Redis
+ * first and Postgres second shows Postgres "behind", never "ahead". Postgres is ahead for a sale between
+ * its commit and sold.lua, for a Postgres-wins tombstone before release.lua and for R3's markers; the
+ * re-read and the sale-finishing excuse cover those. Whatever still disagrees is
  * read again from Redis (only those keys) after the snapshot, and compared again: a change that landed
  * between the first read and the snapshot (a release, a newly applied hold) is then seen on both sides.
  * <p>
@@ -268,6 +270,12 @@ final class RedisConsistencyCheck {
                 Set<UUID> named = new HashSet<>();
                 inRedis.hold().ifPresent(named::add);
                 inPostgres.hold().ifPresent(named::add);
+                // A key that still names a hold past its expiry (pinned by a sale) is "free" by time, but
+                // hold.lua treats the seat as taken: name that hold too, so a sale finishing is excused for
+                // it like any other (review finding L1). Whether there is a difference doesn't change.
+                if (r.seatValues().get(s) instanceof SeatValue.Held held) {
+                    named.add(held.holdId());
+                }
                 diffs.add(new Diff("seat:" + s, Set.of(s), named, Set.of(), "seat " + s + " is " + inRedis
                         + " in Redis but " + inPostgres + " in Postgres"));
             }
