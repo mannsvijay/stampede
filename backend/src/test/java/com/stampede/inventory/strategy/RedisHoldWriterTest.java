@@ -17,6 +17,9 @@ import org.springframework.data.redis.connection.stream.MapRecord;
  */
 class RedisHoldWriterTest extends RedisPersistenceTestSupport {
 
+    @org.springframework.beans.factory.annotation.Autowired
+    org.springframework.transaction.PlatformTransactionManager transactions;
+
     // ---- out of order: a released hold never comes back ----
 
     @Test
@@ -226,6 +229,79 @@ class RedisHoldWriterTest extends RedisPersistenceTestSupport {
         assertThat(holdStatus(holdId)).isEqualTo("RELEASED");
         assertThat(seat(SEATS.get(0)).status()).isEqualTo(SeatStatus.AVAILABLE);
         assertThat(store.liveHold(EVENT, holdId)).isEmpty();
+    }
+
+    /**
+     * Found by {@code RedisPersistenceConcurrencyTest} (line 145) on an overloaded machine: a HELD is
+     * checked live in Redis, then its writer stalls before locking the seat. Meanwhile the buyer
+     * releases the hold, another buyer takes the seat, and that newer hold is persisted. The stalled
+     * writer then finds the seat held by a hold Redis really has. That is not a disagreement between
+     * the stores: its own hold is simply over. It must be recorded as over (STALE), not as "Postgres
+     * wins" (CONFLICT). Here the stall is a seat row lock held by the test, so it is deterministic.
+     */
+    @Test
+    void aHeldWhoseHoldEndsWhileItWaitsForTheSeatLockIsStaleNotAConflict() throws Exception {
+        load();
+        UUID stalled = hold(USER, FIVE_MINUTES, SEATS.get(0));
+        StreamEntry.HoldFacts stalledFacts = StreamEntry.HoldFacts.of(EVENT, store.liveHold(EVENT, stalled).orElseThrow());
+        java.util.concurrent.ExecutorService pool = java.util.concurrent.Executors.newFixedThreadPool(2);
+        try {
+            java.util.concurrent.CountDownLatch locked = new java.util.concurrent.CountDownLatch(1);
+            java.util.concurrent.CountDownLatch writeNewer = new java.util.concurrent.CountDownLatch(1);
+            java.util.concurrent.atomic.AtomicReference<UUID> newerRef = new java.util.concurrent.atomic.AtomicReference<>();
+            // The "stall": a transaction holding the seat's row lock. While it holds it, it also persists
+            // the newer hold, exactly as the consumer would (the seat row is the only lock that matters).
+            java.util.concurrent.Future<?> blocker = pool.submit(() -> new org.springframework.transaction.support
+                    .TransactionTemplate(transactions).executeWithoutResult(tx -> {
+                jdbc.sql("SELECT seat_id FROM event_seats WHERE event_id = ? AND seat_id = ? FOR UPDATE")
+                        .params(EVENT, SEATS.get(0)).query(UUID.class).single();
+                locked.countDown();
+                try {
+                    assertThat(writeNewer.await(10, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+                } catch (InterruptedException e) {
+                    throw new IllegalStateException(e);
+                }
+                RedisHoldStore.LiveHold newer = store.liveHold(EVENT, newerRef.get()).orElseThrow();
+                jdbc.sql("""
+                        INSERT INTO holds (id, event_id, user_id, seat_ids, created_at, expires_at, status)
+                        VALUES (?, ?, ?, ?, ?, ?, 'ACTIVE')
+                        """).params(newer.holdId(), EVENT, OTHER_USER, new UUID[] {SEATS.get(0)},
+                        newer.createdAt().atOffset(java.time.ZoneOffset.UTC),
+                        newer.expiresAt().atOffset(java.time.ZoneOffset.UTC)).update();
+                jdbc.sql("UPDATE event_seats SET status = 'HELD', hold_id = ?, version = version + 1 "
+                        + "WHERE event_id = ? AND seat_id = ?").params(newer.holdId(), EVENT, SEATS.get(0)).update();
+                jdbc.sql("INSERT INTO user_event_allowance (event_id, user_id, used) VALUES (?, ?, 1)")
+                        .params(EVENT, OTHER_USER).update();
+            }));
+            assertThat(locked.await(10, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+
+            // The writer passes its "still live in Redis" check, inserts the row and waits for the seat.
+            java.util.concurrent.Future<Applied> stalledApply = pool.submit(() -> writer.applyHeld(stalledFacts));
+            org.awaitility.Awaitility.await().atMost(java.time.Duration.ofSeconds(10))
+                    .pollInterval(java.time.Duration.ofMillis(20))
+                    .until(() -> jdbc.sql("SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' "
+                            + "AND datname = current_database()").query(Long.class).single() == 1);
+
+            releaseInRedis(stalled);
+            UUID newer = hold(OTHER_USER, FIVE_MINUTES, SEATS.get(0));
+            newerRef.set(newer);
+            writeNewer.countDown();
+            blocker.get(10, java.util.concurrent.TimeUnit.SECONDS);
+
+            assertThat(stalledApply.get(10, java.util.concurrent.TimeUnit.SECONDS)).isEqualTo(Applied.STALE);
+            drain();   // the stalled hold's RELEASED and the newer hold's HELD: both already handled
+
+            assertThat(holdStatus(stalled)).isEqualTo("RELEASED");
+            assertThat(holdStatus(newer)).isEqualTo("ACTIVE");
+            assertThat(store.liveHold(EVENT, newer)).as("the newer hold is untouched in Redis").isPresent();
+            assertThat(seat(SEATS.get(0)).holdId()).isEqualTo(newer);
+            assertThat(allowance(USER)).isZero();
+            assertThat(allowance(OTHER_USER)).isEqualTo(1);
+            assertThat(counter(RedisStreamMetrics.APPLIED, "type", "held", "result", "conflict")).isZero();
+            assertThat(violations()).isEmpty();
+        } finally {
+            pool.shutdownNow();
+        }
     }
 
     // ---- expiry, as the sweeper will call it (M2.2c) ----
