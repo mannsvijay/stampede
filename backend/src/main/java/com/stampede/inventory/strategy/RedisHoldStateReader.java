@@ -8,28 +8,54 @@ import java.util.Arrays;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.Consumer;
 import org.springframework.core.io.ClassPathResource;
+import org.springframework.data.redis.core.Cursor;
+import org.springframework.data.redis.core.ScanOptions;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.data.redis.core.script.RedisScript;
 import org.springframework.stereotype.Component;
 
 /**
- * {@link RedisHoldState} for invariant 5 (D-022, M2.2c-2): one read-only script ({@code redis/state.lua})
- * per call. Key names come from {@link RedisKeys} with this application's prefix only, so it never
- * reads another application's (or another test context's) keys.
+ * {@link RedisHoldState} for invariant 5 (D-022, M2.2c-2 and M2.2d), with {@code redis/state.lua}.
+ * <p>
+ * <b>{@link #read}: many short commands, so buyers' commands run in between</b> (M2.2d). One script over
+ * the whole event blocked Redis for ~40 ms on a loaded 2,000-seat event. Now: a header (clock, limit,
+ * seat set, load epoch), SCAN pages from Java to find the event's keys, then short {@code PAGE} scripts
+ * of {@value #SEAT_PAGE} seats, {@value #USER_PAGE} users or {@value #HOLD_PAGE} holds, then a trailer
+ * (the unapplied stream entries, the epoch again). Each page reads a seat with the hold it names, and a
+ * user with the holds their members name, so the pairs I10 interprets together are from one instant.
+ * The whole read is not: invariant 5 re-reads whatever disagrees, atomically, after its Postgres snapshot
+ * (see {@code RedisConsistencyCheck}). If the event was reloaded during the read (the epoch changed), the
+ * read is repeated once, then it fails.
+ * <p>
+ * <b>{@link #reread}: one atomic script</b> over the listed keys, unchanged.
+ * <p>
+ * Key names come from {@link RedisKeys} with this application's prefix only, so it never reads another
+ * application's (or another test context's) keys.
  */
 @Component
 class RedisHoldStateReader implements RedisHoldState {
 
+    /** Page sizes, measured (D-022 M2.2d): each page script stays well under a millisecond. */
+    static final int SEAT_PAGE = 100;
+    static final int USER_PAGE = 50;
+    static final int HOLD_PAGE = 50;
+    /** Keys SCAN looks at per call (a hint to Redis, not an exact page size). */
+    static final int SCAN_COUNT = 500;
+
     private final StringRedisTemplate redis;
     private final RedisKeys keys;
     private final RedisScript<List> stateScript;
+    /** Test hook only: runs after each step of the paged read, with the step's name. */
+    private volatile Consumer<String> afterStep = step -> { };
 
     RedisHoldStateReader(StringRedisTemplate redis, RedisInventoryProperties properties) {
         this.redis = redis;
@@ -40,38 +66,154 @@ class RedisHoldStateReader implements RedisHoldState {
         this.stateScript = script;
     }
 
+    /** For tests: change Redis between the steps of the paged read ("header", "scan", "seats", ...). */
+    void afterStep(Consumer<String> hook) {
+        this.afterStep = hook;
+    }
+
     @Override
     public Optional<Snapshot> read(UUID eventId, Duration entriesYoungerThan) {
-        return run(eventId, entriesYoungerThan, List.of("ALL"));
+        Paged first = readInPages(eventId, entriesYoungerThan);
+        if (!(first instanceof Paged.Reloaded)) {
+            return first.snapshot();
+        }
+        Paged second = readInPages(eventId, entriesYoungerThan);
+        if (second instanceof Paged.Reloaded) {
+            throw new IllegalStateException("event " + eventId + " was reloaded in Redis during two reads in a row");
+        }
+        return second.snapshot();
     }
 
     @Override
     public Optional<Snapshot> reread(UUID eventId, Duration entriesYoungerThan, Collection<UUID> seatIds,
                                      Collection<UUID> holdIds, Collection<UUID> userIds) {
-        List<String> args = new ArrayList<>();
-        args.add("KEYS");
-        for (Collection<UUID> ids : List.of(seatIds, holdIds, userIds)) {
-            args.add(Integer.toString(ids.size()));
-            ids.forEach(id -> args.add(id.toString()));
+        return run("KEYS", eventId, entriesYoungerThan, seatIds, holdIds, userIds).map(Reply::snapshot);
+    }
+
+    /** What one paged read found. */
+    private sealed interface Paged {
+        Optional<Snapshot> snapshot();
+
+        record Done(Optional<Snapshot> snapshot) implements Paged {
         }
-        return run(eventId, entriesYoungerThan, args);
+
+        /** The load epoch changed between the header and the trailer: the pages may mix two loads. */
+        record Reloaded() implements Paged {
+            @Override
+            public Optional<Snapshot> snapshot() {
+                return Optional.empty();
+            }
+        }
+    }
+
+    private Paged readInPages(UUID eventId, Duration window) {
+        Optional<Reply> header = run("KEYS", eventId, window, List.of(), List.of(), List.of());
+        afterStep.accept("header");
+        if (header.isEmpty()) {
+            return new Paged.Done(Optional.empty());
+        }
+
+        // Which seats, holds and users have keys. SCAN pages from here, not one SCAN inside a script.
+        Set<UUID> seatIds = new LinkedHashSet<>();
+        Set<UUID> holdIds = new LinkedHashSet<>();
+        Set<UUID> userIds = new LinkedHashSet<>();
+        String prefix = keys.eventPrefix(eventId);
+        try (Cursor<String> cursor = redis.scan(ScanOptions.scanOptions().match(prefix + "*").count(SCAN_COUNT).build())) {
+            cursor.forEachRemaining(key -> {
+                String rest = key.substring(prefix.length());
+                if (rest.startsWith("seat:")) {
+                    seatIds.add(UUID.fromString(rest.substring(5)));
+                } else if (rest.startsWith("hold:")) {
+                    holdIds.add(UUID.fromString(rest.substring(5)));
+                } else if (rest.startsWith("user:")) {
+                    userIds.add(UUID.fromString(rest.substring(5)));
+                }
+            });
+        }
+        afterStep.accept("scan");
+
+        Map<UUID, SeatValue> seatValues = new HashMap<>();
+        Map<UUID, Hold> holds = new HashMap<>();
+        Map<UUID, List<CapMember>> capMembers = new HashMap<>();
+        for (List<UUID> page : pages(seatIds, SEAT_PAGE)) {
+            readPage(eventId, window, page, List.of(), List.of(), seatValues, holds, capMembers);
+            afterStep.accept("seats");
+        }
+        for (List<UUID> page : pages(userIds, USER_PAGE)) {
+            readPage(eventId, window, List.of(), List.of(), page, seatValues, holds, capMembers);
+            afterStep.accept("users");
+        }
+        // Holds no seat or member named: a hold whose seats were all sold or freed, say.
+        Set<UUID> unread = new LinkedHashSet<>(holdIds);
+        unread.removeAll(holds.keySet());
+        for (List<UUID> page : pages(unread, HOLD_PAGE)) {
+            readPage(eventId, window, List.of(), page, List.of(), seatValues, holds, capMembers);
+            afterStep.accept("holds");
+        }
+
+        Optional<Reply> trailer = run("KEYS", eventId, window, List.of(), List.of(), List.of());
+        afterStep.accept("trailer");
+        if (trailer.isEmpty()) {
+            return new Paged.Done(Optional.empty());   // unloaded during the read: like an event not loaded
+        }
+        if (!trailer.get().loadEpoch().equals(header.get().loadEpoch())) {
+            return new Paged.Reloaded();
+        }
+        Snapshot start = header.get().snapshot();
+        // Judged at the header's clock; unapplied entries from the trailer, so holds written during the
+        // read have theirs.
+        return new Paged.Done(Optional.of(new Snapshot(start.now(), start.perUserLimit(), start.seatIds(), seatValues,
+                holds, capMembers, trailer.get().snapshot().unappliedEntries())));
+    }
+
+    /**
+     * One page script. A value read later replaces an earlier one (a hold named by both a seat page and
+     * a user page): every value is real, only not all from the same instant.
+     */
+    private void readPage(UUID eventId, Duration window, Collection<UUID> seatIds, Collection<UUID> holdIds,
+                          Collection<UUID> userIds, Map<UUID, SeatValue> seatValues, Map<UUID, Hold> holds,
+                          Map<UUID, List<CapMember>> capMembers) {
+        Optional<Reply> page = run("PAGE", eventId, window, seatIds, holdIds, userIds);
+        if (page.isEmpty()) {
+            return;   // unloaded mid-read: the trailer sees it too and the read reports "not loaded"
+        }
+        seatValues.putAll(page.get().snapshot().seatValues());
+        holds.putAll(page.get().snapshot().holds());
+        capMembers.putAll(page.get().snapshot().capMembers());
+    }
+
+    private static List<List<UUID>> pages(Collection<UUID> ids, int size) {
+        List<UUID> all = new ArrayList<>(ids);
+        List<List<UUID>> pages = new ArrayList<>();
+        for (int from = 0; from < all.size(); from += size) {
+            pages.add(all.subList(from, Math.min(from + size, all.size())));
+        }
+        return pages;
+    }
+
+    /** One reply of state.lua and the load epoch it saw. */
+    private record Reply(Snapshot snapshot, String loadEpoch) {
     }
 
     @SuppressWarnings("unchecked")
-    private Optional<Snapshot> run(UUID eventId, Duration window, List<String> modeArgs) {
+    private Optional<Reply> run(String mode, UUID eventId, Duration window, Collection<UUID> seatIds,
+                                Collection<UUID> holdIds, Collection<UUID> userIds) {
         List<String> args = new ArrayList<>();
-        args.add(modeArgs.get(0));
+        args.add(mode);
         args.add(keys.eventPrefix(eventId));
         args.add(RedisKeys.GROUP);
         args.add(eventId.toString());
         args.add(Long.toString(window.toMillis()));
-        args.addAll(modeArgs.subList(1, modeArgs.size()));
+        for (Collection<UUID> ids : List.of(seatIds, holdIds, userIds)) {
+            args.add(Integer.toString(ids.size()));
+            ids.forEach(id -> args.add(id.toString()));
+        }
         List<Object> reply = (List<Object>) redis.execute(stateScript,
                 List.of(keys.meta(eventId), keys.seats(eventId), keys.stream()), args.toArray());
         if (reply == null || reply.isEmpty() || "NOT_LOADED".equals(reply.get(0))) {
             return Optional.empty();
         }
-        return Optional.of(parse(reply));
+        return Optional.of(new Reply(parse(reply), (String) reply.get(8)));
     }
 
     @SuppressWarnings("unchecked")

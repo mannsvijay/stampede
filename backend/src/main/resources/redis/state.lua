@@ -1,17 +1,25 @@
--- Read-only snapshot of one event's Redis-first state, for invariant 5 (PRD 6.10, D-022 M2.2c-2).
--- Writes nothing. One script = one atomic read: Redis runs it as a single command, so every value
--- below is from the same instant (and expiry is judged at the script's start time).
+-- Read-only reads of one event's Redis-first state, for invariant 5 (PRD 6.10, D-022 M2.2c-2, M2.2d).
+-- Writes nothing. Each call is one atomic read: Redis runs a script as a single command, so every value
+-- one call returns is from the same instant (and expiry is judged at the script's start time). A call is
+-- kept small on purpose: while it runs, every other client waits (D-022 M2.2d).
 --
 -- KEYS[1] event meta hash     KEYS[2] event seats set     KEYS[3] the inventory stream
--- ARGV[1] mode: 'ALL' (the whole event) or 'KEYS' (only the ids listed below)
+-- ARGV[1] mode:
+--   'KEYS' the listed ids, plus the seat set and the unapplied stream entries (the re-read; with no ids,
+--          the first read's header and trailer)
+--   'PAGE' only the listed ids (one page of the first read); seat set and entries come back empty
 -- ARGV[2] event key prefix ('<p>:ev:<event>:')    ARGV[3] consumer group    ARGV[4] eventId
 -- ARGV[5] entry window in ms: only unapplied stream entries younger than this are returned
--- 'KEYS' mode: ARGV[6] seat count, seat ids..., hold count, hold ids..., user count, user ids...
+-- ARGV[6] seat count, seat ids..., hold count, hold ids..., user count, user ids...
+-- Every listed seat's and user's named holds are read in the same call, so a seat key and the hold it
+-- names (or a user's members and their holds) are always from the same instant.
 --
 -- Reply: {'NOT_LOADED'} or
 --   {'LOADED', nowMs, limit, {seatId...}, {seatId, value, ...},
 --    {holdId, user, seats, createdMs, expiresMs, pttl, ...}, {userId, {member, score, ...}, ...},
---    {holdId, type, entryMs, ...}}
+--    {holdId, type, entryMs, ...}, loadEpoch}
+-- loadEpoch is meta's loadedMs ('' if the event was loaded without one): it changes when the event is
+-- wiped and loaded again, so a first read in pages can tell that it spanned a reload.
 
 local metaKey, seatsKey, stream = KEYS[1], KEYS[2], KEYS[3]
 local mode = ARGV[1]
@@ -20,10 +28,16 @@ local group = ARGV[3]
 local eventId = ARGV[4]
 local windowMs = tonumber(ARGV[5])
 
-local limit = redis.call('HGET', metaKey, 'limit')
+if mode ~= 'KEYS' and mode ~= 'PAGE' then
+    return redis.error_reply('state.lua: unknown mode ' .. tostring(mode))
+end
+
+local meta = redis.call('HMGET', metaKey, 'limit', 'loadedMs')
+local limit = meta[1]
 if not limit then
     return {'NOT_LOADED'}
 end
+local loadEpoch = meta[2] or ''
 
 local time = redis.call('TIME')
 local now = tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000)
@@ -37,34 +51,13 @@ local function add(list, kind, id)
     end
 end
 
-if mode == 'ALL' then
-    -- SCAN, not KEYS: same result, but it pages. Inside a script it still runs to the end in one go,
-    -- so the script blocks Redis for one pass over the keyspace (measured in D-022).
-    local cursor = '0'
-    repeat
-        local page = redis.call('SCAN', cursor, 'MATCH', eventPrefix .. '*', 'COUNT', 1000)
-        cursor = page[1]
-        for _, key in ipairs(page[2]) do
-            local rest = string.sub(key, #eventPrefix + 1)
-            local kind = string.sub(rest, 1, 5)
-            if kind == 'seat:' then
-                add(seatIds, 's', string.sub(rest, 6))
-            elseif kind == 'hold:' then
-                add(holdIds, 'h', string.sub(rest, 6))
-            elseif kind == 'user:' then
-                add(userIds, 'u', string.sub(rest, 6))
-            end
-        end
-    until cursor == '0'
-else
-    local pos = 6
-    for _, list in ipairs({{seatIds, 's'}, {holdIds, 'h'}, {userIds, 'u'}}) do
-        local count = tonumber(ARGV[pos])
-        for i = 1, count do
-            add(list[1], list[2], ARGV[pos + i])
-        end
-        pos = pos + count + 1
+local pos = 6
+for _, list in ipairs({{seatIds, 's'}, {holdIds, 'h'}, {userIds, 'u'}}) do
+    local count = tonumber(ARGV[pos])
+    for i = 1, count do
+        add(list[1], list[2], ARGV[pos + i])
     end
+    pos = pos + count + 1
 end
 
 local seatValues = {}
@@ -80,7 +73,7 @@ for from = 1, #seatIds, 500 do
             local seatId = seatIds[from + i - 1]
             seatValues[#seatValues + 1] = seatId
             seatValues[#seatValues + 1] = value
-            -- A re-read must be able to interpret the value: read the hold it names too.
+            -- The caller must be able to interpret the value: read the hold it names too.
             local named = string.match(value, '^H:([^:]+):')
             if named then
                 add(holdIds, 'h', named)
@@ -116,6 +109,10 @@ for _, holdId in ipairs(holdIds) do
         holds[#holds + 1] = hold[4]
         holds[#holds + 1] = tostring(redis.call('PTTL', key))   -- -1 = no expiry = pinned by a sale
     end
+end
+
+if mode == 'PAGE' then
+    return {'LOADED', string.format('%.0f', now), limit, {}, seatValues, holds, users, {}, loadEpoch}
 end
 
 -- Stream entries of this event the group has not acknowledged yet: pending (delivered, not acked) and
@@ -173,4 +170,4 @@ if redis.call('EXISTS', stream) == 1 then
 end
 
 return {'LOADED', string.format('%.0f', now), limit, redis.call('SMEMBERS', seatsKey), seatValues, holds, users,
-        unapplied}
+        unapplied, loadEpoch}

@@ -17,6 +17,7 @@ import java.util.Set;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.redis.core.RedisCallback;
 
 /**
@@ -32,6 +33,12 @@ class RedisHoldStateReaderTest extends RedisPersistenceTestSupport {
 
     @Autowired
     RedisHoldStateReader reader;
+
+    @Value("${spring.data.redis.host}")
+    String redisHost;
+
+    @Value("${spring.data.redis.port}")
+    int redisPort;
 
     @Test
     void anEventNotLoadedReadsAsEmpty() {
@@ -195,14 +202,104 @@ class RedisHoldStateReaderTest extends RedisPersistenceTestSupport {
     // --- cost ------------------------------------------------------------------------------------
 
     /**
-     * How long {@code state.lua} blocks Redis on the demo event's size: 2,000 seats, all held by 500
-     * buyers with one 4-seat hold each (every seat key, hold hash and user set exists). Redis' own
-     * SLOWLOG gives the time spent executing the script (server side, no network). Printed; the bound
-     * is loose so CI noise can't fail it.
+     * How much {@link RedisHoldStateReader#read} blocks Redis on the demo event's size: 2,000 seats, all
+     * held by 500 buyers with one 4-seat hold each (every seat key, hold hash and user set exists).
+     * Two separate phases, because logging every command costs time of its own:
+     * <ol>
+     *   <li><b>Longest single command</b>, from Redis' own SLOWLOG with every command logged: how long one
+     *       command (a script counts as one) kept Redis from serving anyone else. Server side, no
+     *       network.</li>
+     *   <li><b>A buyer's view</b>: a probe on its own connection sends PING in a loop; its worst round
+     *       trip while reads run, against its worst round trip while Redis is idle (Docker's network
+     *       jitter is in both).</li>
+     * </ol>
+     * Printed (D-022 M2.2d records the numbers); the bounds are loose so CI noise can't fail the test.
      */
     @Test
     @SuppressWarnings("unchecked")
-    void stateScriptTimeOnALoaded2000SeatEvent() {
+    void howLongTheFirstReadBlocksRedisOnALoaded2000SeatEvent() throws Exception {
+        UUID event = loadTimingEvent();
+        long keysInRedis = redis.execute((RedisCallback<Long>) connection -> connection.serverCommands().dbSize());
+        assertThat(reader.read(event, WINDOW)).isPresent();   // loads the scripts: not measured
+
+        // Phase 1: SLOWLOG with every command logged.
+        String previousThreshold = config("slowlog-log-slower-than", "10000");
+        String previousLength = config("slowlog-max-len", "128");
+        List<Long> longestPerRead = new ArrayList<>();
+        List<Long> readMillis = new ArrayList<>();
+        String longestCommand = "";
+        long longestSeen = -1;
+        try {
+            setConfig("slowlog-max-len", "100000");
+            setConfig("slowlog-log-slower-than", "0");
+            for (int run = 0; run < 10; run++) {
+                slowlog(server -> server.slowlogReset());
+                long start = System.nanoTime();
+                Snapshot snapshot = reader.read(event, WINDOW).orElseThrow();
+                readMillis.add((System.nanoTime() - start) / 1_000_000);
+                assertThat(snapshot.seatValues()).hasSize(2000);
+                assertThat(snapshot.holds()).hasSize(500);
+                assertThat(snapshot.capMembers()).hasSize(500);
+                long longest = 0;
+                // Each entry: id, unix time, execution time in microseconds, the command's arguments, ...
+                for (Object entry : (List<Object>) slowlog(server -> server.slowlogGet(100000))) {
+                    List<Object> fields = (List<Object>) entry;
+                    long micros = (Long) fields.get(2);
+                    List<String> args = ((List<Object>) fields.get(3)).stream().map(RedisHoldStateReaderTest::text).toList();
+                    if (args.get(0).toUpperCase().startsWith("SLOWLOG")) {
+                        continue;
+                    }
+                    longest = Math.max(longest, micros);
+                    if (micros > longestSeen) {
+                        longestSeen = micros;
+                        longestCommand = describe(args);
+                    }
+                }
+                longestPerRead.add(longest);
+            }
+        } finally {
+            setConfig("slowlog-log-slower-than", previousThreshold);
+            setConfig("slowlog-max-len", previousLength);
+            slowlog(server -> server.slowlogReset());
+        }
+
+        // Phase 2: the PING probe, SLOWLOG back to normal.
+        Probe probe = new Probe(redisHost, redisPort);
+        List<long[]> idle = new ArrayList<>();
+        List<long[]> reads = new ArrayList<>();
+        try {
+            probe.start();
+            long idleStart = System.nanoTime();
+            org.awaitility.Awaitility.await().pollDelay(Duration.ofSeconds(3)).atMost(Duration.ofSeconds(5))
+                    .until(() -> true);
+            idle.add(new long[] {idleStart, System.nanoTime()});
+            for (int run = 0; run < 10; run++) {
+                long start = System.nanoTime();
+                reader.read(event, WINDOW).orElseThrow();
+                reads.add(new long[] {start, System.nanoTime()});
+            }
+        } finally {
+            probe.stop();
+        }
+
+        List<Long> sortedLongest = longestPerRead.stream().sorted().toList();
+        List<Long> sortedRead = readMillis.stream().sorted().toList();
+        System.out.println("[I10 first read] 2000 seats, 500 holds, 500 users, " + keysInRedis + " keys in the Redis db."
+                + " Longest single command per read (us, 10 reads): " + sortedLongest + ", max " + longestSeen
+                + " us (" + longestCommand + "). Read time median " + sortedRead.get(sortedRead.size() / 2)
+                + " ms (SLOWLOG on). PING probe round trips: idle " + probe.summary(idle)
+                + "; during reads " + probe.summary(reads));
+
+        assertThat(sortedLongest.get(sortedLongest.size() / 2)).as("median longest command, us").isLessThan(500_000);
+        assertThat(probe.count(reads)).as("the probe ran while the reads did").isPositive();
+        assertThat(invariants.check(event, Duration.ZERO)).as("loaded from Postgres: both stores agree").isEmpty();
+    }
+
+    /**
+     * The demo event's size, loaded into Redis from Postgres: 2,000 seats, all held by 500 buyers with
+     * one 4-seat hold each, so every seat key, hold hash and user set exists.
+     */
+    private UUID loadTimingEvent() {
         UUID event = id("timing-event");
         jdbc.sql("""
                 INSERT INTO users (id, email, password_hash)
@@ -238,52 +335,107 @@ class RedisHoldStateReaderTest extends RedisPersistenceTestSupport {
                 SELECT :event, md5('timing-user' || k)::uuid, 4 FROM generate_series(1, 500) k
                 """).param("event", event).update();
         assertThat(loader.ensureLoaded(event)).isTrue();
-        long keysInRedis = redis.execute((RedisCallback<Long>) connection -> connection.serverCommands().dbSize());
-
-        java.util.Properties config = redis.execute((RedisCallback<java.util.Properties>) c -> c.serverCommands()
-                .getConfig("slowlog-log-slower-than"));
-        String previous = config == null ? "10000" : config.getProperty("slowlog-log-slower-than", "10000");
-        List<Long> serverMicros = new ArrayList<>();
-        List<Long> roundTripMicros = new ArrayList<>();
-        try {
-            // 500 us, not 0: Redis 7 also logs every command run INSIDE a script, which would fill the
-            // 128-entry log and add its own cost. Only the script itself takes that long.
-            setSlowlogThreshold("500");
-            for (int run = 0; run < 11; run++) {
-                slowlog(server -> server.slowlogReset());
-                long start = System.nanoTime();
-                Snapshot snapshot = reader.read(event, WINDOW).orElseThrow();
-                roundTripMicros.add((System.nanoTime() - start) / 1_000);
-                assertThat(snapshot.seatValues()).hasSize(2000);
-                assertThat(snapshot.holds()).hasSize(500);
-                assertThat(snapshot.capMembers()).hasSize(500);
-                // Each entry: id, unix time, execution time in microseconds, the command's arguments, ...
-                for (Object entry : (List<Object>) slowlog(server -> server.slowlogGet(128))) {
-                    List<Object> fields = (List<Object>) entry;
-                    List<Object> args = (List<Object>) fields.get(3);
-                    if (run > 0 && text(args.get(0)).toUpperCase().startsWith("EVAL")) {  // run 0 loads the script
-                        serverMicros.add((Long) fields.get(2));
-                    }
-                }
-            }
-        } finally {
-            setSlowlogThreshold(previous);
-        }
-        List<Long> server = serverMicros.stream().sorted().toList();
-        List<Long> roundTrip = roundTripMicros.stream().skip(1).sorted().toList();  // run 0 loads the script
-        long medianServer = server.isEmpty() ? -1 : server.get(server.size() / 2);
-        System.out.println("[state.lua timing] 2000 seats, 500 holds, 500 users, " + keysInRedis
-                + " keys in the Redis db: server-side median " + medianServer / 1000.0 + " ms (10 runs, us: " + server
-                + "); round trip incl. parsing median " + roundTrip.get(roundTrip.size() / 2) / 1000.0 + " ms");
-
-        assertThat(server).as("SLOWLOG captured every script run (each took over 500 us)").hasSize(10);
-        assertThat(medianServer).as("median server-side microseconds").isLessThan(500_000);
-        assertThat(invariants.check(event, Duration.ZERO)).as("loaded from Postgres: both stores agree").isEmpty();
+        return event;
     }
 
-    private void setSlowlogThreshold(String micros) {
+    /**
+     * Sends PING in a loop on its own connection (not the application's shared one, where it would queue
+     * behind the reader's own commands) and records each round trip as {start, end} in nanoseconds.
+     */
+    private static final class Probe {
+        private final io.lettuce.core.RedisClient client;
+        private final List<long[]> pings = java.util.Collections.synchronizedList(new ArrayList<>());
+        private volatile boolean running;
+        private Thread thread;
+
+        Probe(String host, int port) {
+            this.client = io.lettuce.core.RedisClient.create(io.lettuce.core.RedisURI.create(host, port));
+        }
+
+        void start() {
+            var connection = client.connect();
+            var commands = connection.sync();
+            commands.ping();   // connected and warm before anything is measured
+            running = true;
+            thread = new Thread(() -> {
+                try (connection) {
+                    while (running) {
+                        long start = System.nanoTime();
+                        commands.ping();
+                        pings.add(new long[] {start, System.nanoTime()});
+                    }
+                }
+            }, "ping-probe");
+            thread.start();
+        }
+
+        void stop() throws InterruptedException {
+            running = false;
+            if (thread != null) {
+                thread.join(5_000);
+            }
+            client.shutdown();
+        }
+
+        /** Worst round trip, in microseconds, of the pings that overlap any of these windows. */
+        long worstMicros(List<long[]> windows) {
+            return overlapping(windows).mapToLong(p -> (p[1] - p[0]) / 1_000).max().orElse(-1);
+        }
+
+        long count(List<long[]> windows) {
+            return overlapping(windows).count();
+        }
+
+        /** Worst, 99th percentile and how many took over 10 ms: one worst value alone is mostly Docker jitter. */
+        String summary(List<long[]> windows) {
+            List<Long> micros = overlapping(windows).map(p -> (p[1] - p[0]) / 1_000).sorted().toList();
+            if (micros.isEmpty()) {
+                return "no pings";
+            }
+            long p99 = micros.get(Math.min(micros.size() - 1, (int) Math.ceil(micros.size() * 0.99) - 1));
+            long over10ms = micros.stream().filter(m -> m > 10_000).count();
+            return micros.size() + " pings, worst " + micros.get(micros.size() - 1) + " us, p99 " + p99 + " us, "
+                    + over10ms + " over 10 ms";
+        }
+
+        private java.util.stream.Stream<long[]> overlapping(List<long[]> windows) {
+            List<long[]> copy;
+            synchronized (pings) {
+                copy = new ArrayList<>(pings);
+            }
+            return copy.stream().filter(p -> windows.stream().anyMatch(w -> p[0] < w[1] && p[1] > w[0]));
+        }
+    }
+
+    /** A SLOWLOG command line, short: for a state.lua call, its mode and how many seats, holds, users. */
+    private static String describe(List<String> args) {
+        String command = args.get(0).toUpperCase();
+        if (!command.startsWith("EVAL") || args.size() < 12) {
+            return command;
+        }
+        // EVALSHA sha 3 meta seats stream | mode prefix group event window | counts and ids
+        StringBuilder text = new StringBuilder(command + " " + args.get(6));
+        int pos = 11;
+        for (String kind : List.of(" seats=", " holds=", " users=")) {
+            if (pos >= args.size() || !args.get(pos).matches("\\d+")) {
+                return text + " (arguments truncated by SLOWLOG)";
+            }
+            int count = Integer.parseInt(args.get(pos));
+            text.append(kind).append(count);
+            pos += count + 1;
+        }
+        return text.toString();
+    }
+
+    private String config(String name, String fallback) {
+        java.util.Properties config = redis.execute((RedisCallback<java.util.Properties>) c -> c.serverCommands()
+                .getConfig(name));
+        return config == null ? fallback : config.getProperty(name, fallback);
+    }
+
+    private void setConfig(String name, String value) {
         redis.execute((RedisCallback<Object>) c -> {
-            c.serverCommands().setConfig("slowlog-log-slower-than", micros);
+            c.serverCommands().setConfig(name, value);
             return null;
         });
     }
