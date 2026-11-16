@@ -1180,3 +1180,27 @@ to that line); then M2.3.
 
 **Open problems (update 3)**: the 5-pass bound can still end in Postgres wins (M3 limit, unchanged). One clean
 1000-round run without Redis timeouts doesn't prove M4 was their cause.
+
+## 2026-11-17 - M2.2 review follow-up: done (session end)
+
+**Task**: M2.2 review follow-up (M1, M2, L1, L2, L5 first half, M3, M4, M5; D-022 "Review follow-up").
+
+**Changed**: no code since update 3. PLAN.md: review follow-up ticked, with M4 (one Redis connection per
+consumer for blocking reads; `ORDER BY id` for cap candidates) and M5 (progress counts closes by any path;
+cap holds listed inside the insert transaction; `@PreDestroy` removed) and the runs.
+
+**Verified (user, 2026-11-17; Claude reran nothing at session end)**
+- Full suite (`./gradlew test --rerun`): BUILD SUCCESSFUL in 21m 42s; the "Connection is already closed"
+  shutdown warnings are gone.
+- 1000-round `RedisPersistenceConcurrencyTest` (`-Dstampede.harness.rounds=1000`): BUILD SUCCESSFUL in 11m 32s.
+- Earlier in the task: 1000-round `RedisSaleRaceConcurrencyTest` passed (36m 42s run, 2026-11-16/17).
+
+**Next**: M2.3 (strategy selectable per event; concurrency test parameterised over all three).
+
+**Open problems**
+- Known limits still documented, not fixed: L3, L4, L5 second half, L6, L1 cap half; M3's 5-pass bound
+  can still end in Postgres wins.
+- Redis command timeouts: none since M4, but not proven that M4 was their cause (the two in
+  `RedisHoldStoreConcurrencyTest` came from a class with no consumer, on an overloaded machine).
+- Carried over: `state.lua` ~39 ms on a loaded event (M2.5); lost live cap member never repaired; I10 blind
+  to unloaded events; D-022 is a draft for you to rewrite in your own words.

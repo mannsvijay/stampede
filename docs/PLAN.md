@@ -509,7 +509,7 @@ end against the compose stack, and every concurrency harness scenario passed 100
         Targeted run (CLAUDE.md rule, 100 rounds): 34 classes, 433 tests, 0 failures, BUILD SUCCESSFUL in
         24m 5s; all six REDIS_FIRST harness scenarios 100/100 rounds clean.
         Verified by the user: full suite with --rerun BUILD SUCCESSFUL in 19m 28s.
-  - [ ] M2.2 review follow-up (2026-11-15): a correctness review of M2.2a to M2.2c-2 (D-022 "Review
+  - [x] M2.2 review follow-up (2026-11-15): a correctness review of M2.2a to M2.2c-2 (D-022 "Review
         follow-up"). Each fix has a test shown failing first.
         Fixed: M1 (R3 released a CONVERTED hold whose sale committed after R4's status read; R3 now reads
         the holder's status and finishes the sale with `sold.lua`, metric `R3_finish_sale`); M2 (no race
@@ -540,7 +540,30 @@ end against the compose stack, and every concurrency harness scenario passed 100
         No test assertion changed. Run by Claude (directly affected classes, 100 rounds): `RedisHoldWriterTest`
         (15), `RedisPersistenceConcurrencyTest`, `RedisSaleRaceConcurrencyTest`, `RedisReconcilerTest` (11),
         `RedisStreamConsumerTest` (11): 39 tests, 0 failures, BUILD SUCCESSFUL in 6m 48s.
-        To verify (user): full suite with --rerun. Tick after it passes.
+        User's runs 2026-11-16: full suite BUILD SUCCESSFUL in 24m 37s; 1000-round
+        `RedisPersistenceConcurrencyTest` + `RedisSaleRaceConcurrencyTest` failed after 14m 25s with a
+        `RedisCommandTimeoutException` in the sale race.
+        M4 (D-022): a new Redis connection per blocking `XREADGROUP` (Spring runs it on a dedicated Lettuce
+        connection; tests calling `pollOnce` opened and closed one per read). `RedisStreamConsumer` now
+        keeps one connection per consumer name, used by the loop and by tests, reopened after a failed
+        read; the lifecycle no longer binds one. 20-round sale race: Redis connections received 1,742 ->
+        56, client TIME_WAIT 1,686 -> 19; SLOWLOG/LATENCY empty. Cap candidates read `ORDER BY id`, cap
+        repro uses fixed ids. Tests: `RedisStreamConsumerTest` +2 (connection reuse, failed first with 120
+        new connections; reconnect after `CLIENT KILL`).
+        User's runs 2026-11-16/17: full suite BUILD SUCCESSFUL in 26m 30s; 1000-round run 36m 42s, no
+        Redis timeout, sale race passed, persistence race failed in round 711 (seed
+        -1301071079819458067, one `over cap true` conflict).
+        M5 (D-022): M3's stop rule counted only this writer's own closes; another path (other consumer,
+        reconciler R2) closing the blocking hold first made it give up while the cap had room again. Now a
+        blocking hold gone from Redis counts as progress whoever closed it (Released or NotActive), and the
+        over-cap insert lists the user's ACTIVE holds in its own transaction (`Blocked.capHolds`); the
+        5-pass bound is kept. Test hook `afterBlocked`. Removed `@PreDestroy` from
+        `RedisStreamConsumer.closeReaders()` (the Lettuce factory had already closed those connections:
+        "Connection is already closed" at shutdown). Tests: `RedisHoldWriterTest` +2 (one per window),
+        both failing first with round 711's CONFLICT. Run by Claude (same five classes, 100 rounds): 43
+        tests, 0 failures, BUILD SUCCESSFUL in 6m 6s.
+        Verified by the user (2026-11-17): full suite BUILD SUCCESSFUL in 21m 42s, shutdown warnings
+        gone; 1000-round `RedisPersistenceConcurrencyTest` BUILD SUCCESSFUL in 11m 32s.
 - [ ] M2.3 Strategy selectable per event (admin endpoint); concurrency test parameterised over all three
       Note (from M1.7, D-019): if an admin endpoint ever changes `per_user_limit`, it must refuse
       (409) a limit below any user's current `used`, checked under the allowance row locks; I8
