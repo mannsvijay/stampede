@@ -9,6 +9,8 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.dao.DataAccessResourceFailureException;
@@ -17,6 +19,8 @@ import org.springframework.dao.TransientDataAccessException;
 import org.springframework.data.domain.Range;
 import org.springframework.data.redis.RedisSystemException;
 import org.springframework.data.redis.connection.Limit;
+import org.springframework.data.redis.connection.RedisConnection;
+import org.springframework.data.redis.connection.stream.ByteRecord;
 import org.springframework.data.redis.connection.stream.Consumer;
 import org.springframework.data.redis.connection.stream.MapRecord;
 import org.springframework.data.redis.connection.stream.PendingMessage;
@@ -31,6 +35,7 @@ import org.springframework.data.redis.connection.stream.StreamRecords;
 import org.springframework.data.redis.core.RedisCallback;
 import org.springframework.data.redis.core.StreamOperations;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.serializer.StringRedisSerializer;
 import org.springframework.stereotype.Component;
 
 /**
@@ -53,6 +58,13 @@ import org.springframework.stereotype.Component;
  * {@code max-deliveries} times, it is copied to the dead-letter stream and acknowledged (decision 2a).
  * The reconciler then repairs whatever state the entry would have written.
  * <p>
+ * <b>Connections</b> (review follow-up, 2026-11-16). A blocking {@code XREADGROUP} can't share the
+ * application's one multiplexed Lettuce connection (it would hold up every other command), so Spring
+ * runs it on a dedicated connection. Fetched through the template, that connection was opened and
+ * closed for every read. Each consumer name now keeps one connection for its blocking reads, for the
+ * background loop and for tests alike; a read that fails closes it, and the next read opens a new one.
+ * All other commands use the template (the shared connection).
+ * <p>
  * Every method here is called by one thread at a time per consumer name ({@link RedisConsumerLifecycle},
  * or a test).
  */
@@ -70,6 +82,8 @@ class RedisStreamConsumer {
     private final RedisHoldStore store;
     private final RedisStreamMetrics metrics;
     private final String defaultName;
+    /** One connection per consumer name for its blocking reads; each is used by one thread at a time. */
+    private final Map<String, RedisConnection> readers = new ConcurrentHashMap<>();
 
     RedisStreamConsumer(StringRedisTemplate redis, RedisInventoryProperties properties, RedisHoldWriter writer,
                         RedisHoldStore store, RedisStreamMetrics metrics) {
@@ -125,9 +139,41 @@ class RedisStreamConsumer {
     }
 
     private List<MapRecord<String, Object, Object>> readNew(String consumer) {
-        return stream().read(Consumer.from(RedisKeys.GROUP, consumer),
-                StreamReadOptions.empty().count(settings.batchSize()).block(settings.block()),
-                StreamOffset.create(keys.stream(), ReadOffset.lastConsumed()));
+        RedisConnection connection = readers.computeIfAbsent(consumer,
+                name -> redis.getRequiredConnectionFactory().getConnection());
+        List<ByteRecord> records;
+        try {
+            records = connection.streamCommands().xReadGroup(Consumer.from(RedisKeys.GROUP, consumer),
+                    StreamReadOptions.empty().count(settings.batchSize()).block(settings.block()),
+                    StreamOffset.create(bytes(keys.stream()), ReadOffset.lastConsumed()));
+        } catch (RuntimeException e) {
+            closeReader(consumer);   // it may be broken; the next read opens a new one
+            throw e;
+        }
+        if (records == null) {
+            return List.of();
+        }
+        return records.stream()
+                .map(record -> record.<String, Object, Object>deserialize(StringRedisSerializer.UTF_8,
+                        StringRedisSerializer.UTF_8, StringRedisSerializer.UTF_8))
+                .toList();
+    }
+
+    private void closeReader(String consumer) {
+        RedisConnection connection = readers.remove(consumer);
+        if (connection != null) {
+            try {
+                connection.close();
+            } catch (RuntimeException e) {
+                log.debug("Closing the inventory stream connection of '{}' failed", consumer, e);
+            }
+        }
+    }
+
+    /** Closes every consumer's read connection (application or test context shutdown). */
+    @PreDestroy
+    void closeReaders() {
+        List.copyOf(readers.keySet()).forEach(this::closeReader);
     }
 
     /**

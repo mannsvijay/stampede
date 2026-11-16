@@ -5,8 +5,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.SmartLifecycle;
-import org.springframework.data.redis.connection.RedisConnectionFactory;
-import org.springframework.data.redis.core.RedisConnectionUtils;
 import org.springframework.stereotype.Component;
 
 /**
@@ -19,8 +17,9 @@ import org.springframework.stereotype.Component;
  * and trims the stream; after every read it refreshes the lag gauges. Any failure is logged and waited
  * out with a backoff of 1 s doubling to 5 s; nothing unapplied is ever acknowledged.
  * <p>
- * The thread keeps one Redis connection bound to itself for its whole life, so the blocking reads
- * reuse one dedicated Lettuce connection instead of opening a new one every second.
+ * {@link RedisStreamConsumer} keeps one connection per consumer name for its blocking reads and replaces
+ * it after a failure (review follow-up, 2026-11-16: it used to be bound to this thread here, so tests
+ * calling the consumer directly opened a connection per read).
  */
 @Component
 @ConditionalOnProperty(name = "stampede.inventory.redis.consumer.enabled", havingValue = "true", matchIfMissing = true)
@@ -31,13 +30,11 @@ class RedisConsumerLifecycle implements SmartLifecycle {
     private static final long MAX_BACKOFF_MS = 5_000;
 
     private final RedisStreamConsumer consumer;
-    private final RedisConnectionFactory connections;
     private volatile boolean running;
     private Thread thread;
 
-    RedisConsumerLifecycle(RedisStreamConsumer consumer, RedisConnectionFactory connections) {
+    RedisConsumerLifecycle(RedisStreamConsumer consumer) {
         this.consumer = consumer;
-        this.connections = connections;
     }
 
     @Override
@@ -76,7 +73,6 @@ class RedisConsumerLifecycle implements SmartLifecycle {
         boolean started = false;
         long nextHousekeeping = 0;
         long backoffMs = 0;
-        RedisConnectionUtils.bindConnection(connections);
         try {
             while (running) {
                 try {
@@ -104,13 +100,10 @@ class RedisConsumerLifecycle implements SmartLifecycle {
                         log.error("Inventory stream consumer failed; retrying in {} ms", backoffMs, e);
                     }
                     sleep(backoffMs);
-                    // A broken connection stays broken while bound: take a fresh one.
-                    RedisConnectionUtils.unbindConnection(connections);
-                    RedisConnectionUtils.bindConnection(connections);
                 }
             }
         } finally {
-            RedisConnectionUtils.unbindConnection(connections);
+            consumer.closeReaders();
         }
     }
 

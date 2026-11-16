@@ -243,6 +243,74 @@ class RedisStreamConsumerTest extends RedisPersistenceTestSupport {
         assertThat(holdStatus(holdId)).isEqualTo("ACTIVE");
     }
 
+    // ---- connections (review follow-up, 2026-11-16) ----
+
+    /**
+     * A blocking XREADGROUP runs on a dedicated Lettuce connection, not the shared one. Without reuse,
+     * every read opened and closed its own TCP connection (about 50 a second in the concurrency tests,
+     * each left in TIME_WAIT on the client). Each consumer name now keeps one connection for its reads.
+     */
+    @Test
+    void blockingReadsReuseOneConnectionPerConsumer() {
+        load();
+        consumer.pollOnce("a");   // the first read of each consumer may open its connection
+        consumer.pollOnce("b");
+        long before = connectionsReceived();
+
+        int applied = 0;
+        for (int i = 0; i < 30; i++) {
+            UUID holdId = hold(USERS.get(i % 2), FIVE_MINUTES, SEATS.get(i % SEATS.size()));
+            applied += consumer.pollOnce(i % 2 == 0 ? "a" : "b");
+            applied += consumer.pollOnce(i % 2 == 0 ? "b" : "a");   // nothing new: a blocking read that times out
+            releaseInRedis(holdId);
+            drain();
+        }
+
+        assertThat(applied).isEqualTo(30);
+        assertThat(connectionsReceived() - before).as("new Redis connections during 60 blocking reads").isZero();
+    }
+
+    /** A consumer whose connection breaks gets a new one and goes on applying. */
+    @Test
+    void aConsumerWhoseConnectionWasKilledReconnectsAndKeepsApplying() {
+        load();
+        consumer.pollOnce("a");
+        String readers = redis.execute((org.springframework.data.redis.core.RedisCallback<String>) connection -> {
+            Object list = connection.execute("CLIENT", "LIST".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            return list instanceof byte[] raw ? new String(raw, java.nio.charset.StandardCharsets.UTF_8) : String.valueOf(list);
+        });
+        List<String> blockingReaders = readers.lines().filter(line -> line.contains("cmd=xreadgroup")).toList();
+        assertThat(blockingReaders).as("the consumer's own connection").isNotEmpty();
+        for (String line : blockingReaders) {
+            int start = line.indexOf(" addr=") + " addr=".length();
+            String addr = line.substring(start, line.indexOf(' ', start));   // host:port of the client
+            int colon = addr.lastIndexOf(':');
+            redis.execute((org.springframework.data.redis.core.RedisCallback<Object>) connection -> {
+                connection.serverCommands().killClient(addr.substring(0, colon), Integer.parseInt(addr.substring(colon + 1)));
+                return null;
+            });
+        }
+
+        UUID holdId = hold(USER, FIVE_MINUTES, SEATS.get(0));
+        int failures = 0;
+        for (int attempt = 0; attempt < 3 && !"ACTIVE".equals(holdStatus(holdId)); attempt++) {
+            try {
+                consumer.pollOnce("a");
+            } catch (RuntimeException e) {
+                failures++;   // at most the read that found the connection dead
+            }
+        }
+
+        assertThat(holdStatus(holdId)).isEqualTo("ACTIVE");
+        assertThat(failures).isLessThanOrEqualTo(1);
+    }
+
+    private long connectionsReceived() {
+        java.util.Properties stats = redis.execute((org.springframework.data.redis.core.RedisCallback<java.util.Properties>)
+                connection -> connection.serverCommands().info("stats"));
+        return Long.parseLong(stats.getProperty("total_connections_received"));
+    }
+
     private int holdRowCount(String status) {
         return jdbc.sql("SELECT count(*) FROM holds WHERE status = ?").param(status).query(Integer.class).single();
     }

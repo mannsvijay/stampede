@@ -50,6 +50,12 @@ import org.springframework.transaction.support.TransactionTemplate;
 class RedisHoldWriter {
 
     private static final Logger log = LoggerFactory.getLogger(RedisHoldWriter.class);
+    /**
+     * Bound on close-and-retry passes of one HELD (review follow-up, 2026-11-15). Each pass after the
+     * first must have closed a hold Redis no longer has, so reaching it needs that many holds ending
+     * while one HELD is being persisted.
+     */
+    private static final int MAX_PASSES = 5;
 
     private final JdbcClient jdbc;
     private final SeatRows seats;
@@ -101,19 +107,30 @@ class RedisHoldWriter {
         if (store.liveHold(hold.eventId(), hold.holdId()).isEmpty()) {
             return insertRow(hold, statusOfGoneHold(hold.expiresAt())) ? Applied.STALE : Applied.DUPLICATE;
         }
+        Optional<String> epoch = store.loadEpoch(hold.eventId());
         Attempt attempt = insertActive(hold);
-        if (attempt instanceof Blocked blocked) {
+        for (int pass = 1; attempt instanceof Blocked blocked; pass++) {
             // Usually an older hold that is over in Redis (expired by TTL, so no entry ever came) but
             // not yet closed in Postgres: the sweeper runs every 5 s. Close those, each in its own
-            // transaction (lock order), and try once more.
-            closeHoldsRedisNoLongerHas(hold, blocked);
+            // transaction (lock order), and try again.
+            boolean closedAny = closeHoldsRedisNoLongerHas(hold, blocked);
+            // Review follow-up (2026-11-15): this hold may have ended while we waited for locks (its
+            // buyer released it, or its TTL ran out), and a newer hold may have taken its seat and been
+            // persisted. That is no disagreement: record the hold as over, as rule 3 does. Only if the
+            // load epoch is unchanged: after a wipe and reload, Redis lost the hold because the loader
+            // restored Postgres' view, so Postgres did win (D-022).
+            if (store.liveHold(hold.eventId(), hold.holdId()).isEmpty()
+                    && epoch.equals(store.loadEpoch(hold.eventId()))) {
+                return insertRow(hold, statusOfGoneHold(hold.expiresAt())) ? Applied.STALE : Applied.DUPLICATE;
+            }
+            // The first pass always tries again (as before). After that, only while a pass closed
+            // something: a cap can fill with holds that each ended while the previous pass waited.
+            if ((pass > 1 && !closedAny) || pass >= MAX_PASSES) {
+                return postgresWins(hold, blocked);
+            }
             attempt = insertActive(hold);
         }
-        return switch (attempt) {
-            case Inserted inserted -> Applied.APPLIED;
-            case AlreadyThere there -> Applied.DUPLICATE;
-            case Blocked blocked -> postgresWins(hold, blocked);
-        };
+        return attempt instanceof Inserted ? Applied.APPLIED : Applied.DUPLICATE;
     }
 
     /** Applies a release Redis made (by the buyer, or a failed checkout). */
@@ -285,17 +302,23 @@ class RedisHoldWriter {
      * check and compared again before each close. If Redis was wiped and reloaded in between, a hold
      * that looked absent may have just been restored, so this stops and closes nothing more; the retry
      * then decides with Redis as it is now.
+     *
+     * @return whether at least one hold was closed
      */
-    private void closeHoldsRedisNoLongerHas(HoldFacts hold, Blocked blocked) {
+    private boolean closeHoldsRedisNoLongerHas(HoldFacts hold, Blocked blocked) {
         Optional<String> epoch = store.loadEpoch(hold.eventId());
         if (epoch.isEmpty()) {
-            return;   // not loaded: "Redis doesn't have it" means nothing (closeGone would refuse too)
+            return false;   // not loaded: "Redis doesn't have it" means nothing (closeGone would refuse too)
         }
+        boolean closedAny = false;
         Set<UUID> candidates = new LinkedHashSet<>(blocked.heldBy());
         if (blocked.overCap()) {
+            // ORDER BY id: a fixed order to check and close them in (each close is its own transaction,
+            // so the order doesn't matter for locking); it makes runs and tests reproducible.
             candidates.addAll(jdbc.sql("""
                             SELECT id FROM holds
                             WHERE event_id = :eventId AND user_id = :userId AND status = 'ACTIVE' AND id <> :holdId
+                            ORDER BY id
                             """)
                     .param("eventId", hold.eventId())
                     .param("userId", hold.userId())
@@ -311,10 +334,13 @@ class RedisHoldWriter {
             if (!epoch.equals(store.loadEpoch(hold.eventId()))) {
                 log.warn("Event {} was reloaded into Redis while persisting hold {}; not closing older holds",
                         hold.eventId(), hold.holdId());
-                return;
+                return closedAny;
             }
-            closeGone(hold.eventId(), other);
+            if (closeGone(hold.eventId(), other) instanceof ReleaseOutcome.Released) {
+                closedAny = true;
+            }
         }
+        return closedAny;
     }
 
     /** For tests: interleave a Redis wipe and reload at the one moment the epoch guard protects. */

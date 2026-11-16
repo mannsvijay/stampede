@@ -1052,7 +1052,67 @@ D-022 final). Plan and notes are under M2.2c-2 in PLAN.md.
   and the 1000-round proof `*ConcurrencyTest` (now includes `RedisSaleRaceConcurrencyTest`).
 - The "failing first" results above are as recorded in D-022 during the task, not re-run here.
 
-**Next**: after both runs pass, tick the review follow-up in PLAN.md; then M2.3.
+**Update (same task, 2026-11-15/16): `RedisPersistenceConcurrencyTest` line 145**
+- User's runs: 1000-round proof `*ConcurrencyTest` BUILD SUCCESSFUL in 57m 4s. Full suite took 1h 4m
+  (overloaded machine) with 3 failures: two `RedisCommandTimeoutException` in
+  `RedisHoldStoreConcurrencyTest` (2 s Redis timeout), one at `RedisPersistenceConcurrencyTest:145`
+  (`conflict` counter not zero). The two classes alone: BUILD SUCCESSFUL in 3m 18s.
+- Cause (not timing in the test): `RedisHoldWriter.applyHeld` checked its hold live in Redis once, before
+  waiting for locks. Seat form: the hold is released while its writer waits for the seat lock, another
+  hold takes and persists the seat, and the writer called it "Postgres wins" (right outcome, wrong
+  label). Cap form: while closing a gone hold, another just-seen-live hold ends and a newer one is
+  persisted; the cap looks full and "Postgres wins" released a hold Redis still had (a buyer loses a
+  good hold). The original failure output was overwritten by the rerun, so which form hit is unknown.
+- Fix (review item M3, D-022): after each close pass, a hold Redis no longer has (load epoch unchanged)
+  is written as a tombstone (STALE); otherwise retry while a pass closed something, max 5 passes, then
+  Postgres wins. `closeHoldsRedisNoLongerHas` returns whether it closed anything. After a reload the old
+  behaviour stays (`aReloadWhileClosingAnOlderHold…` still expects CONFLICT, unchanged).
+- Tests: `RedisHoldWriterTest#aHeldWhoseHoldEndsWhileItWaitsForTheSeatLockIsStaleNotAConflict` and
+  `#aCapFullOfHoldsThatEndedWhileTheWriterWaitedIsClosedNotAConflict`; the stall is a row lock the
+  test holds, released after the race is set up (no sleeps). No existing assertion changed.
+
+**Verified (update)**
+- Both repros before the fix: 2 tests, 2 failed, both `but was: CONFLICT` (WARN lines: "held by [..]" and
+  "over cap true"). After the fix: 2 tests, 0 failures, BUILD SUCCESSFUL in 51s.
+- `./gradlew test --rerun --tests RedisHoldWriterTest --tests RedisPersistenceConcurrencyTest --tests
+  RedisSaleRaceConcurrencyTest --tests RedisReconcilerTest --tests RedisStreamConsumerTest` (100 rounds):
+  39 tests, 0 failures, BUILD SUCCESSFUL in 6m 48s. Persistence race: HELD applied=783 duplicate=1039
+  stale=1145; sale race: sold=632 released=468 expired=241, R3 finish=41, R4 finish=58.
+- Not run by Claude: the rest of the CLAUDE.md set (the user's full suite covers it).
+
+**Update 2 (2026-11-16): Redis command timeouts, cap test order**
+- User's runs: full suite after the M3 fix BUILD SUCCESSFUL in 24m 37s. 1000-round
+  `RedisPersistenceConcurrencyTest` + `RedisSaleRaceConcurrencyTest` failed after 14m 25s: round 168 of the
+  sale race, `RedisCommandTimeoutException` (EVALSHA of `hold.lua`, 2 s) in a buyer's `strategy.hold`
+  (test line 136); the 8 I10 violations after it come from the round stopping partway.
+  (That result file was overwritten by my 20-round run, after I had read it.)
+- Investigation, one instrumented 20-round run (SLOWLOG 5 ms, LATENCY 20 ms, INFO stats): Redis never
+  stalled (both empty). Blocking XREADGROUP already runs on a dedicated connection (checked in the Spring
+  Data Redis 3.5.13 bytecode), not the buyers' shared one. But with no pool, every blocking read from a
+  test thread opened and closed its own connection: 1,742 connections, 1,686 sockets in TIME_WAIT.
+  Production's loop bound one connection to its thread, so it was not affected (my earlier report said it
+  was; corrected).
+- Fix (review item M4, D-022): `RedisStreamConsumer` owns one connection per consumer name for blocking
+  reads (closed and replaced after a failed read, closed by `@PreDestroy` and at the end of the loop);
+  `RedisConsumerLifecycle` no longer binds a connection. No new dependency.
+- Cap repro: `RedisHoldWriter`'s cap candidates `ORDER BY id`; the test creates `earlier`/`gone` with fixed
+  ids (…0001, …0002) so it no longer relies on heap order.
+- Tests: `RedisStreamConsumerTest` +2 (`blockingReadsReuseOneConnectionPerConsumer` failed first: 120 new
+  connections for 60 reads; `aConsumerWhoseConnectionWasKilledReconnectsAndKeepsApplying` failed first: no
+  lasting connection to kill). Two fixes in my own new test while writing it (CLIENT LIST reply type;
+  `killClient` instead of `CLIENT KILL ID`). No existing assertion changed.
+
+**Verified (update 2)**
+- 20-round `RedisSaleRaceConcurrencyTest` with the probe, before -> after: Redis
+  `total_connections_received` 1,742 -> 56 (of which ~5 per sample are the probe's own redis-cli calls, so
+  ~5 from the test); client TIME_WAIT to Redis 1,686 -> 19; SLOWLOG/LATENCY empty both times.
+- `./gradlew test --rerun --tests RedisStreamConsumerTest --tests RedisHoldWriterTest --tests
+  RedisPersistenceConcurrencyTest --tests RedisSaleRaceConcurrencyTest --tests RedisReconcilerTest`
+  (100 rounds): 41 tests, 0 failures, BUILD SUCCESSFUL in 6m 47s (one earlier run of the same set had the
+  kill test failing on its helper, fixed in the test).
+- Not run by Claude: the full suite and the 1000-round proof (the user runs them).
+
+**Next**: user's full suite and 1000-round proof; if green, tick the review follow-up in PLAN.md; then M2.3.
 
 **Open problems**
 - Known limits documented, not fixed: L3 (epoch-guard window spans the wait for the hold row lock;
@@ -1061,3 +1121,7 @@ D-022 final). Plan and notes are under M2.2c-2 in PLAN.md.
   member changes, crash only), L6 (`state.lua` reads at most 10,000 stream entries), L1 cap half.
 - Carried over: `state.lua` ~39 ms on a loaded event (M2.5); lost live cap member never repaired;
   I10 blind to unloaded events; D-022 is a draft for you to rewrite in your own words.
+- M3 limit: the cap form falls back to Postgres wins after 5 close passes in one persist.
+- `RedisHoldStoreConcurrencyTest` hit the 2 s Redis command timeout on the overloaded run; not changed.
+- Not proven that the connection churn (M4) caused the timeouts; the next 1000-round run is the evidence.
+  If they recur with churn gone, look at client-side stalls (GC, host load, Docker Desktop networking).

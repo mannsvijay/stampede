@@ -528,8 +528,19 @@ end against the compose stack, and every concurrency harness scenario passed 100
         `RedisEventLoader.inSnapshot`, `RedisReconciler.beforeSoldSeats`, strategy `afterPostgresSale`
         and `beforeGate`; new metric `R3_release_in_redis`. Main code changed
         in `inventory.strategy` and `control.invariants` only. No new dependency, no API change.
-        Not run by Claude this session (the user runs them). To verify: full suite with --rerun; 1000-round
-        proof `*ConcurrencyTest` (now includes `RedisSaleRaceConcurrencyTest`). Tick after both pass.
+        User's runs 2026-11-15: 1000-round proof `*ConcurrencyTest` BUILD SUCCESSFUL in 57m 4s; full suite
+        (1h 4m, machine overloaded) 3 failures: two `RedisCommandTimeoutException` in
+        `RedisHoldStoreConcurrencyTest` (2 s Redis timeout under load) and `RedisPersistenceConcurrencyTest`
+        line 145 (`conflict` counter); those two classes alone: BUILD SUCCESSFUL in 3m 18s.
+        Line 145 was a real race, not test timing: fixed as review item M3 (D-022). `applyHeld` re-checks
+        its own hold after each close pass (gone + same load epoch = STALE tombstone) and retries while a
+        pass closes something (max 5), so a hold that ended while its writer waited is not a conflict, and a
+        cap filled by holds that ended during the wait no longer releases a live hold. Repros in
+        `RedisHoldWriterTest` (+2, row-lock stall, deterministic), both shown failing with CONFLICT first.
+        No test assertion changed. Run by Claude (directly affected classes, 100 rounds): `RedisHoldWriterTest`
+        (15), `RedisPersistenceConcurrencyTest`, `RedisSaleRaceConcurrencyTest`, `RedisReconcilerTest` (11),
+        `RedisStreamConsumerTest` (11): 39 tests, 0 failures, BUILD SUCCESSFUL in 6m 48s.
+        To verify (user): full suite with --rerun. Tick after it passes.
 - [ ] M2.3 Strategy selectable per event (admin endpoint); concurrency test parameterised over all three
       Note (from M1.7, D-019): if an admin endpoint ever changes `per_user_limit`, it must refuse
       (409) a limit below any user's current `used`, checked under the allowance row locks; I8

@@ -304,6 +304,95 @@ class RedisHoldWriterTest extends RedisPersistenceTestSupport {
         }
     }
 
+    /**
+     * The cap form of the same race, and the worse one: the hold being persisted stays live, so a wrong
+     * "Postgres wins" would release a good hold on both sides. The user's Postgres cap is full of holds
+     * that never were live in Redis together: while the writer closes one hold Redis no longer has
+     * (stalled on its row lock), another hold it had just seen live ends, and a newer one is persisted.
+     * After the stall, Postgres counts the ended hold, the newer one and this one: over the cap. The
+     * writer must close the ended hold too and insert, not declare a conflict.
+     * <p>
+     * Limit 4, two seats each. Postgres: {@code earlier} (live) and {@code gone} (released in Redis, its
+     * RELEASED not applied). Redis: {@code earlier} + {@code mine}. The writer checks {@code earlier}
+     * (live, kept) before {@code gone}: it checks the user's holds in id order ({@code ORDER BY id}), and
+     * the test fixes both ids so that {@code earlier} sorts first. It then waits for {@code gone}'s row
+     * lock; meanwhile {@code earlier} is released and {@code later} is taken and persisted.
+     */
+    @Test
+    void aCapFullOfHoldsThatEndedWhileTheWriterWaitedIsClosedNotAConflict() throws Exception {
+        load();
+        UUID earlier = UUID.fromString("00000000-0000-0000-0000-000000000001");
+        UUID gone = UUID.fromString("00000000-0000-0000-0000-000000000002");
+        assertThat(store.hold(new HoldRequest(earlier, EVENT, USER, List.of(SEATS.get(0), SEATS.get(1)), FIVE_MINUTES)))
+                .isInstanceOf(HoldOutcome.Held.class);
+        assertThat(store.hold(new HoldRequest(gone, EVENT, USER, List.of(SEATS.get(2), SEATS.get(3)), FIVE_MINUTES)))
+                .isInstanceOf(HoldOutcome.Held.class);
+        drain();
+        releaseInRedis(gone);   // its RELEASED entry stays unapplied: Postgres still counts it
+        UUID mine = hold(USER, FIVE_MINUTES, SEATS.get(4), SEATS.get(5));
+        StreamEntry.HoldFacts mineFacts = StreamEntry.HoldFacts.of(EVENT, store.liveHold(EVENT, mine).orElseThrow());
+        java.util.concurrent.ExecutorService pool = java.util.concurrent.Executors.newFixedThreadPool(2);
+        try {
+            java.util.concurrent.CountDownLatch locked = new java.util.concurrent.CountDownLatch(1);
+            java.util.concurrent.CountDownLatch writeLater = new java.util.concurrent.CountDownLatch(1);
+            java.util.concurrent.atomic.AtomicReference<UUID> laterRef = new java.util.concurrent.atomic.AtomicReference<>();
+            // The "stall": a transaction holding the row lock of the hold the writer will close. While it
+            // holds it, it persists the later hold as the consumer would.
+            java.util.concurrent.Future<?> blocker = pool.submit(() -> new org.springframework.transaction.support
+                    .TransactionTemplate(transactions).executeWithoutResult(tx -> {
+                jdbc.sql("SELECT id FROM holds WHERE id = ? FOR UPDATE").param(gone).query(UUID.class).single();
+                locked.countDown();
+                try {
+                    assertThat(writeLater.await(10, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+                } catch (InterruptedException e) {
+                    throw new IllegalStateException(e);
+                }
+                RedisHoldStore.LiveHold later = store.liveHold(EVENT, laterRef.get()).orElseThrow();
+                jdbc.sql("""
+                        INSERT INTO holds (id, event_id, user_id, seat_ids, created_at, expires_at, status)
+                        VALUES (?, ?, ?, ?, ?, ?, 'ACTIVE')
+                        """).params(later.holdId(), EVENT, USER, later.seatIds().toArray(UUID[]::new),
+                        later.createdAt().atOffset(java.time.ZoneOffset.UTC),
+                        later.expiresAt().atOffset(java.time.ZoneOffset.UTC)).update();
+                for (UUID seatId : later.seatIds()) {
+                    jdbc.sql("UPDATE event_seats SET status = 'HELD', hold_id = ?, version = version + 1 "
+                            + "WHERE event_id = ? AND seat_id = ?").params(later.holdId(), EVENT, seatId).update();
+                }
+                jdbc.sql("UPDATE user_event_allowance SET used = used + 2 WHERE event_id = ? AND user_id = ?")
+                        .params(EVENT, USER).update();
+            }));
+            assertThat(locked.await(10, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+
+            // Over the cap in Postgres (4 + 2); the writer keeps `earlier` (live) and waits to close `gone`.
+            java.util.concurrent.Future<Applied> mineApply = pool.submit(() -> writer.applyHeld(mineFacts));
+            org.awaitility.Awaitility.await().atMost(java.time.Duration.ofSeconds(10))
+                    .pollInterval(java.time.Duration.ofMillis(20))
+                    .until(() -> jdbc.sql("SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' "
+                            + "AND datname = current_database()").query(Long.class).single() == 1);
+
+            releaseInRedis(earlier);
+            UUID later = hold(USER, FIVE_MINUTES, SEATS.get(6), SEATS.get(7));
+            laterRef.set(later);
+            writeLater.countDown();
+            blocker.get(10, java.util.concurrent.TimeUnit.SECONDS);
+
+            assertThat(mineApply.get(10, java.util.concurrent.TimeUnit.SECONDS)).isEqualTo(Applied.APPLIED);
+            drain();   // earlier's and gone's RELEASED, later's HELD: all already handled
+
+            assertThat(holdStatus(mine)).isEqualTo("ACTIVE");
+            assertThat(store.liveHold(EVENT, mine)).as("the good hold is not released in Redis").isPresent();
+            assertThat(holdStatus(later)).isEqualTo("ACTIVE");
+            assertThat(holdStatus(earlier)).isEqualTo("RELEASED");
+            assertThat(holdStatus(gone)).isEqualTo("RELEASED");
+            assertThat(allowance(USER)).isEqualTo(4);
+            assertThat(store.used(EVENT, USER)).isEqualTo(4);
+            assertThat(counter(RedisStreamMetrics.APPLIED, "type", "held", "result", "conflict")).isZero();
+            assertThat(violations()).isEmpty();
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
     // ---- expiry, as the sweeper will call it (M2.2c) ----
 
     @Test

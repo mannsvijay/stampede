@@ -1280,9 +1280,11 @@ Write these yourself, in your own words. Each one is an interview answer you've 
       (`release.lua`'s entry now carries `createdMs`/`expiresMs` for that row). Concurrent HELD and
       RELEASED of one hold meet on the primary key. A HELD blocked by a seat held in Postgres, or by
       the cap, first closes the blocking holds Redis no longer has (each in its own transaction:
-      their row lock would come after seat locks) and retries once; still blocked (seat SOLD, a
+      their row lock would come after seat locks) and retries; still blocked (seat SOLD, a
       holder Redis still has, a seat Postgres doesn't have, the cap) = **Postgres wins**: tombstone
-      RELEASED, `S:` markers back for sold seats, then `release.lua` in Redis.
+      RELEASED, `S:` markers back for sold seats, then `release.lua` in Redis. (Since the review
+      follow-up, item M3 below: after each close pass the hold itself is re-checked, and more passes
+      run while a pass closes something.)
     - **Expiry:** `RedisHoldWriter.expire` for the M2.2c strategy's `release(…, EXPIRED)`, so the
       sweeper doesn't change: `NOT_EXPIRED` from Redis = NotExpired; `GONE` = close by Redis' clock,
       except while the event isn't loaded (then NotExpired: the loader decides). Lock-first since
@@ -1435,6 +1437,46 @@ Write these yourself, in your own words. Each one is an interview answer you've 
       outside it and retries once (`REQUIRES_NEW` was rejected: a second connection per locked row).
     - **L5 (first half).** The GONE path of the strategy's release (Redis lost the hold) now removes the
       hold's finite cap member, as `closeGone` does since M2.2c-2.
+    - **M3, false "Postgres wins" after a stall (found 2026-11-15 by `RedisPersistenceConcurrencyTest`
+      line 145, `conflict` counter, on an overloaded machine; not timing in the test).** `applyHeld`
+      checked "Redis still has this hold" once, before waiting for locks, and retried once.
+      (a) Seat form: the hold is released (or expires) while its writer waits for a seat lock, another
+      buyer takes the seat and that hold is persisted; the writer finds the seat held by a hold Redis
+      really has and declared a conflict. The outcome was right (tombstone RELEASED, nothing to release
+      in Redis) but the label was wrong. (b) Cap form, worse: while a pass waits to close one gone hold,
+      a hold it had just seen live ends and a newer one is persisted, so Postgres counts holds that were
+      never live together and the cap looks full; "Postgres wins" then released a hold Redis still had
+      (the buyer loses a good hold). Fix: after each close pass, if Redis no longer has this hold and the
+      load epoch is unchanged, write the tombstone (EXPIRED or RELEASED by Redis' clock) = STALE, as
+      rule 3 does; otherwise retry while a pass closed something, at most 5 passes, then Postgres wins.
+      After a wipe and reload (epoch changed) a hold Redis lost is still Postgres winning, as before.
+      Why the re-check is exact for the seat form: a hold that is still live kept its seats in Redis the
+      whole time, so no newer hold can have taken them. Tests (each failing first with CONFLICT):
+      `RedisHoldWriterTest#aHeldWhoseHoldEndsWhileItWaitsForTheSeatLockIsStaleNotAConflict` and
+      `#aCapFullOfHoldsThatEndedWhileTheWriterWaitedIsClosedNotAConflict`; the stall is a row lock the
+      test holds, so both are deterministic. Known limit: the cap form needs one pass per hold ending
+      during one persist; after 5 such passes it still falls back to Postgres wins.
+      The cap candidates are read `ORDER BY id` (2026-11-16): a fixed order to check and close them in.
+      Each close is its own transaction, so the order doesn't matter for locking; the cap test fixes
+      both hold ids so the hold it needs checked first sorts first (it used to rely on heap order).
+    - **M4, a new Redis connection per blocking read (2026-11-16, while investigating three 2 s
+      `RedisCommandTimeoutException`s in the heaviest Redis tests).** Spring Data Redis runs a blocking
+      `XREADGROUP` on a dedicated Lettuce connection, never on the shared multiplexed one, and without a
+      pool that connection was opened (TCP, HELLO, AUTH) and closed for every read. The production loop
+      avoided it by binding one connection to its thread; tests calling `pollOnce` directly didn't.
+      Measured in a 20-round `RedisSaleRaceConcurrencyTest`: 1,742 connections received by Redis and
+      1,686 client sockets left in Windows TIME_WAIT (about 120 s each), so a 1000-round run kept
+      thousands of them through Docker Desktop's port forwarder. Redis itself never stalled: SLOWLOG
+      (5 ms) and LATENCY (20 ms) were empty. Fix: `RedisStreamConsumer` keeps one connection per
+      consumer name for its blocking reads, used by the background loop and by tests alike, closed and
+      replaced after a failed read, closed at shutdown; the lifecycle no longer binds one. Same run
+      after the fix: about 5 connections opened by the test, 19 sockets in TIME_WAIT. No new dependency
+      (a `commons-pool2` pool was the alternative). Tests: `RedisStreamConsumerTest#
+      blockingReadsReuseOneConnectionPerConsumer` (60 reads, zero new connections; failed first with
+      120) and `#aConsumerWhoseConnectionWasKilledReconnectsAndKeepsApplying` (`CLIENT KILL`, then the
+      hold is still applied). **Not shown:** that this caused the timeouts. The two in
+      `RedisHoldStoreConcurrencyTest` came from a class with no consumer, on an overloaded machine, so
+      client-side stalls from load alone also happen; the user's next 1000-round run is the evidence.
 - **Why:**
   - Redis runs commands on one thread and a whole script as one command, so nothing can happen
     between a script's checks and its writes: that is the entire locking story of this strategy.
