@@ -377,11 +377,6 @@ class RedisHoldStateReaderTest extends RedisPersistenceTestSupport {
             client.shutdown();
         }
 
-        /** Worst round trip, in microseconds, of the pings that overlap any of these windows. */
-        long worstMicros(List<long[]> windows) {
-            return overlapping(windows).mapToLong(p -> (p[1] - p[0]) / 1_000).max().orElse(-1);
-        }
-
         long count(List<long[]> windows) {
             return overlapping(windows).count();
         }
