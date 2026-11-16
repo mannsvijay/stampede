@@ -1283,8 +1283,8 @@ Write these yourself, in your own words. Each one is an interview answer you've 
       their row lock would come after seat locks) and retries; still blocked (seat SOLD, a
       holder Redis still has, a seat Postgres doesn't have, the cap) = **Postgres wins**: tombstone
       RELEASED, `S:` markers back for sold seats, then `release.lua` in Redis. (Since the review
-      follow-up, item M3 below: after each close pass the hold itself is re-checked, and more passes
-      run while a pass closes something.)
+      follow-up, items M3 and M5 below: after each close pass the hold itself is re-checked, and more
+      passes run while a pass finds a blocking hold gone from Redis.)
     - **Expiry:** `RedisHoldWriter.expire` for the M2.2c strategy's `release(…, EXPIRED)`, so the
       sweeper doesn't change: `NOT_EXPIRED` from Redis = NotExpired; `GONE` = close by Redis' clock,
       except while the event isn't loaded (then NotExpired: the loader decides). Lock-first since
@@ -1469,7 +1469,7 @@ Write these yourself, in your own words. Each one is an interview answer you've 
       thousands of them through Docker Desktop's port forwarder. Redis itself never stalled: SLOWLOG
       (5 ms) and LATENCY (20 ms) were empty. Fix: `RedisStreamConsumer` keeps one connection per
       consumer name for its blocking reads, used by the background loop and by tests alike, closed and
-      replaced after a failed read, closed at shutdown; the lifecycle no longer binds one. Same run
+      replaced after a failed read, closed when the loop stops; the lifecycle no longer binds one. Same run
       after the fix: about 5 connections opened by the test, 19 sockets in TIME_WAIT. No new dependency
       (a `commons-pool2` pool was the alternative). Tests: `RedisStreamConsumerTest#
       blockingReadsReuseOneConnectionPerConsumer` (60 reads, zero new connections; failed first with
@@ -1477,6 +1477,29 @@ Write these yourself, in your own words. Each one is an interview answer you've 
       hold is still applied). **Not shown:** that this caused the timeouts. The two in
       `RedisHoldStoreConcurrencyTest` came from a class with no consumer, on an overloaded machine, so
       client-side stalls from load alone also happen; the user's next 1000-round run is the evidence.
+      (2026-11-17: that run, 1000 rounds of both Redis harnesses, had no Redis timeout; one run is not
+      proof.) A first version also closed these connections in a `@PreDestroy`; removed, because the
+      Lettuce connection factory is a SmartLifecycle and closes them when it stops, before any
+      `@PreDestroy` runs, so the second close only logged Lettuce's "Connection is already closed".
+    - **M5, M3's stop rule ignored closes by other paths (2026-11-17, round 711 of the 1000-round
+      `RedisPersistenceConcurrencyTest`, seed -1301071079819458067: one `over cap true` conflict).** M3
+      gave up after a pass in which *this writer* closed nothing. But three paths close a hold Redis no
+      longer has: the writer, the other consumer (its RELEASED entry, or its own over-cap closes) and
+      reconciler R2. Window 1: the writer's list has the gone hold, another path closes it first, and
+      the writer's close returns NotActive. Window 2: another path closes it after the writer's insert
+      was blocked but before the writer listed the user's holds, so it isn't in the list. Either way the
+      cap had room again, yet a live hold was released on both sides (the buyer loses a good hold; no
+      oversell, no cap breach, so only the `conflict` counter caught it). Fix: a blocking hold gone from
+      Redis counts as progress whoever closes it (Released or NotActive); and the over-cap insert lists
+      the user's other ACTIVE holds in its own transaction, right after the cap check fails, carried in
+      `Blocked`. The failed `ON CONFLICT DO UPDATE` still locks the allowance row, so a close that would
+      lower the allowance waits for that rollback, and the list has every hold the cap counted. Rule
+      now: Postgres wins only after a pass in which every blocking hold was still live in Redis (or after
+      the 5-pass bound, kept). Tests (both failed first with exactly round 711's CONFLICT):
+      `RedisHoldWriterTest#aBlockingHoldAnotherPathClosesFirstStillCountsAsProgress` and
+      `#aBlockingHoldClosedBeforeTheWriterListsTheCapStillCountsAsProgress`, made deterministic with a
+      test hook `afterBlocked` (between a blocked insert and the close pass) and the existing
+      `beforeEpochCheck`; "another path" is the reconciler's `closeGone`.
 - **Why:**
   - Redis runs commands on one thread and a whole script as one command, so nothing can happen
     between a script's checks and its writes: that is the entire locking story of this strategy.

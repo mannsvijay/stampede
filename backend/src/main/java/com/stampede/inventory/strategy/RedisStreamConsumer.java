@@ -10,7 +10,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
-import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.dao.DataAccessResourceFailureException;
@@ -170,8 +169,12 @@ class RedisStreamConsumer {
         }
     }
 
-    /** Closes every consumer's read connection (application or test context shutdown). */
-    @PreDestroy
+    /**
+     * Closes every consumer's read connection; the consumer loop calls it when it stops. No
+     * {@code @PreDestroy}: the connection factory is a SmartLifecycle and closes them itself when it
+     * stops, which is before any {@code @PreDestroy} runs, so closing them again there only made Lettuce
+     * warn "Connection is already closed" (connections opened by tests' {@code pollOnce}).
+     */
     void closeReaders() {
         List.copyOf(readers.keySet()).forEach(this::closeReader);
     }

@@ -1125,3 +1125,58 @@ D-022 final). Plan and notes are under M2.2c-2 in PLAN.md.
 - `RedisHoldStoreConcurrencyTest` hit the 2 s Redis command timeout on the overloaded run; not changed.
 - Not proven that the connection churn (M4) caused the timeouts; the next 1000-round run is the evidence.
   If they recur with churn gone, look at client-side stalls (GC, host load, Docker Desktop networking).
+
+### Update 3 (2026-11-17): 1000-round failure after M3/M4, recorded before any rerun
+
+User's runs: full suite green (26m 30s). 1000-round `RedisPersistenceConcurrencyTest` +
+`RedisSaleRaceConcurrencyTest` (36m 42s): no Redis command timeout; sale race passed; persistence race failed.
+Copied from `backend/build/test-results/test/TEST-...RedisPersistenceConcurrencyTest.xml` (suite timestamp
+2026-11-15T20:52:44Z, 427.9 s):
+- `AssertionError: Round 711 failed; replay with -Dstampede.harness.seed=-1301071079819458067
+  -Dstampede.harness.rounds=1`, caused by `AssertionFailedError: expected: 0.0 but was: 1.0` at
+  `RedisPersistenceConcurrencyTest.java:145` (the held-conflict counter), via line 62.
+- The only WARN of the run, at 02:29:51.625 IST on `pool-1-thread-7`: `Redis hold
+  055f6daf-9432-4a15-ab59-6f1f550e0d57 of event 29ef238c-b554-33df-b6df-58846e206980 conflicts with Postgres
+  (held by [], sold [], unknown [], over cap true); Postgres wins and the hold is released in Redis`.
+- No "was reloaded into Redis while persisting" warning (so not the epoch guard). Per-round counters are
+  only printed after the last round, so none exist for the failed run. The thread name doesn't tell
+  consumer from reconciler (fixed pool reused across rounds).
+
+**Analysis (update 3):** not the epoch case (no reload warning). One of M3's two exits into `postgresWins`:
+almost certainly "pass 2+ and this pass closed nothing". The stop rule counted only this writer's own
+`Released` closes, but the other consumer and reconciler R2 also close holds Redis no longer has. If one of
+them closes the blocking hold first, the writer sees NotActive (window 1), or the hold is already closed
+before the writer lists the user's holds (window 2). The cap then has room, yet a live hold is released on
+both sides. The buyer loses a good hold; nothing is oversold and the cap holds, so only the counter caught it.
+The 5-pass bound is the other possible exit (unlikely with limit 4); the log can't tell them apart.
+
+**Changed (update 3, approved):**
+- `RedisHoldWriter`: a blocking hold gone from Redis counts as progress whoever closes it (Released or
+  NotActive). The over-cap insert reads the user's other ACTIVE holds inside its own transaction, right after
+  the cap check fails, into `Blocked.capHolds` (the failed upsert keeps the allowance row locked, so the list
+  matches what the cap counted). Postgres wins only after a pass where every blocking hold was still live in
+  Redis; the 5-pass bound is kept. New test hook `afterBlocked` (no-op in production).
+- `RedisStreamConsumer`: removed `@PreDestroy` from `closeReaders()` (the Lettuce factory, a SmartLifecycle,
+  already closed those connections when it stopped, hence "Connection is already closed").
+- `RedisHoldWriterTest`: `aBlockingHoldAnotherPathClosesFirstStillCountsAsProgress` (window 1) and
+  `aBlockingHoldClosedBeforeTheWriterListsTheCapStillCountsAsProgress` (window 2), sharing one deterministic
+  setup; "another path" is the reconciler's `closeGone`.
+- D-022: new item M5; M4 notes the `@PreDestroy` removal and the clean timeout result.
+
+**Verified (update 3)**
+- Before the fix (hook added, logic unchanged): `./gradlew test --rerun --tests "RedisHoldWriterTest.aBlockingHold*"`
+  -> 2 tests, 2 failed, both `expected: APPLIED but was: CONFLICT` with the round-711 warning
+  (`held by [], sold [], unknown [], over cap true`).
+- After: same command -> BUILD SUCCESSFUL in 1m 2s, both passed.
+- Five classes at 100 rounds (`RedisStreamConsumerTest`, `RedisHoldWriterTest`, `RedisPersistenceConcurrencyTest`,
+  `RedisSaleRaceConcurrencyTest`, `RedisReconcilerTest`): 43 tests (13 + 17 + 11 + 1 + 1), 0 failures,
+  BUILD SUCCESSFUL in 6m 6s; no "Connection is already closed" in the `-i` console log.
+  Persistence race: HELD applied=801 duplicate=701 stale=1137; RELEASED applied=106 duplicate=1738 stale=24; R2=170.
+  Sale race: sold=643 refused=249 released=499 expired=241; R3 finish=29; R4 finish=59; R2=8.
+- Not run by Claude: the full suite and the 1000-round proof (the user runs them).
+
+**Next**: user's full suite and 1000-round proof; if green, tick the review follow-up in PLAN.md (add M4/M5
+to that line); then M2.3.
+
+**Open problems (update 3)**: the 5-pass bound can still end in Postgres wins (M3 limit, unchanged). One clean
+1000-round run without Redis timeouts doesn't prove M4 was their cause.

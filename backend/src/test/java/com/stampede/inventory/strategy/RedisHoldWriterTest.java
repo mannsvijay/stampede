@@ -393,6 +393,112 @@ class RedisHoldWriterTest extends RedisPersistenceTestSupport {
         }
     }
 
+    /**
+     * Found by the 1000-round {@code RedisPersistenceConcurrencyTest} (round 711, after M3): the writer
+     * gave up after a pass in which <i>it</i> closed nothing, although the hold blocking it was gone from
+     * Redis and another path (reconciler R2, the other consumer) closed it at that moment. Window 1: the
+     * writer has the gone hold in its list, but the other path closes it first, so the writer's own close
+     * returns NotActive.
+     */
+    @Test
+    void aBlockingHoldAnotherPathClosesFirstStillCountsAsProgress() {
+        assertTheCapRefillIsNotAConflict(false);
+    }
+
+    /**
+     * Window 2 of the same race: the other path closes the gone hold after the writer's insert was
+     * blocked but before the writer looked up which holds fill the cap, so the hold isn't in its list.
+     */
+    @Test
+    void aBlockingHoldClosedBeforeTheWriterListsTheCapStillCountsAsProgress() {
+        assertTheCapRefillIsNotAConflict(true);
+    }
+
+    /**
+     * Limit 4, two seats each. Postgres: {@code first} (live in Redis) and {@code gone} (released in Redis,
+     * its RELEASED not applied), so it is full. Redis: {@code first} + {@code mine}.
+     * <ol>
+     *   <li>Pass 1: blocked over the cap. {@code first} sorts first and is live (kept). Just before
+     *       {@code gone} is closed, {@code first} ends in Redis and {@code later} is taken and persisted:
+     *       the cap is full again ({@code first} + {@code later}).</li>
+     *   <li>Pass 2: blocked again, by {@code first}, which Redis no longer has. Another path closes it,
+     *       either after the writer listed it (window 1) or before (window 2).</li>
+     *   <li>Pass 3 must insert: Postgres now counts {@code later} + {@code mine} = 4.</li>
+     * </ol>
+     */
+    private void assertTheCapRefillIsNotAConflict(boolean closeBeforeListing) {
+        load();
+        UUID first = UUID.fromString("00000000-0000-0000-0000-000000000001");
+        UUID gone = UUID.fromString("00000000-0000-0000-0000-000000000002");
+        assertThat(store.hold(new HoldRequest(first, EVENT, USER, List.of(SEATS.get(0), SEATS.get(1)), FIVE_MINUTES)))
+                .isInstanceOf(HoldOutcome.Held.class);
+        assertThat(store.hold(new HoldRequest(gone, EVENT, USER, List.of(SEATS.get(2), SEATS.get(3)), FIVE_MINUTES)))
+                .isInstanceOf(HoldOutcome.Held.class);
+        drain();
+        releaseInRedis(gone);   // its RELEASED entry stays unapplied: Postgres still counts it
+        UUID mine = hold(USER, FIVE_MINUTES, SEATS.get(4), SEATS.get(5));
+        StreamEntry.HoldFacts mineFacts = StreamEntry.HoldFacts.of(EVENT, store.liveHold(EVENT, mine).orElseThrow());
+        java.util.concurrent.atomic.AtomicReference<UUID> laterRef = new java.util.concurrent.atomic.AtomicReference<>();
+        java.util.concurrent.atomic.AtomicInteger blockedCalls = new java.util.concurrent.atomic.AtomicInteger();
+        java.util.concurrent.atomic.AtomicInteger closeCalls = new java.util.concurrent.atomic.AtomicInteger();
+        Runnable otherPathClosesFirst = () -> assertThat(writer.closeGone(EVENT, first))
+                .isInstanceOf(ReleaseOutcome.Released.class);
+        writer.afterBlocked(() -> {
+            if (blockedCalls.incrementAndGet() == 2 && closeBeforeListing) {
+                otherPathClosesFirst.run();
+            }
+        });
+        writer.beforeEpochCheck(() -> {
+            int call = closeCalls.incrementAndGet();
+            if (call == 1) {
+                // Pass 1, about to close `gone`: `first` ends and `later` fills the cap again.
+                releaseInRedis(first);
+                UUID later = hold(USER, FIVE_MINUTES, SEATS.get(6), SEATS.get(7));
+                laterRef.set(later);
+                persistActiveDirectly(later);
+            } else if (call == 2 && !closeBeforeListing) {
+                otherPathClosesFirst.run();
+            }
+        });
+        Applied applied;
+        try {
+            applied = writer.applyHeld(mineFacts);
+        } finally {
+            writer.afterBlocked(() -> { });
+            writer.beforeEpochCheck(() -> { });
+        }
+        UUID later = laterRef.get();
+        drain();   // first's and gone's RELEASED, later's HELD: all already handled
+
+        assertThat(applied).isEqualTo(Applied.APPLIED);
+        assertThat(holdStatus(mine)).isEqualTo("ACTIVE");
+        assertThat(store.liveHold(EVENT, mine)).as("the good hold is not released in Redis").isPresent();
+        assertThat(holdStatus(later)).isEqualTo("ACTIVE");
+        assertThat(holdStatus(first)).isEqualTo("RELEASED");
+        assertThat(holdStatus(gone)).isEqualTo("RELEASED");
+        assertThat(allowance(USER)).isEqualTo(4);
+        assertThat(store.used(EVENT, USER)).isEqualTo(4);
+        assertThat(counter(RedisStreamMetrics.APPLIED, "type", "held", "result", "conflict")).isZero();
+        assertThat(violations()).isEmpty();
+    }
+
+    /** Persists a live Redis hold as ACTIVE the way the consumer would, without the writer (no hooks). */
+    private void persistActiveDirectly(UUID holdId) {
+        RedisHoldStore.LiveHold live = store.liveHold(EVENT, holdId).orElseThrow();
+        jdbc.sql("""
+                INSERT INTO holds (id, event_id, user_id, seat_ids, created_at, expires_at, status)
+                VALUES (?, ?, ?, ?, ?, ?, 'ACTIVE')
+                """).params(live.holdId(), EVENT, USER, live.seatIds().toArray(UUID[]::new),
+                live.createdAt().atOffset(java.time.ZoneOffset.UTC),
+                live.expiresAt().atOffset(java.time.ZoneOffset.UTC)).update();
+        for (UUID seatId : live.seatIds()) {
+            jdbc.sql("UPDATE event_seats SET status = 'HELD', hold_id = ?, version = version + 1 "
+                    + "WHERE event_id = ? AND seat_id = ?").params(live.holdId(), EVENT, seatId).update();
+        }
+        jdbc.sql("UPDATE user_event_allowance SET used = used + ? WHERE event_id = ? AND user_id = ?")
+                .params(live.seatIds().size(), EVENT, USER).update();
+    }
+
     // ---- expiry, as the sweeper will call it (M2.2c) ----
 
     @Test
