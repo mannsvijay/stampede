@@ -42,6 +42,9 @@ import org.springframework.beans.factory.annotation.Autowired;
  *   <li>every sale is CONVERTED in Postgres, its seats carry their {@code S:} marker in Redis, and its
  *       buyer's cap counts it with a {@code +inf} member.</li>
  * </ul>
+ * And while the buyers run (M2.2d), a checker thread runs invariant 5 the way the monitor does (grace 30 s,
+ * the first Redis read taken in pages while every write above lands between them): I10 must never fire.
+ * Consumer lag over the 2 s window would make it fire; that is a real runtime signal, not to be loosened.
  * Rounds and replay as {@link RedisPersistenceConcurrencyTest}.
  */
 class RedisSaleRaceConcurrencyTest extends RedisPersistenceTestSupport {
@@ -51,7 +54,9 @@ class RedisSaleRaceConcurrencyTest extends RedisPersistenceTestSupport {
     static final int BUYERS = 6;
     static final int OPERATIONS_PER_BUYER = 16;
     static final long PRICE = 150000;
-    static final ExecutorService THREADS = Executors.newFixedThreadPool(BUYERS + 4);
+    /** The monitor's grace at runtime (application.yml, invariants monitor {@code grace: PT30S}). */
+    static final Duration MONITOR_GRACE = Duration.ofSeconds(30);
+    static final ExecutorService THREADS = Executors.newFixedThreadPool(BUYERS + 5);
 
     @Autowired
     RedisFirstInventoryStrategy strategy;
@@ -63,6 +68,7 @@ class RedisSaleRaceConcurrencyTest extends RedisPersistenceTestSupport {
     private final AtomicInteger refused = new AtomicInteger();
     private final AtomicInteger released = new AtomicInteger();
     private final AtomicInteger expired = new AtomicInteger();
+    private final AtomicInteger checksDuringRace = new AtomicInteger();
 
     @AfterAll
     static void stopThreads() {
@@ -87,9 +93,9 @@ class RedisSaleRaceConcurrencyTest extends RedisPersistenceTestSupport {
             strategy.afterPostgresSale(() -> { });
         }
         // Evidence that the race reached the interesting paths.
-        System.out.printf("Redis sale race, %d rounds: sold=%d refused=%d released=%d expired=%d; "
-                        + "reconciler R3 finish=%.0f R3 marker=%.0f R4 finish=%.0f R1=%.0f R2=%.0f%n", ROUNDS,
-                sold.get(), refused.get(), released.get(), expired.get(),
+        System.out.printf("Redis sale race, %d rounds: sold=%d refused=%d released=%d expired=%d; I10 checks during "
+                        + "the race=%d; reconciler R3 finish=%.0f R3 marker=%.0f R4 finish=%.0f R1=%.0f R2=%.0f%n", ROUNDS,
+                sold.get(), refused.get(), released.get(), expired.get(), checksDuringRace.get(),
                 counter(RedisStreamMetrics.REPAIRS, "rule", "R3_finish_sale"),
                 counter(RedisStreamMetrics.REPAIRS, "rule", "R3_sold_marker"),
                 counter(RedisStreamMetrics.REPAIRS, "rule", "R4_finish_sale"),
@@ -177,6 +183,17 @@ class RedisSaleRaceConcurrencyTest extends RedisPersistenceTestSupport {
             }
             return null;
         }));
+        Queue<String> i10DuringRace = new ConcurrentLinkedQueue<>();
+        background.add(THREADS.submit(() -> {
+            start.await();
+            while (buying.get()) {
+                invariants.check(EVENT, MONITOR_GRACE).stream()
+                        .filter(v -> v.ruleId().equals("I10"))
+                        .forEach(v -> i10DuringRace.add(v.detail()));
+                checksDuringRace.incrementAndGet();
+            }
+            return null;
+        }));
 
         start.countDown();
         for (Future<?> buyer : buyers) {
@@ -189,6 +206,7 @@ class RedisSaleRaceConcurrencyTest extends RedisPersistenceTestSupport {
         drain();
 
         assertThat(backgroundFailures).as("the sweeper never failed to expire a hold").isEmpty();
+        assertThat(i10DuringRace).as("I10 at runtime grace, checked while the buyers ran").isEmpty();
         assertThat(violations()).isEmpty();
         assertThat(pendingCount()).isZero();
         assertThat(counter(RedisStreamMetrics.APPLIED, "type", "held", "result", "conflict")).isZero();

@@ -324,6 +324,153 @@ class RedisConsistencyCheckTest {
         assertThat(redis.rereads).isZero();
     }
 
+    @Test
+    void aLaggingHoldSoldBetweenTheSnapshotAndTheReReadAgreesOncePostgresIsReadAgain() {
+        // Found by the M2.2d checker thread in RedisSaleRaceConcurrencyTest (old and new reader alike).
+        // First read: alice's H3 holds S1 in Redis, its HELD entry not applied yet, so the snapshot has S1
+        // free. Then, after the snapshot and before the re-read, checkout persists H3, sells it in Postgres
+        // and runs sold.lua: the re-read sees S:<order>. Compared with the snapshot, that read "sold in
+        // Redis, free in Postgres" and named no hold. Postgres is now read again after Redis: the sale
+        // committed before sold.lua, so Postgres has it too, and nothing disagrees, strict or not.
+        UUID order = UUID.randomUUID();
+        redis.first = laggingH3OnS1().apply(baselineRedis());
+        redis.again = soldH3(order).apply(baselineRedis());
+        redis.onReread = once(() -> {   // checkout: catch-up, the Postgres sale (sold.lua comes after it)
+            hold(H3, ALICE, "CONVERTED", T, EXPIRES, S1);
+            order(order, ALICE, H3, "PAID");
+            sold(S1, order);
+        });
+
+        assertI10(STRICT);
+        assertI10(GRACE);
+        assertThat(redis.rereadSeats).as("the first comparison disagreed on S1").contains(S1);
+    }
+
+    @Test
+    void aSoldMarkerPostgresStillHasFreeAfterTheReReadIsReportedEvenAtRuntime() {
+        // The same reads, but Postgres never sold S1: a stray S: marker, real drift. No hold excuses it.
+        UUID order = UUID.randomUUID();
+        redis.first = laggingH3OnS1().apply(baselineRedis());
+        redis.again = soldH3(order).apply(baselineRedis());
+
+        assertThat(i10(GRACE)).anyMatch(v -> v.contains("seat " + S1 + " is sold to " + order
+                + " in Redis but free in Postgres"));
+    }
+
+    /** Alice's H3 holds S1 in Redis; its HELD entry is young and not applied, so Postgres doesn't have it. */
+    private static UnaryOperator<Snapshot> laggingH3OnS1() {
+        return s -> withHold(new Hold(H3, ALICE, List.of(S1), T, EXPIRES, false))
+                .andThen(withSeat(S1, new SeatValue.Held(H3)))
+                .andThen(withMembers(ALICE, new CapMember(H1, 1, EXPIRES), new CapMember(H3, 1, EXPIRES)))
+                .andThen(withEntries(new UnappliedEntry(H3, "HELD", T.minusMillis(100))))
+                .apply(s);
+    }
+
+    /** After sold.lua: S1 sold to the order, H3's hash gone, alice's member counts it forever. */
+    private static UnaryOperator<Snapshot> soldH3(UUID order) {
+        return s -> withSeat(S1, new SeatValue.Sold(order))
+                .andThen(withMembers(ALICE, new CapMember(H1, 1, EXPIRES), new CapMember(H3, 1, null)))
+                .andThen(withNow(T.plusMillis(3)))
+                .apply(s);
+    }
+
+    /** Runs {@code change} at the first re-read only (each test checks more than once). */
+    private static Runnable once(Runnable change) {
+        java.util.concurrent.atomic.AtomicBoolean done = new java.util.concurrent.atomic.AtomicBoolean();
+        return () -> {
+            if (done.compareAndSet(false, true)) {
+                change.run();
+            }
+        };
+    }
+
+    @Test
+    void aHoldTakenAfterTheFirstReadAndAppliedBeforeTheReReadIsNotReportedAtRuntime() {
+        // Found by the M2.2d checker thread. Alice released H1 in Redis (RELEASED entry unapplied): her cap
+        // disagrees with the snapshot, which still has H1. After the first read she takes H3; after the
+        // snapshot, before the re-read, the consumer applies H3's HELD entry and acknowledges it, so no
+        // unapplied entry is left for H3. Against the snapshot, H3 looked like drift.
+        UnappliedEntry h1Released = new UnappliedEntry(H1, "RELEASED", T.minusMillis(100));
+        redis.first = withoutHold(H1).andThen(withSeat(S2, null)).andThen(withMembers(ALICE))
+                .andThen(withEntries(h1Released)).apply(baselineRedis());
+        redis.again = withoutHold(H1).andThen(withSeat(S2, null))
+                .andThen(withHold(new Hold(H3, ALICE, List.of(S1), T.plusMillis(1), EXPIRES, false)))
+                .andThen(withSeat(S1, new SeatValue.Held(H3)))
+                .andThen(withMembers(ALICE, new CapMember(H3, 1, EXPIRES)))
+                .andThen(withEntries(h1Released))
+                .andThen(withNow(T.plusMillis(3)))
+                .apply(baselineRedis());
+        redis.onReread = once(() -> {   // the consumer applies H3
+            hold(H3, ALICE, "ACTIVE", T.plusMillis(1), EXPIRES, S1);
+            held(S1, H3);
+        });
+
+        assertI10(GRACE);
+        assertThat(redis.rereadUsers).containsExactly(ALICE);
+        assertThat(i10(STRICT)).as("strict: H1's release is still lag, never excused")
+                .anyMatch(v -> v.contains("user " + ALICE + "'s cap counts [" + H3 + ":1] in Redis but ["
+                        + H1 + ":1, " + H3 + ":1] in Postgres"))
+                .noneMatch(v -> v.contains("but [" + H1 + ":1] in Postgres"));
+    }
+
+    // --- a torn first read (M2.2d: the first read is taken in pages, not at one instant) ---------
+
+    @Test
+    void aFirstReadTornByAHoldIsClearedByTheReRead() {
+        // H3 (alice, S1) was taken in Redis after S1's page was read and before alice's page, and the
+        // consumer applied it before the snapshot. The first read is a state Redis never had at any
+        // instant: S1 free, but alice's set and the H3 hash already there.
+        hold(H3, ALICE, "ACTIVE", T, EXPIRES, S1);
+        held(S1, H3);
+        UnaryOperator<Snapshot> withH3 = s -> withHold(new Hold(H3, ALICE, List.of(S1), T, EXPIRES, false))
+                .andThen(withMembers(ALICE, new CapMember(H1, 1, EXPIRES), new CapMember(H3, 1, EXPIRES)))
+                .apply(s);
+        redis.first = withH3.apply(baselineRedis());
+        redis.again = withSeat(S1, new SeatValue.Held(H3)).andThen(withNow(T.plusMillis(3)))
+                .apply(withH3.apply(baselineRedis()));
+
+        assertI10(STRICT);
+        assertThat(redis.rereadSeats).as("only the torn seat").containsExactly(S1);
+        assertThat(redis.rereadHolds).as("the hold the seat names in Postgres").containsExactly(H3);
+        assertThat(redis.rereadUsers).isEmpty();
+    }
+
+    @Test
+    void aSeatNamingAHoldTheFirstReadDoesNotHaveIsClearedByTheReRead() {
+        // S2's page saw H:H1; H1 was released (and applied) before a later page read alice. A torn read can
+        // leave a seat value whose hold is not in the first read at all.
+        jdbc.sql("UPDATE event_seats SET status = 'AVAILABLE', hold_id = NULL WHERE event_id = ? AND seat_id = ?")
+                .params(EVENT, S2).update();
+        jdbc.sql("UPDATE holds SET status = 'RELEASED' WHERE id = ?").param(H1).update();
+        redis.first = withoutHold(H1).andThen(withMembers(ALICE)).apply(baselineRedis());   // S2 still H:H1
+        redis.again = withoutHold(H1).andThen(withSeat(S2, null)).andThen(withMembers(ALICE))
+                .andThen(withNow(T.plusMillis(3))).apply(baselineRedis());
+
+        assertI10(STRICT);
+        assertThat(redis.rereadSeats).containsExactly(S2);
+        assertThat(redis.rereadHolds).containsExactly(H1);
+    }
+
+    @Test
+    void realDriftIsStillReportedWhenTheFirstReadIsTorn() {
+        // The torn S1 of the first test, plus real drift that no write is touching: a sold marker on S4
+        // that Postgres never sold. The tear is cleared; the drift is reported, exactly once.
+        hold(H3, ALICE, "ACTIVE", T, EXPIRES, S1);
+        held(S1, H3);
+        UUID strayOrder = UUID.randomUUID();
+        UnaryOperator<Snapshot> state = s -> withHold(new Hold(H3, ALICE, List.of(S1), T, EXPIRES, false))
+                .andThen(withMembers(ALICE, new CapMember(H1, 1, EXPIRES), new CapMember(H3, 1, EXPIRES)))
+                .andThen(withSeat(S4, new SeatValue.Sold(strayOrder)))
+                .apply(s);
+        redis.first = state.apply(baselineRedis());
+        redis.again = withSeat(S1, new SeatValue.Held(H3)).andThen(withNow(T.plusMillis(3)))
+                .apply(state.apply(baselineRedis()));
+
+        assertThat(i10(STRICT)).singleElement().asString()
+                .contains("seat " + S4 + " is sold to " + strayOrder + " in Redis but free in Postgres");
+        assertThat(redis.rereadSeats).containsExactlyInAnyOrder(S1, S4);
+    }
+
     // --- a sale between its Postgres commit and sold.lua (decision 2, option B) -----------------
 
     @Test
@@ -504,6 +651,8 @@ class RedisConsistencyCheckTest {
     static final class StubRedis implements RedisHoldState {
         Snapshot first;
         Snapshot again;
+        /** Runs when the re-read happens: Postgres changing after the snapshot (a consumer, a checkout). */
+        Runnable onReread = () -> { };
         RuntimeException failure;
         int reads;
         int rereads;
@@ -532,6 +681,7 @@ class RedisConsistencyCheckTest {
             rereadSeats = List.copyOf(seatIds);
             rereadHolds = List.copyOf(holdIds);
             rereadUsers = List.copyOf(userIds);
+            onReread.run();
             return Optional.ofNullable(again != null ? again : first);
         }
     }
