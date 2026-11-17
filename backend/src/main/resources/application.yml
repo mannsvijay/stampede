@@ -17,6 +17,7 @@ spring:
       port: ${REDIS_PORT:6379}
       password: ${REDIS_PASSWORD:}
       # Fail fast instead of Lettuce's 60 s default, so health turns DOWN quickly when Redis is gone.
+      # Tests use 10 s (src/test/resources/config/application.properties; RedisTimeoutSettingsTest).
       timeout: 2s
       connect-timeout: 2s
 

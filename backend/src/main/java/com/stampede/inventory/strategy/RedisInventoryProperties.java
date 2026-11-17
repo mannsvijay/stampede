@@ -43,7 +43,8 @@ record RedisInventoryProperties(@DefaultValue("stampede") String keyPrefix,
      * @param name          this instance's consumer name in the group; empty = the host name. Must be
      *                      unique per running instance (D-022, decision 1a)
      * @param block         how long one read waits for new entries; must stay below the Redis command
-     *                      timeout ({@code spring.data.redis.timeout}, 2 s)
+     *                      timeout ({@code spring.data.redis.timeout}, 2 s; tests use 10 s, so the
+     *                      1.9 s guard below keeps it under both)
      * @param batchSize     entries per read
      * @param claimMinIdle  an entry delivered this long ago and still not acknowledged is taken over
      *                      (its consumer crashed, or applying it failed)

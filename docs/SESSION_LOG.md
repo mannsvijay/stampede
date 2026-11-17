@@ -1248,3 +1248,34 @@ Redis command median 34.9-39.1 ms -> 1.0-1.1 ms (max 48.9 -> 1.2 ms); PING p99 d
 - Known limits carried: torn first read can hide drift for one check (M2.2d); L3, L4, L5 second half, L6,
   L1 cap half; lost live cap member never repaired; I10 blind to unloaded events; D-022 is a draft for
   you to rewrite in your own words.
+
+## 2026-11-17 - Test Redis timeout and the 1000-round proof on CI (session end)
+
+**Task**: small task before M2.3, for the M2.2d open problem (D-022 "Test Redis timeout").
+
+**Changed**
+- `src/test/resources/config/application.properties`: `spring.data.redis.timeout=10s` (tests only);
+  production stays 2 s in `application.yml`. The consumer block stays under the hardcoded 1.9 s guard.
+- New `RedisTimeoutSettingsTest` (no Spring context): pins production 2 s with block below it, tests 10 s,
+  and the 1.9 s guard (1900 ms accepted, 1901 ms and 2 s rejected).
+- New `.github/workflows/concurrency-proof.yml`: workflow_dispatch, `rounds` input (default 1000, via env,
+  validated), four parallel jobs (pessimistic, optimistic, redis-first, redis-races), `fail-fast: false`,
+  180 min each, concurrency reports + JUnit results uploaded as `concurrency-<group>` (always, 14 days).
+  Actions pinned to the same SHAs as `ci.yml`.
+- Comments: `application.yml`, `RedisInventoryProperties`, `ci.yml`. CLAUDE.md harness line rewritten
+  (the workflow, the four groups, per-group timings, the 10 s test timeout). D-022 "Test Redis timeout";
+  PLAN.md entry and an M2.5 note (report the slowest `hold()` per round).
+
+**Verified**
+- Claude: `RedisTimeoutSettingsTest` 3 tests, 0 failures, BUILD SUCCESSFUL in 59s; actionlint on both
+  workflows, 0 errors.
+- User (2026-11-17; Claude reran nothing at session end): full suite BUILD SUCCESSFUL in 22m 23s.
+
+**Next**: push, run "Concurrency proof" from the Actions tab; then M2.3.
+
+**Open problems**
+- The workflow has not run yet; no 1000-round pass of `RedisSaleRaceConcurrencyTest` with the checker
+  thread yet (on CI or locally).
+- A client stall of 2-10 s in tests no longer fails a round (accepted cost; M2.5 note).
+- The redis-races timing in CLAUDE.md (~40+ min) is from the 36m 42s run before the checker thread, not
+  re-measured.

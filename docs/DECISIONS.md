@@ -1565,6 +1565,17 @@ Write these yourself, in your own words. Each one is an interview answer you've 
       the re-read, as checkout does before `sold.lua`; nothing disagrees, strict or not), plus
       `aSoldMarkerPostgresStillHasFreeAfterTheReReadIsReportedEvenAtRuntime` (real drift still reported).
       End to end: `RedisSaleRaceConcurrencyTest` 100 rounds, 1,638 I10 checks during the race, none fired.
+  - **Test Redis timeout** (2026-11-17, small task before M2.3). 1000-round runs on the Windows laptop
+    kept failing with 2 s `RedisCommandTimeoutException`s (client-side stalls under load; Redis SLOWLOG
+    empty), never on a correctness check. Decision: `spring.data.redis.timeout=10s` in
+    `src/test/resources/config/application.properties` only; production stays 2 s (fail fast, health
+    DOWN quickly). The consumer's block stays under the hardcoded 1.9 s guard, so it is below both.
+    `RedisTimeoutSettingsTest` pins 2 s / 10 s / the guard. Why it hides no real Redis stall: the
+    harness checks (double-sells, cap, I10, invariants) don't depend on the timeout, a timeout only ever
+    aborted a round; how long Redis itself blocks is measured server side (SLOWLOG) and from a PING
+    probe by `RedisHoldStateReaderTest`, which the client timeout can't affect. Cost: a client stall of
+    2-10 s in tests no longer fails a round (note on M2.5: report the slowest `hold()` per round). The
+    1000-round proof also runs on a Linux runner via the manual workflow `concurrency-proof.yml`.
 - **Why:**
   - Redis runs commands on one thread and a whole script as one command, so nothing can happen
     between a script's checks and its writes: that is the entire locking story of this strategy.

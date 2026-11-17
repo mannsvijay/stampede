@@ -1,0 +1,112 @@
+# The full concurrency proof (M1 and M2 exit criteria), run by hand: the 1000-round harness for all three
+# inventory strategies plus the Redis race tests, on a Linux runner. CI (ci.yml) runs the same classes at
+# 100 rounds on every push; this is the long run that used to need a laptop for hours.
+#
+# Start it from the Actions tab: "Concurrency proof" -> "Run workflow". Each group is its own job, so the
+# four run in parallel and one failure doesn't stop the others. Every job uploads its concurrency reports
+# (backend/build/reports/concurrency/) and JUnit results as an artifact, pass or fail.
+#
+# Replay a failed round locally with the seed from the report or log:
+#   cd backend && ./gradlew test --rerun --tests "<Class>" -Dstampede.harness.seed=<seed> -Dstampede.harness.rounds=1
+#
+# Actions are pinned to the same commit SHAs as ci.yml (see the supply-chain note there).
+name: Concurrency proof
+
+on:
+  workflow_dispatch:
+    inputs:
+      rounds:
+        description: Rounds per scenario (-Dstampede.harness.rounds)
+        type: number
+        default: 1000
+        required: true
+
+# Least privilege: the job token can read the repo and nothing else.
+permissions:
+  contents: read
+
+# One proof run at a time per branch; a second dispatch waits instead of competing for the runner.
+concurrency:
+  group: concurrency-proof-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  proof:
+    name: Proof (${{ matrix.group }})
+    runs-on: ubuntu-24.04
+    # Locally at 1000 rounds: pessimistic ~23 min, optimistic ~18, redis-first ~26, redis-races ~40+
+    # (on a laptop). Generous, so a slower runner doesn't cut a run short.
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - group: pessimistic
+            tests: --tests PessimisticConcurrencyTest --tests PessimisticHoldCapConcurrencyTest
+          - group: optimistic
+            tests: --tests OptimisticConcurrencyTest --tests OptimisticHoldCapConcurrencyTest
+          - group: redis-first
+            tests: --tests RedisFirstConcurrencyTest --tests RedisFirstHoldCapConcurrencyTest
+          - group: redis-races
+            tests: >-
+              --tests RedisSaleRaceConcurrencyTest
+              --tests RedisPersistenceConcurrencyTest
+              --tests RedisHoldStoreConcurrencyTest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Don't leave the job token in .git/config for later steps.
+          persist-credentials: false
+
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      # Validates gradle-wrapper.jar and caches ~/.gradle. Only main writes the cache (as in ci.yml).
+      - uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
+        with:
+          validate-wrappers: true
+
+      # Same retry as ci.yml: github.com sometimes returns 504 for the Gradle distribution.
+      - name: Download Gradle (retried)
+        run: |
+          for attempt in 1 2 3; do
+            if ./gradlew --version; then
+              exit 0
+            fi
+            echo "::warning::Gradle download failed (attempt $attempt of 3)"
+            sleep $((attempt * 15))
+          done
+          echo "::error::Could not download Gradle after 3 attempts"
+          exit 1
+
+      # The input reaches the shell through env, never ${{ }} inside the script, so it can't inject
+      # commands; the check below also refuses anything but a positive whole number.
+      # MATRIX_TESTS is a fixed string from this file (class names, no spaces), left unquoted on purpose
+      # so the shell splits it into separate --tests arguments.
+      - name: Concurrency proof (${{ matrix.group }})
+        env:
+          ROUNDS: ${{ inputs.rounds }}
+          MATRIX_TESTS: ${{ matrix.tests }}
+        run: |
+          case "$ROUNDS" in
+            ''|*[!0-9]*|0) echo "::error::rounds must be a positive whole number, was '$ROUNDS'"; exit 1 ;;
+          esac
+          # shellcheck disable=SC2086
+          ./gradlew test --rerun $MATRIX_TESTS -Dstampede.harness.rounds="$ROUNDS"
+
+      - name: Upload concurrency reports
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: concurrency-${{ matrix.group }}
+          path: |
+            backend/build/reports/concurrency/
+            backend/build/reports/tests/test/
+            backend/build/test-results/test/
+          if-no-files-found: warn
+          retention-days: 14

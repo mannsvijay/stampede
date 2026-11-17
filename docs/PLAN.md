@@ -602,6 +602,16 @@ end against the compose stack, and every concurrency harness scenario passed 100
         (16-18 checks per round in the two 100-round runs), so it adds load of its own. Whether that contributed is unknown. Next
         step if it recurs: rerun the 1000 rounds on an idle machine, and on a timeout capture Redis
         SLOWLOG/LATENCY and the client's connection state at that moment.
+  - [x] Test Redis timeout and the 1000-round proof on CI (2026-11-17, small task before M2.3; D-022
+        "Test Redis timeout"). For the open problem above. Approved: `spring.data.redis.timeout=10s` in
+        the test properties only (production stays 2 s; consumer block stays under the 1.9 s guard);
+        `RedisTimeoutSettingsTest` pins both values; manual workflow `concurrency-proof.yml`
+        (workflow_dispatch, `rounds` input, four parallel jobs: pessimistic, optimistic, redis-first,
+        redis-races; concurrency reports uploaded as artifacts). CLAUDE.md harness line updated.
+        Done 2026-11-17. Claude: `RedisTimeoutSettingsTest` 3 tests, 0 failures, BUILD SUCCESSFUL in 59s;
+        actionlint on `ci.yml` and `concurrency-proof.yml`: 0 errors. Verified by the user: full suite
+        BUILD SUCCESSFUL in 22m 23s. Not yet run: the workflow itself (needs a push, then "Run workflow");
+        its first 1000-round result, especially redis-races, closes the M2.2d open problem.
 - [ ] M2.3 Strategy selectable per event (admin endpoint); concurrency test parameterised over all three
       Note (from M1.7, D-019): if an admin endpoint ever changes `per_user_limit`, it must refuse
       (409) a limit below any user's current `used`, checked under the allowance row locks; I8
@@ -630,6 +640,10 @@ end against the compose stack, and every concurrency harness scenario passed 100
       plus SMEMBERS of the seat set) under heavy churn, and the stream part of `HEAD` under a large backlog.
       The SCAN still walks every key in the Redis database, in pages. If that shows, options: check fewer
       events per tick, or index hold and user ids per event in a set so no SCAN is needed.
+      Note (from the test Redis timeout task, D-022): tests now allow a 10 s Redis command timeout, so a
+      client-side stall between 2 and 10 s no longer fails a harness round and goes unseen. If that
+      matters, have the harness report the slowest `hold()` call per round (and per strategy) in its
+      report, next to the k6 latencies.
 - [ ] M2.6 Benchmark report v1 in `benchmarks/README.md` with your own analysis of why the numbers differ
       Note (from M0.4): generate module diagrams now that modules have real edges: run Modulith's
       `Documenter` from a test (`spring-modulith-docs` is already on the test classpath via
