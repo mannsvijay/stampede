@@ -1204,3 +1204,47 @@ cap holds listed inside the insert transaction; `@PreDestroy` removed) and the r
   `RedisHoldStoreConcurrencyTest` came from a class with no consumer, on an overloaded machine).
 - Carried over: `state.lua` ~39 ms on a loaded event (M2.5); lost live cap member never repaired; I10 blind
   to unloaded events; D-022 is a draft for you to rewrite in your own words.
+
+## 2026-11-17 - M2.2d non-blocking I10 read (session end)
+
+**Task**: M2.2d non-blocking I10 read (D-022 "M2.2d"), done before M2.3.
+
+**Changed**
+- `state.lua`: no in-script SCAN; `KEYS` (atomic re-read), `PAGE` and `HEAD` modes; load epoch in the reply.
+- `RedisHoldStateReader.read` is paged: HEAD, SSCAN of the seat set, SCAN of the event's keys, 25-key
+  PAGE scripts (a seat with its hold, a user with their holds), HEAD again; a reload during the read is
+  retried once, then "cannot check". Test hook `afterStep`. `reread` is still one script.
+- I10 (`RedisConsistencyCheck`, `InvariantChecker`) in three phases: Redis read, the snapshot comparison,
+  then after the snapshot Redis and Postgres again for the disagreeing keys only. This fixed two runtime
+  false alarms the new checker thread found (also present with the old reader): a lagging hold sold, or a
+  HELD entry applied, between the snapshot and the re-read.
+- Tests: `RedisConsistencyCheckTest` +6, `RedisHoldStateReaderTest` +24 (18-case torn-read matrix;
+  timing test rewritten with SLOWLOG and a PING probe), I10 checker thread in `RedisSaleRaceConcurrencyTest`.
+- Docs: D-022 "M2.2d" (measurements, both false alarms, root cause), known limits (torn read can hide
+  drift for one check; remaining costs; no epoch for `loadEvent`); PLAN.md M2.2d entry and M2.5 note.
+- Ripple: VS Code Source Control committed work in progress as d17d1a8 and ef61599 (pushed); kept on
+  main, the session's commit completes them.
+
+**Measured** (2,000 seats all held, 3,003 keys; before at `f807f14` in a separate worktree): longest single
+Redis command median 34.9-39.1 ms -> 1.0-1.1 ms (max 48.9 -> 1.2 ms); PING p99 during reads 55-61 ms ->
+4.7-6.5 ms (idle 3.2-4.0); pings over 10 ms during reads 16% -> 0.3%; read time ~60 ms -> ~0.5 s.
+
+**Verified**
+- Claude: `RedisSaleRaceConcurrencyTest` 100 rounds BUILD SUCCESSFUL in 3m 41s (1,638 I10 checks during
+  the race, none fired); targeted run (CLAUDE.md rule) 30 classes, 364 tests, 0 failures, BUILD
+  SUCCESSFUL in 19m 16s.
+- User (2026-11-17; Claude reran nothing at session end): full suite BUILD SUCCESSFUL in 18m 1s.
+  1000-round `RedisSaleRaceConcurrencyTest`: failed after 1h 50m on a `RedisCommandTimeoutException`
+  (line 142, a buyer's hold), not an assertion or I10; two other runs stopped early.
+
+**Next**: M2.3 (strategy selectable per event; concurrency test parameterised over all three).
+
+**Open problems**
+- Redis command timeouts under load (1000-round sale race, overloaded laptop, 1h 50m vs 36m 42s before):
+  same pattern as before; Redis SLOWLOG/LATENCY were empty in the M4 investigation, so likely an
+  infrastructure stall, not proven. The new checker thread adds load per round; unknown if it
+  contributed. Rerun on an idle machine; capture SLOWLOG/LATENCY at the timeout if it recurs.
+- No 1000-round pass of `RedisSaleRaceConcurrencyTest` with the checker thread yet.
+- Known limits carried: torn first read can hide drift for one check (M2.2d); L3, L4, L5 second half, L6,
+  L1 cap half; lost live cap member never repaired; I10 blind to unloaded events; D-022 is a draft for
+  you to rewrite in your own words.

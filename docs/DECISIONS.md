@@ -1191,7 +1191,7 @@ Write these yourself, in your own words. Each one is an interview answer you've 
   6.10) tolerates (PLAN change 6). Split into M2.2a (Redis alone), M2.2b (persistence, reconciler)
   and M2.2c (strategy bean, sell, invariants, harness), M2.2c itself split into M2.2c-1 (strategy,
   sell, catch-up, contract split) and M2.2c-2 (invariant 5, stuck-sweeper rule, harness).
-  **Implemented: M2.2a, M2.2b, M2.2c-1, M2.2c-2 (all of M2.2).**
+  **Implemented: M2.2a, M2.2b, M2.2c-1, M2.2c-2 (all of M2.2); M2.2d (non-blocking I10 read).**
 - **Options considered:**
   - Persistence: a Redis Stream with a consumer; synchronous write-through in the request; an
     in-process queue.
@@ -1500,6 +1500,71 @@ Write these yourself, in your own words. Each one is an interview answer you've 
       `#aBlockingHoldClosedBeforeTheWriterListsTheCapStillCountsAsProgress`, made deterministic with a
       test hook `afterBlocked` (between a blocked insert and the close pass) and the existing
       `beforeEpochCheck`; "another path" is the reconciler's `closeGone`.
+  - **M2.2d, non-blocking I10 read** (2026-11-17; approved: script pages instead of pipelines, then the
+    Postgres re-read below):
+    - **Problem:** `state.lua` read a whole event in one script. Redis runs a script as one command, so
+      every other client (every buyer's `hold.lua`) waited for it: ~40 ms on a loaded 2,000-seat event,
+      every 30 s per open REDIS_FIRST event (known limit from M2.2c-2).
+    - **The first read is now paged** (`RedisHoldStateReader.read`): `HEAD` (clock, limit, load epoch,
+      unapplied entries), the seat set in `SSCAN` pages, the event's keys in `SCAN` pages from Java, then
+      `PAGE` scripts of 25 seats, 25 users or 25 holds (each also reads the holds its seats and members
+      name, so those pairs are from one instant), then `HEAD` again. The in-script `SCAN` (`ALL` mode) is
+      gone; the re-read (`KEYS` mode) is still one atomic script. If the load epoch changed between the
+      two `HEAD`s, the read is taken again once, then fails ("cannot check"). Test hook: `afterStep`.
+    - **Why script pages, not pipelined MGET/HGETALL:** Redis runs a client's pipelined commands back to
+      back, in chunks of up to 16 KB, so a pipeline blocks other clients about as long as a script of the
+      same size; Spring Data Redis would also run a pipeline on a dedicated connection (a new TCP
+      connection per call without a pool, the M4 problem). And a page script keeps a seat with its hold.
+    - **Measured** (`RedisHoldStateReaderTest#howLongTheFirstReadBlocksRedisOnALoaded2000SeatEvent`;
+      2,000 seats all held, 500 holds, 500 users, 3,003 keys; 10 reads per run, 2 runs each; Redis 7 in
+      Docker Desktop on Windows; "before" measured at `f807f14` in a separate worktree with the same test):
+
+      | | Before (one script) | After (25-key pages) |
+      |---|---|---|
+      | Longest single command (SLOWLOG, every command), median per read | 34.9-39.1 ms | 1.01-1.07 ms |
+      | Longest single command, max | 42.6-48.9 ms (the script) | 1.17-1.18 ms (a page script) |
+      | PING probe p99, idle | 3.2-3.5 ms | 3.2-4.0 ms |
+      | PING probe p99, during reads | 54.8-61.3 ms | 4.7-6.5 ms |
+      | Pings over 10 ms during reads | 21 of 131 (16%) | 14 of 4,335 (0.3%) |
+      | Read time, median (SLOWLOG on) | 58-64 ms | 521-534 ms |
+
+      The probe's single worst round trip is noise here (34-44 ms spikes with Redis idle), so p99 and
+      the count over 10 ms are the numbers to read. In two tuning runs one page script out of ~1,000 took
+      15-20 ms; it did not recur. 50-key pages gave ~1.5 ms and ~330 ms; 100-key pages ~2.5 ms. The
+      longer read holds no Postgres connection (it runs before the checker's transaction).
+    - **Why a non-atomic first read can't cause a report of its own:** every input of a reported
+      difference comes from the second round of reads (the seat key and the hold it names; the hold
+      hash; the user's members and their holds; limit and seat set always), so a torn first read can only
+      add keys to read again. Tests: three torn-read stub tests in `RedisConsistencyCheckTest`; in
+      `RedisHoldStateReaderTest` the paged read equals the atomic read on the 2,000-seat event, an
+      18-case matrix (a hold, release or expiry after each of 6 read steps, applied before the snapshot)
+      finds nothing strictly (11 of the 18 fail with the re-read disabled: the tears are real), drift
+      is still reported while other holds change, and a reload mid-read is retried or reported.
+    - **Two runtime false alarms, found by a checker thread added to `RedisSaleRaceConcurrencyTest`**
+      (I10 at the monitor's 30 s grace in a loop while buyers, consumers, sweeper and reconciler run),
+      both present with the old atomic reader too (rerun at `f807f14`):
+      1. *A lagging hold sold between the snapshot and the re-read*: the first read had seat X held by H
+         (HELD entry unapplied, so the snapshot had X free); checkout then persisted and sold H and ran
+         `sold.lua`; the re-read saw `S:<order>` against the snapshot's "free", a difference naming no
+         hold, so nothing excused it.
+      2. *A HELD entry applied between the snapshot and the re-read*: a user's cap disagreed (an earlier
+         hold released, its entry unapplied); a new hold B was taken and its entry applied and
+         acknowledged after the snapshot; the re-read counted B, the snapshot didn't, and no unapplied
+         entry was left to excuse B.
+      **Root cause:** the second comparison set a Redis read taken after the snapshot against the older
+      snapshot, so Postgres could be behind by changes that were no longer lag. **Fix:** phase 3 reads
+      Postgres again too, for the re-read keys only (those seats, the holds listed or named by them, every
+      ACTIVE/CONVERTED hold of those users), after the Redis re-read, in a short read-only transaction;
+      the second comparison then has the first one's order (Redis, then Postgres). `InvariantChecker`
+      runs it after the snapshot transaction (`compareInSnapshot`, then `readAgainAndCompare`). A first
+      attempt, using the first comparison's holds for the excuse, was dropped: the plain union made I10
+      stricter (a first-comparison hold that had since ended had nothing to excuse it). Stub tests, each
+      failing first: `aHoldTakenAfterTheFirstReadAndAppliedBeforeTheReReadIsNotReportedAtRuntime`;
+      `aLaggingHoldSoldBetweenTheSnapshotAndTheReReadIsExcusedAsLag…` failed first under the old fixture
+      and became `…AgreesOncePostgresIsReadAgain` (the fixture now commits the sale in Postgres before
+      the re-read, as checkout does before `sold.lua`; nothing disagrees, strict or not), plus
+      `aSoldMarkerPostgresStillHasFreeAfterTheReReadIsReportedEvenAtRuntime` (real drift still reported).
+      End to end: `RedisSaleRaceConcurrencyTest` 100 rounds, 1,638 I10 checks during the race, none fired.
 - **Why:**
   - Redis runs commands on one thread and a whole script as one command, so nothing can happen
     between a script's checks and its writes: that is the entire locking story of this strategy.
@@ -1560,12 +1625,23 @@ Write these yourself, in your own words. Each one is an interview answer you've 
   - (Review L1, the cap half) I10 counts a `+inf` member of a pinned hold past its expiry as not live
     (it is over by time), while `hold.lua` keeps counting it until the sweeper releases it (up to one
     5 s tick). I10 can't see drift in that state for that time.
-  - (M2.2c-2) **`state.lua` blocks Redis for about 40 ms** on a loaded 2,000-seat event with every seat
-    held (500 holds, 500 users, ~3,000 keys): server-side median 39 ms over 10 runs, 33-55 ms (SLOWLOG,
-    Redis 7 in Docker Desktop on Windows; 54 ms before seat keys were read with `MGET`). Most of it is the
-    per-call cost of one `HMGET` + `PTTL` per hold and one `ZRANGE` per user, plus a `SCAN` over the whole
-    keyspace (it grows with every event in the Redis database, not only this one). The monitor runs it per
-    open REDIS_FIRST event every 30 s, so every hold attempt in that window waits; M2.5 must measure it.
+  - (M2.2c-2, **resolved in M2.2d**) `state.lua` blocked Redis for about 40 ms per check on a loaded
+    2,000-seat event (one script over the whole event). The first read is now paged: its longest single
+    command is ~1 ms (table in "M2.2d" above).
+  - (M2.2d) **A torn first read can hide drift for one check.** The paged first read decides what is
+    read again. Drift on keys nobody writes is always seen (SCAN returns every key that exists for the
+    whole scan, and an unchanged key reads the same paged or not). But if a write to the same seat, hold
+    or user lands between the reads of two keys in different pages and makes them look consistent with
+    Postgres, that drift is not read again and not reported in that check; the next check (30 s later)
+    sees it unless the coincidence repeats. Tests read a quiet Redis (after draining), so strict checks
+    are unaffected.
+  - (M2.2d) What a check still costs Redis: the re-read is one atomic script sized by the number of
+    disagreeing keys (plus `SMEMBERS` of the seat set), so heavy churn makes it longer; the `HEAD` call's
+    stream part (`XPENDING` + `XRANGE`, up to 10,000 entries, see L6) is long under a large backlog; the
+    `SCAN` still walks the whole keyspace, now in short pages. A paged read takes ~0.5 s of round trips
+    on Docker Desktop (no Postgres connection held).
+  - (M2.2d) A reload is noticed by the load epoch (`meta.loadedMs`). An event loaded by
+    `RedisHoldStore.loadEvent` (tests only) has no epoch, so a reload during the read is not noticed there.
   - (M2.2c-2) A lost live cap member (partial Redis data loss) is never put back: no reconciler rule
     does it. Postgres still wins at persistence, so the cap holds in Postgres; invariant 5 reports the
     undercount for as long as the hold lives (`RedisHoldWriterTest#whenRedisUndercountsTheCapPostgresWins`
@@ -1573,12 +1649,13 @@ Write these yourself, in your own words. Each one is an interview answer you've 
   - (M2.2c-2) I10 is checked only for events loaded in Redis: after a Redis restart, nothing is compared
     until the reconciler's R0 reloads the event (up to 30 s).
   - (M2.2c-2) Called inside an existing transaction (the after-test listener, the harness), I10 reads
-    Redis after that transaction's snapshot. Fine where nothing runs concurrently; the monitor opens a
-    fresh transaction per event, so its order is right.
+    Redis after that transaction's snapshot, and its Postgres re-read (M2.2d) joins that transaction too.
+    Fine where nothing runs concurrently; the monitor opens a fresh transaction per event, so its order is
+    right.
 - **How I'd know it was wrong:** the harness (M2.2c) or invariant 5 finds a seat with two live
   holders or a user over the cap; invariant 5 fires in normal load (the consumer can't keep up, or
   2 s is too tight); I9 fires at runtime (the sweeper is stuck or keeps failing on a hold); the M2.5
-  benchmark shows latency spikes every 30 s per REDIS_FIRST event (the monitor's `state.lua`); the M2.5 benchmark shows no gain over the Postgres strategies (the consumer or
+  benchmark still shows latency spikes every 30 s per REDIS_FIRST event (the monitor's paged read or its re-read, M2.2d); the M2.5 benchmark shows no gain over the Postgres strategies (the consumer or
   the catch-up before checkout dominates); buyers report holds that vanished without a Redis crash;
   or the seat map's staleness shows up as repeated SEAT_TAKEN on seats that look free (then read
   Redis for REDIS_FIRST events).

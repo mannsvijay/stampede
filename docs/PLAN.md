@@ -564,6 +564,44 @@ end against the compose stack, and every concurrency harness scenario passed 100
         tests, 0 failures, BUILD SUCCESSFUL in 6m 6s.
         Verified by the user (2026-11-17): full suite BUILD SUCCESSFUL in 21m 42s, shutdown warnings
         gone; 1000-round `RedisPersistenceConcurrencyTest` BUILD SUCCESSFUL in 11m 32s.
+  - [x] M2.2d non-blocking I10 read (2026-11-17, D-022 "M2.2d"): invariant 5's first Redis read blocked
+        Redis for ~40 ms per check on a loaded 2,000-seat event. Approved: read in short script pages
+        instead of pipelines; then read Postgres again after the Redis re-read.
+        Done: `state.lua` without the in-script SCAN (`KEYS`, `PAGE`, `HEAD` modes, load epoch in the
+        reply); `RedisHoldStateReader.read` paged (HEAD, SSCAN, SCAN, 25-key PAGE scripts, HEAD; reload
+        retried once, then "cannot check"; hook `afterStep`); I10 in three phases (`compareInSnapshot`,
+        then `readAgainAndCompare` after the snapshot: Redis, then Postgres for those keys only).
+        Measured (`RedisHoldStateReaderTest`, before at `f807f14` in a separate worktree): longest single
+        Redis command median 34.9-39.1 ms -> 1.0-1.1 ms (max 48.9 -> 1.2 ms; 1.5 ms median, 6.1 ms max
+        inside the targeted run); PING p99 during reads 55-61 ms -> 4.7-6.5 ms (idle 3.2-4.0 ms); read
+        time ~60 ms -> ~0.5 s.
+        Found by the new checker thread in `RedisSaleRaceConcurrencyTest` (I10 at 30 s grace while buyers
+        run), with the old reader too: two runtime false alarms (a lagging hold sold, or a HELD entry
+        applied, between the snapshot and the re-read). Root cause: the re-read was compared with the
+        older snapshot. Fixed by the Postgres re-read; stub tests failing first.
+        Tests: `RedisConsistencyCheckTest` +6 (3 torn reads, 2 false alarms, stray S: still reported),
+        `RedisHoldStateReaderTest` +24 (equivalence, hold page, 18-case torn matrix, drift under churn,
+        reload x2, unload; timing test rewritten), `RedisSaleRaceConcurrencyTest` checker thread. Known
+        limit added: a torn first read can hide drift for one check. Ripple: VS Code Source Control made
+        two commits of work in progress (d17d1a8, ef61599); kept on main, the next commit completes them.
+        `RedisSaleRaceConcurrencyTest`, 100 rounds: BUILD SUCCESSFUL in 3m 41s, 1,638 I10 checks during the
+        race, none fired.
+        Targeted run (CLAUDE.md rule; `com.stampede.inventory.strategy.*`, HoldExpirySweeperTest,
+        `com.stampede.control.invariants.*`, ApplicationHealthTest, CheckoutFailureTest,
+        OrderConcurrencyTest, OpenApiSpecTest, ModularityTest): 30 classes, 364 tests, 0 failures, BUILD
+        SUCCESSFUL in 19m 16s (sale race in it: 1,805 checks, none fired). No new dependency, no API change.
+        Verified by the user (2026-11-17): full suite BUILD SUCCESSFUL in 18m 1s. 1000-round
+        `RedisSaleRaceConcurrencyTest`: two runs stopped early by mistake; one ran to the end, 1h 50m
+        (machine overloaded), and failed on a `RedisCommandTimeoutException` at line 142 (a buyer's
+        `strategy.hold`), not on an assertion and not on I10.
+        Open problem: Redis command timeouts on an overloaded laptop, the same pattern as the 2026-11-15/16
+        ones (2 s Redis timeout under load). In the M4 investigation Redis itself never stalled (SLOWLOG at
+        5 ms and LATENCY at 20 ms were empty), so this looks like an infrastructure stall (Docker Desktop's
+        port forwarder, a starved JVM), not Redis. Not proven. Note: the previous 1000-round run of this
+        class took 36m 42s; this one adds the I10 checker thread, which runs continuously in every round
+        (16-18 checks per round in the two 100-round runs), so it adds load of its own. Whether that contributed is unknown. Next
+        step if it recurs: rerun the 1000 rounds on an idle machine, and on a timeout capture Redis
+        SLOWLOG/LATENCY and the client's connection state at that moment.
 - [ ] M2.3 Strategy selectable per event (admin endpoint); concurrency test parameterised over all three
       Note (from M1.7, D-019): if an admin endpoint ever changes `per_user_limit`, it must refuse
       (409) a limit below any user's current `used`, checked under the allowance row locks; I8
@@ -585,12 +623,13 @@ end against the compose stack, and every concurrency harness scenario passed 100
       exhaustion in seat-collision; decide on `SET LOCAL lock_timeout` plus a rejection.
 - [ ] M2.5 `scripts/bench.sh`: runs each strategy, collects k6 JSON + Postgres CPU, writes
       `benchmarks/results/<date>/` and a markdown results table
-      Note (from M2.2c-2, D-022): invariant 5's `state.lua` blocks Redis for ~40 ms (median, 33-55 ms) on
-      a loaded 2,000-seat event with every seat held; the monitor runs it per open REDIS_FIRST event every
-      30 s, and its SCAN cost grows with every key in the Redis database. Measure REDIS_FIRST hold latency
-      with the monitor on and off. If the spikes show, options: read in pages (several short scripts,
-      accepting a non-atomic read and relying on the re-read), check fewer events per tick, or index hold
-      and user ids per event in a set so the script needn't SCAN.
+      Note (from M2.2c-2 and M2.2d, D-022): invariant 5's first Redis read used to block Redis for ~40 ms
+      per check on a loaded 2,000-seat event; since M2.2d it is paged (longest single command ~1 ms, the
+      read itself ~0.5 s of round trips on Docker Desktop). Still measure REDIS_FIRST hold latency with the
+      monitor on and off: what can still block is the re-read (one script sized by the disagreeing keys,
+      plus SMEMBERS of the seat set) under heavy churn, and the stream part of `HEAD` under a large backlog.
+      The SCAN still walks every key in the Redis database, in pages. If that shows, options: check fewer
+      events per tick, or index hold and user ids per event in a set so no SCAN is needed.
 - [ ] M2.6 Benchmark report v1 in `benchmarks/README.md` with your own analysis of why the numbers differ
       Note (from M0.4): generate module diagrams now that modules have real edges: run Modulith's
       `Documenter` from a test (`spring-modulith-docs` is already on the test classpath via
