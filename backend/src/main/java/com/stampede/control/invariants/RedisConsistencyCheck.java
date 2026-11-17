@@ -24,19 +24,32 @@ import java.util.TreeSet;
 import java.util.UUID;
 import java.util.stream.Collectors;
 import org.springframework.jdbc.core.simple.JdbcClient;
+import org.springframework.transaction.support.TransactionOperations;
 
 /**
  * Invariant 5 of PRD 6.10, rule {@code I10}: "Redis hold state is consistent with Postgres" (D-022,
  * M2.2c-2). Runs only for REDIS_FIRST events that are loaded in Redis.
  * <p>
- * <b>Two phases, in this order.</b> {@link #readFirst} reads Redis (one atomic script) BEFORE the
- * checker opens its Postgres snapshot; {@link #findViolations} then reads Postgres inside the snapshot
- * and compares. For holds, Redis is ahead of Postgres (a hold is taken in Redis first), so reading Redis
+ * <b>Three phases, in this order; Redis always before Postgres.</b>
+ * <ol>
+ *   <li>{@link #readFirst} reads the whole event from Redis BEFORE the checker opens its Postgres
+ *       snapshot. Since M2.2d the read is taken in pages (many short commands, so buyers aren't blocked),
+ *       so it is not from one instant.</li>
+ *   <li>{@link #compareInSnapshot} reads Postgres inside the snapshot and compares. Every key that
+ *       disagrees is kept for phase 3; nothing is reported yet.</li>
+ *   <li>{@link #readAgainAndCompare}, after the snapshot: only those keys are read again, Redis (one
+ *       atomic script) and then Postgres (a short read-only transaction), and compared again. Only what
+ *       disagrees in both comparisons can be reported.</li>
+ * </ol>
+ * Why Redis first: for holds, Redis is ahead of Postgres (a hold is taken in Redis first), so reading Redis
  * first and Postgres second shows Postgres "behind", never "ahead". Postgres is ahead for a sale between
  * its commit and sold.lua, for a Postgres-wins tombstone before release.lua and for R3's markers; the
- * re-read and the sale-finishing excuse cover those. Whatever still disagrees is
- * read again from Redis (only those keys) after the snapshot, and compared again: a change that landed
- * between the first read and the snapshot (a release, a newly applied hold) is then seen on both sides.
+ * second read and the sale-finishing excuse cover those. Why read again: a change that landed during or
+ * after the first read (a release, a newly applied hold, a torn paged read) is then seen on both sides.
+ * Why Postgres again too (M2.2d): compared with the older snapshot, a change that reached Postgres and then
+ * Redis before the re-read looked like drift (a lagging hold sold in between; a HELD entry applied and
+ * acknowledged in between, leaving nothing to excuse it). Every input of a reported difference comes from
+ * phase 3's reads, so a torn first read can cause extra reading but never a report of its own.
  * <p>
  * <b>Compared by time, not by status.</b> Both sides are judged at Redis' clock: a hold is live while
  * its expiry is in the future, whatever Postgres' status column says. So a hold whose Redis TTL ran out
@@ -109,30 +122,51 @@ final class RedisConsistencyCheck {
         }
     }
 
-    /** Phase 2, inside the checker's snapshot transaction. */
-    List<String> findViolations(JdbcClient jdbc, UUID eventId, Duration grace, FirstRead first) {
+    /** What phase 2 found: the final answer, or the disagreements to read again from both stores. */
+    sealed interface Compared {
+        record Done(List<String> violations) implements Compared {
+        }
+
+        record ReadAgain(Snapshot firstRead, PostgresView snapshot, List<Diff> before) implements Compared {
+        }
+    }
+
+    /** Phase 2, inside the checker's snapshot transaction: the first read against the snapshot. */
+    Compared compareInSnapshot(JdbcClient jdbc, UUID eventId, FirstRead first) {
         return switch (first) {
-            case FirstRead.NotRedisFirst ignored -> List.of();
-            case FirstRead.NotLoaded ignored -> List.of();
-            case FirstRead.NoReader ignored -> List.of("cannot check: the event is REDIS_FIRST but this context has "
-                    + "no RedisHoldState reader");
-            case FirstRead.Failed failed -> List.of("cannot check: reading Redis failed: " + failed.message());
-            case FirstRead.Loaded loaded -> compare(jdbc, eventId, grace, loaded.snapshot());
+            case FirstRead.NotRedisFirst ignored -> new Compared.Done(List.of());
+            case FirstRead.NotLoaded ignored -> new Compared.Done(List.of());
+            case FirstRead.NoReader ignored -> new Compared.Done(List.of("cannot check: the event is REDIS_FIRST but "
+                    + "this context has no RedisHoldState reader"));
+            case FirstRead.Failed failed -> new Compared.Done(List.of("cannot check: reading Redis failed: "
+                    + failed.message()));
+            case FirstRead.Loaded loaded -> {
+                PostgresView pg = PostgresView.read(jdbc, eventId);
+                List<Diff> before = diff(loaded.snapshot(), pg, loaded.snapshot().now());
+                yield before.isEmpty() ? new Compared.Done(List.of())
+                        : new Compared.ReadAgain(loaded.snapshot(), pg, before);
+            }
         };
     }
 
-    private List<String> compare(JdbcClient jdbc, UUID eventId, Duration grace, Snapshot firstRead) {
-        PostgresView pg = PostgresView.read(jdbc, eventId);
-        List<Diff> before = diff(firstRead, pg, firstRead.now());
-        if (before.isEmpty()) {
-            return List.of();
+    /**
+     * Phase 3, AFTER the snapshot transaction: only what disagreed is read again, Redis first and then
+     * Postgres ({@code readOnly}, its own short transaction), the same order as the first comparison
+     * (D-022 M2.2d). Compared against the snapshot instead, a change that reached Postgres after the
+     * snapshot and Redis before the re-read looked like drift: a lagging hold sold in between ("sold in
+     * Redis, free in Postgres"), or a hold whose HELD entry the consumer applied and acknowledged in
+     * between (no unapplied entry left to excuse it).
+     */
+    List<String> readAgainAndCompare(JdbcClient jdbc, TransactionOperations readOnly, UUID eventId, Duration grace,
+                                     Compared compared) {
+        if (compared instanceof Compared.Done done) {
+            return done.violations();
         }
-
-        // The read-order race: re-read only what disagrees, now that the snapshot is fixed.
+        Compared.ReadAgain first = (Compared.ReadAgain) compared;
         Set<UUID> seats = new LinkedHashSet<>();
         Set<UUID> holds = new LinkedHashSet<>();
         Set<UUID> users = new LinkedHashSet<>();
-        before.forEach(d -> {
+        first.before().forEach(d -> {
             seats.addAll(d.seats());
             holds.addAll(d.holds());
             users.addAll(d.users());
@@ -147,16 +181,21 @@ final class RedisConsistencyCheck {
         if (again.isEmpty()) {
             return List.of();   // unloaded between the reads (Redis lost it): like an event not loaded
         }
-        Snapshot merged = merge(firstRead, again.get(), seats, holds, users);
-        Set<String> disagreed = before.stream().map(Diff::key).collect(Collectors.toSet());
-        List<UnappliedEntry> entries = new ArrayList<>(firstRead.unappliedEntries());
+        Snapshot merged = merge(first.firstRead(), again.get(), seats, holds, users);
+        Set<UUID> pgHolds = new HashSet<>(holds);
+        pgHolds.addAll(namedBy(again.get()));
+        PostgresView pg = readOnly.execute(status ->
+                PostgresView.readAgain(jdbc, eventId, first.snapshot(), seats, pgHolds, users));
+
+        Set<String> disagreed = first.before().stream().map(Diff::key).collect(Collectors.toSet());
+        List<UnappliedEntry> entries = new ArrayList<>(first.firstRead().unappliedEntries());
         entries.addAll(again.get().unappliedEntries());
         Instant now = merged.now();
 
         List<String> violations = new ArrayList<>();
         for (Diff d : diff(merged, pg, now)) {
             if (!disagreed.contains(d.key())) {
-                continue;  // only what disagreed in the first read was re-read
+                continue;  // only what disagreed in the first comparison was read again
             }
             if (excused(d, grace, entries, now, merged, pg)) {
                 continue;
@@ -383,12 +422,7 @@ final class RedisConsistencyCheck {
 
         // The re-read also read every hold its seats and users name; those replace the first read's too.
         Set<UUID> reread = new HashSet<>(holds);
-        again.seatValues().values().forEach(v -> {
-            if (v instanceof SeatValue.Held held) {
-                reread.add(held.holdId());
-            }
-        });
-        again.capMembers().values().forEach(ms -> ms.forEach(m -> reread.add(m.holdId())));
+        reread.addAll(namedBy(again));
         Map<UUID, RedisHoldState.Hold> holdMap = new HashMap<>(first.holds());
         reread.forEach(holdMap::remove);
         holdMap.putAll(again.holds());
@@ -399,6 +433,18 @@ final class RedisConsistencyCheck {
 
         return new Snapshot(again.now(), again.perUserLimit(), again.seatIds(), seatValues, holdMap, capMembers,
                 again.unappliedEntries());
+    }
+
+    /** The holds a re-read's seat values and cap members name (the re-read read those holds too). */
+    private static Set<UUID> namedBy(Snapshot again) {
+        Set<UUID> named = new HashSet<>();
+        again.seatValues().values().forEach(v -> {
+            if (v instanceof SeatValue.Held held) {
+                named.add(held.holdId());
+            }
+        });
+        again.capMembers().values().forEach(ms -> ms.forEach(m -> named.add(m.holdId())));
+        return named;
     }
 
     private static List<UUID> sorted(List<UUID> ids) {
@@ -428,22 +474,68 @@ final class RedisConsistencyCheck {
                                 rs.getObject("hold_id", UUID.class), rs.getObject("order_id", UUID.class)));
                     });
             Map<UUID, PgHold> holds = new HashMap<>();
-            jdbc.sql("""
-                    SELECT h.id, h.user_id, h.seat_ids, h.created_at, h.expires_at, h.status,
-                           (SELECT round(extract(epoch FROM now() - max(o.created_at)) * 1000)::bigint
-                            FROM orders o WHERE o.hold_id = h.id) AS order_age_ms
-                    FROM holds h
-                    WHERE h.event_id = ? AND h.status IN ('ACTIVE', 'CONVERTED')
-                    """)
-                    .param(eventId)
-                    .query(rs -> {
-                        UUID id = rs.getObject("id", UUID.class);
-                        holds.put(id, new PgHold(id, rs.getObject("user_id", UUID.class), uuids(rs.getArray("seat_ids")),
-                                rs.getObject("created_at", OffsetDateTime.class).toInstant(),
-                                rs.getObject("expires_at", OffsetDateTime.class).toInstant(), rs.getString("status"),
-                                rs.getObject("order_age_ms", Long.class)));
-                    });
+            readHolds(jdbc.sql(HOLDS + "WHERE h.event_id = :event AND h.status IN ('ACTIVE', 'CONVERTED')")
+                    .param("event", eventId), holds);
             return new PostgresView(limit, seats, holds);
+        }
+
+        /**
+         * {@code base} (the snapshot's view) with the listed keys read again, now (D-022 M2.2d): those seats,
+         * the holds listed or named by those seats, and every ACTIVE or CONVERTED hold of those users. Call
+         * it in one read-only transaction so the rows read again agree with each other.
+         */
+        static PostgresView readAgain(JdbcClient jdbc, UUID eventId, PostgresView base, Set<UUID> seatIds,
+                                      Set<UUID> holdIds, Set<UUID> userIds) {
+            int limit = jdbc.sql("SELECT per_user_limit FROM events WHERE id = ?").param(eventId)
+                    .query(Integer.class).single();
+            Map<UUID, PgSeat> seats = new HashMap<>(base.seats());
+            if (!seatIds.isEmpty()) {
+                jdbc.sql("""
+                        SELECT seat_id, status, hold_id, order_id FROM event_seats
+                        WHERE event_id = :event AND seat_id = ANY(:seats)
+                        """)
+                        .param("event", eventId)
+                        .param("seats", seatIds.toArray(UUID[]::new))
+                        .query(rs -> {
+                            seats.put(rs.getObject("seat_id", UUID.class), new PgSeat(rs.getString("status"),
+                                    rs.getObject("hold_id", UUID.class), rs.getObject("order_id", UUID.class)));
+                        });
+            }
+            Set<UUID> ids = new HashSet<>(holdIds);
+            seatIds.forEach(seat -> {
+                PgSeat row = seats.get(seat);
+                if (row != null && row.holdId() != null) {
+                    ids.add(row.holdId());
+                }
+            });
+            // Replaced, not added to: a hold read again that is no longer ACTIVE or CONVERTED is gone.
+            Map<UUID, PgHold> holds = new HashMap<>(base.holds());
+            holds.values().removeIf(h -> ids.contains(h.id()) || userIds.contains(h.userId()));
+            readHolds(jdbc.sql(HOLDS + """
+                    WHERE h.event_id = :event AND h.status IN ('ACTIVE', 'CONVERTED')
+                      AND (h.id = ANY(:ids) OR h.user_id = ANY(:users))
+                    """)
+                    .param("event", eventId)
+                    .param("ids", ids.toArray(UUID[]::new))
+                    .param("users", userIds.toArray(UUID[]::new)), holds);
+            return new PostgresView(limit, seats, holds);
+        }
+
+        private static final String HOLDS = """
+                SELECT h.id, h.user_id, h.seat_ids, h.created_at, h.expires_at, h.status,
+                       (SELECT round(extract(epoch FROM now() - max(o.created_at)) * 1000)::bigint
+                        FROM orders o WHERE o.hold_id = h.id) AS order_age_ms
+                FROM holds h
+                """;
+
+        private static void readHolds(JdbcClient.StatementSpec query, Map<UUID, PgHold> into) {
+            query.query(rs -> {
+                UUID id = rs.getObject("id", UUID.class);
+                into.put(id, new PgHold(id, rs.getObject("user_id", UUID.class), uuids(rs.getArray("seat_ids")),
+                        rs.getObject("created_at", OffsetDateTime.class).toInstant(),
+                        rs.getObject("expires_at", OffsetDateTime.class).toInstant(), rs.getString("status"),
+                        rs.getObject("order_age_ms", Long.class)));
+            });
         }
 
         private static List<UUID> uuids(Array array) throws SQLException {

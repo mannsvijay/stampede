@@ -15,8 +15,15 @@ import java.util.UUID;
  * <p>
  * It only reads, and only keys under this application's own key prefix
  * ({@code stampede.inventory.redis.key-prefix}), so two Spring test contexts sharing one Redis never
- * see each other's holds. Each call is ONE Lua script ({@code redis/state.lua}), so everything in a
- * {@link Snapshot} is from the same instant: Redis runs a script as a single command.
+ * see each other's holds.
+ * <p>
+ * <b>Which reads are atomic</b> (D-022 M2.2d). {@link #reread} is ONE Lua script, so everything in its
+ * {@link Snapshot} is from the same instant (Redis runs a script as a single command). {@link #read} is
+ * not: one script over a whole event blocked every other Redis client for ~40 ms on a 2,000-seat event,
+ * so it is taken in many short commands with buyers' commands in between. Each of its values is real, but
+ * values may be from different instants (a seat and the hold it names, or a user and the holds their
+ * members name, are always read together). Its {@code now} is the clock at its start. Invariant 5 copes by
+ * reading whatever disagrees again, atomically, after its Postgres snapshot.
  * <p>
  * Every time is Redis' clock, the clock that decides expiry for REDIS_FIRST events.
  */
@@ -25,14 +32,16 @@ public interface RedisHoldState {
     /**
      * The whole event: limit, seat set, every seat key, every hold hash, every user's cap members, and
      * the stream entries for this event that are not yet applied to Postgres and younger than
-     * {@code entriesYoungerThan}. Empty if the event is not loaded in Redis.
+     * {@code entriesYoungerThan}. Empty if the event is not loaded in Redis. NOT atomic (see above): many
+     * short commands, so it never blocks Redis for long. Throws if the event was reloaded during two
+     * reads in a row.
      */
     Optional<Snapshot> read(UUID eventId, Duration entriesYoungerThan);
 
     /**
      * The same, but only for the listed seats, holds and users (plus the holds the seats' values and
      * the users' members name, so a re-read value can be interpreted). Limit, seat set and unapplied
-     * entries are always included. Empty if the event is not loaded (any more).
+     * entries are always included. Empty if the event is not loaded (any more). Atomic: one script.
      */
     Optional<Snapshot> reread(UUID eventId, Duration entriesYoungerThan, Collection<UUID> seatIds,
                               Collection<UUID> holdIds, Collection<UUID> userIds);

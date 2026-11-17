@@ -22,7 +22,9 @@ import org.springframework.transaction.support.TransactionTemplate;
  * committed between them, and the checker can't write. Called inside an existing transaction (a
  * {@code @Transactional} test), it joins that transaction instead and sees its uncommitted rows.
  * <p>
- * Called inside an existing transaction, the Redis read of I10 happens after that transaction's
+ * I10 (the Redis rule) reads Redis before the snapshot and, for whatever disagrees, Redis and then
+ * Postgres again after it, in a second short read-only transaction (D-022 M2.2c-2, M2.2d). Called
+ * inside an existing transaction, both join it, so the Redis read happens after that transaction's
  * snapshot; that is only done where nothing runs concurrently (after a test, in the harness).
  * <p>
  * Used by the after-test assertion and the concurrency harness (strict, grace {@link Duration#ZERO})
@@ -73,18 +75,21 @@ public class InvariantChecker {
         // Redis first, BEFORE the snapshot exists: Postgres REPEATABLE READ takes its snapshot at the
         // first query, so Postgres can then only be behind Redis, never ahead (RedisConsistencyCheck).
         RedisConsistencyCheck.FirstRead redisRead = redisCheck.readFirst(jdbc, eventId);
-        return snapshot.execute(status -> {
-            List<Violation> violations = new ArrayList<>();
+        List<Violation> violations = new ArrayList<>();
+        RedisConsistencyCheck.Compared compared = snapshot.execute(status -> {
             for (InvariantCheck check : checks) {
                 for (String detail : check.findViolations(jdbc, eventId, grace)) {
                     violations.add(new Violation(check.id(), check.name(), eventId, detail));
                 }
             }
-            for (String detail : redisCheck.findViolations(jdbc, eventId, grace, redisRead)) {
-                violations.add(new Violation(RedisConsistencyCheck.ID, RedisConsistencyCheck.NAME, eventId, detail));
-            }
-            return violations;
+            return redisCheck.compareInSnapshot(jdbc, eventId, redisRead);
         });
+        // After the snapshot: I10 reads what disagreed again, Redis then Postgres (its own short read-only
+        // transaction), in the same order as the first comparison (D-022 M2.2d).
+        for (String detail : redisCheck.readAgainAndCompare(jdbc, snapshot, eventId, grace, compared)) {
+            violations.add(new Violation(RedisConsistencyCheck.ID, RedisConsistencyCheck.NAME, eventId, detail));
+        }
+        return violations;
     }
 
     /** Every violation for every event (one snapshot per event), in event id order. */
