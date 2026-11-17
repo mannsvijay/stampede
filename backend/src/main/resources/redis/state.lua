@@ -5,9 +5,10 @@
 --
 -- KEYS[1] event meta hash     KEYS[2] event seats set     KEYS[3] the inventory stream
 -- ARGV[1] mode:
---   'KEYS' the listed ids, plus the seat set and the unapplied stream entries (the re-read; with no ids,
---          the first read's header and trailer)
+--   'KEYS' the listed ids, plus the seat set and the unapplied stream entries (the re-read)
 --   'PAGE' only the listed ids (one page of the first read); seat set and entries come back empty
+--   'HEAD' clock, limit, epoch and the unapplied entries, no seat set (the first read's header and
+--          trailer; it reads the seat set itself, with SSCAN)
 -- ARGV[2] event key prefix ('<p>:ev:<event>:')    ARGV[3] consumer group    ARGV[4] eventId
 -- ARGV[5] entry window in ms: only unapplied stream entries younger than this are returned
 -- ARGV[6] seat count, seat ids..., hold count, hold ids..., user count, user ids...
@@ -28,7 +29,7 @@ local group = ARGV[3]
 local eventId = ARGV[4]
 local windowMs = tonumber(ARGV[5])
 
-if mode ~= 'KEYS' and mode ~= 'PAGE' then
+if mode ~= 'KEYS' and mode ~= 'PAGE' and mode ~= 'HEAD' then
     return redis.error_reply('state.lua: unknown mode ' .. tostring(mode))
 end
 
@@ -169,5 +170,8 @@ if redis.call('EXISTS', stream) == 1 then
     end
 end
 
-return {'LOADED', string.format('%.0f', now), limit, redis.call('SMEMBERS', seatsKey), seatValues, holds, users,
-        unapplied, loadEpoch}
+local seatSet = {}
+if mode == 'KEYS' then
+    seatSet = redis.call('SMEMBERS', seatsKey)
+end
+return {'LOADED', string.format('%.0f', now), limit, seatSet, seatValues, holds, users, unapplied, loadEpoch}

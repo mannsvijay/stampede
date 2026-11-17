@@ -28,7 +28,7 @@ import org.springframework.stereotype.Component;
  * <p>
  * <b>{@link #read}: many short commands, so buyers' commands run in between</b> (M2.2d). One script over
  * the whole event blocked Redis for ~40 ms on a loaded 2,000-seat event. Now: a header (clock, limit,
- * seat set, load epoch), SCAN pages from Java to find the event's keys, then short {@code PAGE} scripts
+ * load epoch), SSCAN pages of the seat set and SCAN pages of the event's keys from Java, then short {@code PAGE} scripts
  * of {@value #SEAT_PAGE} seats, {@value #USER_PAGE} users or {@value #HOLD_PAGE} holds, then a trailer
  * (the unapplied stream entries, the epoch again). Each page reads a seat with the hold it names, and a
  * user with the holds their members name, so the pairs I10 interprets together are from one instant.
@@ -44,10 +44,10 @@ import org.springframework.stereotype.Component;
 @Component
 class RedisHoldStateReader implements RedisHoldState {
 
-    /** Page sizes, measured (D-022 M2.2d): each page script stays well under a millisecond. */
-    static final int SEAT_PAGE = 100;
-    static final int USER_PAGE = 50;
-    static final int HOLD_PAGE = 50;
+    /** Page sizes, measured (D-022 M2.2d): the longest page script takes about 1 ms on a 2,000-seat event. */
+    static final int SEAT_PAGE = 25;
+    static final int USER_PAGE = 25;
+    static final int HOLD_PAGE = 25;
     /** Keys SCAN looks at per call (a hint to Redis, not an exact page size). */
     static final int SCAN_COUNT = 500;
 
@@ -107,11 +107,19 @@ class RedisHoldStateReader implements RedisHoldState {
     }
 
     private Paged readInPages(UUID eventId, Duration window) {
-        Optional<Reply> header = run("KEYS", eventId, window, List.of(), List.of(), List.of());
+        Optional<Reply> header = run("HEAD", eventId, window, List.of(), List.of(), List.of());
         afterStep.accept("header");
         if (header.isEmpty()) {
             return new Paged.Done(Optional.empty());
         }
+
+        // The seat set in SSCAN pages, not one SMEMBERS of every seat.
+        Set<UUID> seatSet = new HashSet<>();
+        try (Cursor<String> cursor = redis.opsForSet().scan(keys.seats(eventId),
+                ScanOptions.scanOptions().count(SCAN_COUNT).build())) {
+            cursor.forEachRemaining(id -> seatSet.add(UUID.fromString(id)));
+        }
+        afterStep.accept("seat set");
 
         // Which seats, holds and users have keys. SCAN pages from here, not one SCAN inside a script.
         Set<UUID> seatIds = new LinkedHashSet<>();
@@ -151,7 +159,7 @@ class RedisHoldStateReader implements RedisHoldState {
             afterStep.accept("holds");
         }
 
-        Optional<Reply> trailer = run("KEYS", eventId, window, List.of(), List.of(), List.of());
+        Optional<Reply> trailer = run("HEAD", eventId, window, List.of(), List.of(), List.of());
         afterStep.accept("trailer");
         if (trailer.isEmpty()) {
             return new Paged.Done(Optional.empty());   // unloaded during the read: like an event not loaded
@@ -162,7 +170,7 @@ class RedisHoldStateReader implements RedisHoldState {
         Snapshot start = header.get().snapshot();
         // Judged at the header's clock; unapplied entries from the trailer, so holds written during the
         // read have theirs.
-        return new Paged.Done(Optional.of(new Snapshot(start.now(), start.perUserLimit(), start.seatIds(), seatValues,
+        return new Paged.Done(Optional.of(new Snapshot(start.now(), start.perUserLimit(), seatSet, seatValues,
                 holds, capMembers, trailer.get().snapshot().unappliedEntries())));
     }
 
