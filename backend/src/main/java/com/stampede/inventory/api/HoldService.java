@@ -53,10 +53,25 @@ public class HoldService {
      *                IllegalArgumentException otherwise)
      */
     public HoldResult hold(UUID userId, UUID eventId, List<UUID> seatIds) {
-        // Not locked: status and drop time can change right after this check (an admin pausing the
-        // event), and the hold still goes through. Same window as any check-then-act outside the
-        // strategy; pausing a sale is a later control-room feature (M5.5) that can move this check
-        // into the strategy if it matters.
+        // The strategy re-checks the event's strategy and sale window inside its own transaction (M2.3a,
+        // D-023) and answers StrategyChanged if either changed since the read below. Then read the event
+        // again and try once more: the event now has a new strategy, or is no longer on sale. Twice in
+        // a row can only happen while the event is being switched, and a switch needs it off sale.
+        for (int attempt = 1; ; attempt++) {
+            Optional<HoldResult> result = holdOnce(userId, eventId, seatIds);
+            if (result.isPresent()) {
+                return result.get();
+            }
+            if (attempt == 2) {
+                return new HoldResult.SaleNotOpen();
+            }
+        }
+    }
+
+    /** One try of {@link #hold}; empty when the strategy answered StrategyChanged. */
+    private Optional<HoldResult> holdOnce(UUID userId, UUID eventId, List<UUID> seatIds) {
+        // Not locked: status, drop time and strategy can change right after this check. The strategy
+        // checks all three again inside its transaction (StrategyChanged below).
         Optional<EventRow> event = jdbc.sql("""
                         SELECT strategy, status, per_user_limit, drop_at <= now() AS dropped
                         FROM events WHERE id = ?
@@ -66,10 +81,10 @@ public class HoldService {
                         rs.getInt("per_user_limit"), rs.getBoolean("dropped")))
                 .optional();
         if (event.isEmpty() || event.get().status().equals("DRAFT")) {
-            return new HoldResult.EventNotFound();
+            return Optional.of(new HoldResult.EventNotFound());
         }
         if (!event.get().saleOpen()) {
-            return new HoldResult.SaleNotOpen();
+            return Optional.of(new HoldResult.SaleNotOpen());
         }
 
         // A new id for every attempt (D-015): reusing one is a programming error the holds primary
@@ -78,9 +93,9 @@ public class HoldService {
         HoldOutcome outcome = strategies.forKind(event.get().strategy()).hold(request);
 
         return switch (outcome) {
-            case HoldOutcome.Held held -> new HoldResult.Created(
-                    new HoldView(held.holdId(), eventId, held.seatIds(), held.expiresAt()));
-            case HoldOutcome.Rejected rejected -> switch (rejected.reason()) {
+            case HoldOutcome.Held held -> Optional.of(new HoldResult.Created(
+                    new HoldView(held.holdId(), eventId, held.seatIds(), held.expiresAt())));
+            case HoldOutcome.Rejected rejected -> Optional.of(switch (rejected.reason()) {
                 case UNKNOWN_SEAT -> new HoldResult.UnknownSeats(rejected.seatIds());
                 case SEAT_TAKEN -> existingHoldOnExactly(userId, eventId, seatIds, event.get().strategy())
                         .<HoldResult>map(HoldResult.Existing::new)
@@ -89,7 +104,8 @@ public class HoldService {
                 // the seats free, so the caller can't already hold exactly them.
                 case CONTENDED -> new HoldResult.Contended(rejected.seatIds());
                 case LIMIT_EXCEEDED -> new HoldResult.LimitExceeded(rejected.seatIds(), event.get().perUserLimit());
-            };
+            });
+            case HoldOutcome.StrategyChanged changed -> Optional.empty();
         };
     }
 
@@ -105,8 +121,7 @@ public class HoldService {
             return new CancelResult.NotFound();
         }
 
-        ReleaseOutcome outcome = strategies.forKind(owner.get().strategy())
-                .release(owner.get().eventId(), holdId, ReleaseReason.RELEASED);
+        ReleaseOutcome outcome = releaseWithCurrentStrategy(holdId, ReleaseReason.RELEASED);
         return switch (outcome) {
             case ReleaseOutcome.Released released -> new CancelResult.Cancelled();
             case ReleaseOutcome.NotActive notActive -> notActive.holdStatus().equals("CONVERTED")
@@ -118,6 +133,7 @@ public class HoldService {
             // Only a release with reason EXPIRED can answer NotExpired.
             case ReleaseOutcome.NotExpired notExpired ->
                     throw new IllegalStateException("NotExpired for a RELEASED release of hold " + holdId);
+            case ReleaseOutcome.StrategyChanged changed -> throw strategyKeptChanging(holdId);
         };
     }
 
@@ -169,9 +185,16 @@ public class HoldService {
      * checked by {@link #checkoutHold}; the caller (booking) passes only its own order's hold.
      */
     public SellResult sellForOrder(UUID holdId, UUID orderId) {
-        HoldOwner owner = owner(holdId)
-                .orElseThrow(() -> new IllegalStateException("No hold " + holdId + " to sell to order " + orderId));
-        SellOutcome outcome = strategies.forKind(owner.strategy()).sell(owner.eventId(), holdId, orderId);
+        SellOutcome outcome = null;
+        for (int attempt = 1; attempt <= 2; attempt++) {
+            // Read again on the second try: the strategy answered StrategyChanged (M2.3a).
+            HoldOwner owner = owner(holdId)
+                    .orElseThrow(() -> new IllegalStateException("No hold " + holdId + " to sell to order " + orderId));
+            outcome = strategies.forKind(owner.strategy()).sell(owner.eventId(), holdId, orderId);
+            if (!(outcome instanceof SellOutcome.StrategyChanged)) {
+                break;
+            }
+        }
         return switch (outcome) {
             case SellOutcome.Sold sold -> new SellResult.Sold(sold.seatIds());
             case SellOutcome.HoldExpired expired -> new SellResult.NoLongerHeld("ACTIVE (expired)");
@@ -180,6 +203,7 @@ public class HoldService {
                     : new SellResult.NoLongerHeld(notActive.holdStatus());
             case SellOutcome.NotFound notFound ->
                     throw new IllegalStateException("Hold " + holdId + " disappeared during sell");
+            case SellOutcome.StrategyChanged changed -> throw strategyKeptChanging(holdId);
         };
     }
 
@@ -190,10 +214,7 @@ public class HoldService {
      * {@link CheckoutRelease#CONVERTED}, the sale committed and nothing must be undone.
      */
     public CheckoutRelease releaseForFailedCheckout(UUID holdId) {
-        HoldOwner owner = owner(holdId)
-                .orElseThrow(() -> new IllegalStateException("No hold " + holdId + " to release"));
-        ReleaseOutcome outcome = strategies.forKind(owner.strategy())
-                .release(owner.eventId(), holdId, ReleaseReason.SAGA_FAILED);
+        ReleaseOutcome outcome = releaseWithCurrentStrategy(holdId, ReleaseReason.SAGA_FAILED);
         return switch (outcome) {
             case ReleaseOutcome.Released released -> CheckoutRelease.RELEASED;
             case ReleaseOutcome.NotActive notActive -> notActive.holdStatus().equals("CONVERTED")
@@ -203,7 +224,34 @@ public class HoldService {
                     throw new IllegalStateException("Hold " + holdId + " disappeared during release");
             case ReleaseOutcome.NotExpired notExpired ->
                     throw new IllegalStateException("NotExpired for a SAGA_FAILED release of hold " + holdId);
+            case ReleaseOutcome.StrategyChanged changed -> throw strategyKeptChanging(holdId);
         };
+    }
+
+    /**
+     * Releases through the event's strategy; if that strategy answers StrategyChanged (switched since the
+     * read, M2.3a), reads the event's strategy again and tries once more. Only StrategyChanged twice in a
+     * row comes back as StrategyChanged.
+     */
+    private ReleaseOutcome releaseWithCurrentStrategy(UUID holdId, ReleaseReason reason) {
+        ReleaseOutcome outcome = null;
+        for (int attempt = 1; attempt <= 2; attempt++) {
+            HoldOwner owner = owner(holdId)
+                    .orElseThrow(() -> new IllegalStateException("No hold " + holdId + " to release"));
+            outcome = strategies.forKind(owner.strategy()).release(owner.eventId(), holdId, reason);
+            if (!(outcome instanceof ReleaseOutcome.StrategyChanged)) {
+                return outcome;
+            }
+        }
+        return outcome;
+    }
+
+    /**
+     * StrategyChanged twice for an existing hold. A switch needs the event to have no ACTIVE hold, so a
+     * hold this call could still act on can't be caught up in one: a bug, not a state to handle.
+     */
+    private static IllegalStateException strategyKeptChanging(UUID holdId) {
+        return new IllegalStateException("The strategy of hold " + holdId + "'s event changed twice during one call");
     }
 
     /** {@link #owner}, after persisting a REDIS_FIRST hold that only Redis has so far (consumer lag, M2.2c). */
