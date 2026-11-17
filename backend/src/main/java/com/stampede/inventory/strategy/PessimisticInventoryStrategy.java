@@ -30,12 +30,15 @@ class PessimisticInventoryStrategy implements InventoryStrategy {
     private final SeatRows seats;
     private final HoldClosing closing;
     private final HoldMetrics metrics;
+    private final StrategyGuard guard;
 
-    PessimisticInventoryStrategy(JdbcClient jdbc, SeatRows seats, HoldClosing closing, HoldMetrics metrics) {
+    PessimisticInventoryStrategy(JdbcClient jdbc, SeatRows seats, HoldClosing closing, HoldMetrics metrics,
+                                 StrategyGuard guard) {
         this.jdbc = jdbc;
         this.seats = seats;
         this.closing = closing;
         this.metrics = metrics;
+        this.guard = guard;
     }
 
     @Override
@@ -68,6 +71,14 @@ class PessimisticInventoryStrategy implements InventoryStrategy {
         // overlapping seats can't wait for each other in a circle (deadlock). If another transaction
         // holds a lock, we wait here; once it commits, Postgres gives us the row's new version.
         List<EventSeat> locked = lockSeatsOfRequest(request.eventId(), request.seatIds());
+
+        // Step 2b (M2.3a, D-023): with the seat locks held, is this still the event's strategy, and is
+        // the event still on sale? The caller checked both before, unlocked. A strategy switch holds
+        // every seat lock of the event while it commits, so this read sees it (we waited for it), or
+        // the switch waits for us and then sees our hold. Nothing is written yet, so just answer.
+        if (!guard.takesHolds(request.eventId(), kind())) {
+            return new HoldOutcome.StrategyChanged();
+        }
 
         // Step 3: an id with no row isn't a seat of this event (unknown, or another event's seat).
         // Checked before SEAT_TAKEN: a request naming a non-existent seat is malformed either way.
@@ -113,14 +124,16 @@ class PessimisticInventoryStrategy implements InventoryStrategy {
         return new Held(request.holdId(), request.seatIds(), expiresAt);
     }
 
+    /** Re-checks the strategy once the hold row is locked (M2.3a), then decides by the database clock. */
     @Override
     public ReleaseOutcome release(UUID eventId, UUID holdId, ReleaseReason reason) {
-        return closing.release(eventId, holdId, reason);
+        return closing.closeWith(eventId, holdId, guard.release(kind(), HoldClosing.byDatabaseClock(reason)));
     }
 
+    /** Re-checks the strategy once the hold row is locked (M2.3a), then decides by the database clock. */
     @Override
     public SellOutcome sell(UUID eventId, UUID holdId, UUID orderId) {
-        return closing.sell(eventId, holdId, orderId);
+        return closing.sellWith(eventId, holdId, orderId, guard.sell(kind(), HoldClosing::sellableByDatabaseClock));
     }
 
     /** Locks the event's rows for these seat ids, in Postgres seat_id order (see step 2). */

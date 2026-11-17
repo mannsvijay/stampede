@@ -80,14 +80,26 @@ class HoldClosing {
                       boolean expired) {
     }
 
+    /**
+     * Release by the database clock, with no strategy re-check. The Postgres strategies wrap
+     * {@link #byDatabaseClock} in {@link StrategyGuard#release} and call {@link #closeWith} instead
+     * (M2.3a); this stays for tests that close a hold in Postgres directly.
+     */
     @Transactional
     ReleaseOutcome release(UUID eventId, UUID holdId, ReleaseReason reason) {
-        // The sweeper decided "expired" before it had the lock. Check again now that we hold it: the
-        // hold may have been extended in between (PRD 6.3), and then it must not be expired. The
-        // comparison runs in SQL so the database clock decides, like everywhere else (D-015).
-        return close(eventId, holdId, hold -> reason == ReleaseReason.EXPIRED && !hold.expired()
+        return close(eventId, holdId, byDatabaseClock(reason));
+    }
+
+    /**
+     * The Postgres strategies' release decision. The sweeper decided "expired" before it had the lock.
+     * Check again now that we hold it: the hold may have been extended in between (PRD 6.3), and then it
+     * must not be expired. The comparison ran in SQL ({@code hold.expired()}), so the database clock
+     * decides, like everywhere else (D-015).
+     */
+    static CloseGate byDatabaseClock(ReleaseReason reason) {
+        return hold -> reason == ReleaseReason.EXPIRED && !hold.expired()
                 ? new CloseDecision.Keep(new NotExpired(hold.expiresAt()))
-                : new CloseDecision.Close(reason, false));
+                : new CloseDecision.Close(reason, false);
     }
 
     /**
@@ -182,12 +194,17 @@ class HoldClosing {
      */
     @Transactional
     SellOutcome sell(UUID eventId, UUID holdId, UUID orderId) {
-        // An ACTIVE hold can be past its expiry: the sweeper runs every few seconds, so there is a
-        // window where the status hasn't caught up. Checking status alone would sell an expired hold.
-        // The database clock decides, as for every hold expiry (D-015).
-        return sell(eventId, holdId, orderId, hold -> hold.expired()
-                ? Optional.of(new SellOutcome.HoldExpired(hold.expiresAt()))
-                : Optional.empty());
+        // No strategy re-check: like release(), kept for tests; the strategies use sellWith (M2.3a).
+        return sell(eventId, holdId, orderId, HoldClosing::sellableByDatabaseClock);
+    }
+
+    /**
+     * The Postgres strategies' sell decision. An ACTIVE hold can be past its expiry: the sweeper runs
+     * every few seconds, so there is a window where the status hasn't caught up. Checking status alone
+     * would sell an expired hold. The database clock decides, as for every hold expiry (D-015).
+     */
+    static Optional<SellOutcome> sellableByDatabaseClock(LockedHold hold) {
+        return hold.expired() ? Optional.of(new SellOutcome.HoldExpired(hold.expiresAt())) : Optional.empty();
     }
 
     /**

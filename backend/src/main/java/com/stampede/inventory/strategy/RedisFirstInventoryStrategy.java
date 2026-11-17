@@ -43,19 +43,22 @@ class RedisFirstInventoryStrategy implements InventoryStrategy {
     private final RedisHoldWriter writer;
     private final HoldClosing closing;
     private final HoldMetrics metrics;
+    private final StrategyGuard guard;
     /** Test hook only: runs after the Postgres sale committed, before sold.lua (a slow network, say). */
     private volatile Runnable afterPostgresSale = () -> { };
     /** Test hook only: runs after catch-up, just before the row-locked release or sale starts. */
     private volatile Runnable beforeGate = () -> { };
 
     RedisFirstInventoryStrategy(RedisHoldStore store, RedisEventLoader loader, RedisCatchUp catchUp,
-                                RedisHoldWriter writer, HoldClosing closing, HoldMetrics metrics) {
+                                RedisHoldWriter writer, HoldClosing closing, HoldMetrics metrics,
+                                StrategyGuard guard) {
         this.store = store;
         this.loader = loader;
         this.catchUp = catchUp;
         this.writer = writer;
         this.closing = closing;
         this.metrics = metrics;
+        this.guard = guard;
     }
 
     @Override
@@ -66,6 +69,11 @@ class RedisFirstInventoryStrategy implements InventoryStrategy {
     /**
      * One script. If Redis doesn't have the event (first hold after a restart), loads it from Postgres
      * and runs the script once more; {@code attempts} then counts two.
+     * <p>
+     * StrategyChanged (M2.3a, D-023) when the event's closed gate is set (hold.lua answers CLOSED), or
+     * when the event is still not loaded because it is no longer REDIS_FIRST (the loader refuses it).
+     * There is no Postgres transaction here, so the gate in Redis plays the part of the Postgres
+     * strategies' in-transaction re-check.
      */
     @Override
     public HoldOutcome hold(HoldRequest request) {
@@ -79,6 +87,9 @@ class RedisFirstInventoryStrategy implements InventoryStrategy {
                 metrics.attempt(kind());
                 result = store.tryHold(request);
             }
+            if (result.isEmpty() && !guard.serves(request.eventId(), kind())) {
+                result = Optional.of(new HoldOutcome.StrategyChanged());
+            }
             outcome = result.orElseThrow(() -> new IllegalStateException(
                     "Event " + request.eventId() + " is still not loaded into Redis after loading it"));
             return outcome;
@@ -87,14 +98,20 @@ class RedisFirstInventoryStrategy implements InventoryStrategy {
         }
     }
 
+    /**
+     * Every gate below starts with the strategy re-check (M2.3a, D-023), under the hold row lock and
+     * before any Lua runs, so a release for an event that is no longer REDIS_FIRST changes nothing in
+     * Redis or Postgres and answers StrategyChanged.
+     */
     @Override
     public ReleaseOutcome release(UUID eventId, UUID holdId, ReleaseReason reason) {
         if (reason == ReleaseReason.EXPIRED) {
-            return writer.expire(eventId, holdId);   // the sweeper; Redis' clock decides (D-022)
+            // The sweeper; Redis' clock decides (D-022).
+            return closing.closeWith(eventId, holdId, guard.release(kind(), writer::expireDecision));
         }
         catchUp.catchUp(eventId, holdId);
-        return loadingOutsideTheLock(eventId,
-                () -> closing.closeWith(eventId, holdId, hold -> releaseInRedis(hold, reason)));
+        return loadingOutsideTheLock(eventId, () -> closing.closeWith(eventId, holdId,
+                guard.release(kind(), hold -> releaseInRedis(hold, reason))));
     }
 
     /**
@@ -133,7 +150,7 @@ class RedisFirstInventoryStrategy implements InventoryStrategy {
         catchUp.catchUp(eventId, holdId);
         // Steps 1 and 2: pin under the row lock, then the Postgres sale, in one transaction.
         SellOutcome outcome = loadingOutsideTheLock(eventId,
-                () -> closing.sellWith(eventId, holdId, orderId, this::pinInRedis));
+                () -> closing.sellWith(eventId, holdId, orderId, guard.sell(kind(), this::pinInRedis)));
         if (outcome instanceof SellOutcome.Sold) {
             afterPostgresSale.run();
             finishInRedis(eventId, holdId, orderId);   // step 3, after the commit

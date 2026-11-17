@@ -43,6 +43,12 @@ public enum ErrorCode {
     /** No order with this id belongs to the caller; someone else's order looks the same (M1.5). */
     ORDER_NOT_FOUND(HttpStatus.NOT_FOUND, "Order not found"),
     /**
+     * An admin's strategy switch was refused; nothing changed. Body: {@code reason} (ON_SALE, EVENT_ENDED,
+     * LIVE_HOLDS, LIVE_REDIS_HOLDS, UNAPPLIED_STREAM_ENTRIES, SWITCH_IN_PROGRESS) and {@code strategy},
+     * the event's unchanged strategy (M2.3a, D-023).
+     */
+    STRATEGY_SWITCH_REFUSED(HttpStatus.CONFLICT, "Strategy switch refused"),
+    /**
      * Any other client error the framework rejects (e.g. 406). The response keeps the framework's
      * status; {@link #status()} is only a nominal default.
      */

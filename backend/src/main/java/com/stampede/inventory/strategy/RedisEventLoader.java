@@ -59,6 +59,10 @@ class RedisEventLoader {
     /**
      * Loads the event unless Redis has it already. Safe to call from many threads and instances at once:
      * the script checks and writes in one atomic step, so only the first load writes.
+     * <p>
+     * Loads nothing for an event that is not REDIS_FIRST in the snapshot, nor while the event's closed
+     * gate is set (M2.3a, D-023): a strategy switch is running, or the event switched away. The gate,
+     * checked inside load.lua, also covers a snapshot that saw REDIS_FIRST just before a switch.
      *
      * @return true if this call loaded it
      */
@@ -68,8 +72,12 @@ class RedisEventLoader {
         }
         EventSnapshot snapshot = snapshotTransaction.execute(status -> {
             inSnapshot.run();
-            return snapshot(eventId);
+            return isRedisFirst(eventId) ? snapshot(eventId) : null;
         });
+        if (snapshot == null) {
+            log.debug("Not loading event {} into Redis: it is not REDIS_FIRST", eventId);
+            return false;
+        }
         Load result = store.load(eventId, snapshot);
         if (result instanceof Load.Loaded loaded) {
             log.info("Loaded event {} into Redis: {} seats, {} sold, {} holds restored, {} already expired",
@@ -78,6 +86,15 @@ class RedisEventLoader {
             return true;
         }
         return false;
+    }
+
+    private boolean isRedisFirst(UUID eventId) {
+        return jdbc.sql("SELECT strategy FROM events WHERE id = :eventId")
+                .param("eventId", eventId)
+                .query(String.class)
+                .optional()
+                .map(StrategyKind.REDIS_FIRST.name()::equals)
+                .orElse(false);
     }
 
     /** For tests: observe the transaction the snapshot runs in. */

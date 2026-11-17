@@ -34,6 +34,48 @@ import org.junit.jupiter.api.Test;
  */
 abstract class PostgresLockingContractTest extends InventoryStrategyContractTest {
 
+    // --- the in-transaction re-check (M2.3a, D-023) ------------------------------------------------
+
+    @Test
+    void holdOnAnEventThatLeftItsSaleWindowChangesNothing() {
+        // HoldService checked the window before calling, unlocked; it closed in between.
+        jdbc.sql("UPDATE events SET status = 'PAUSED' WHERE id = ?").param(EVENT_A).update();
+
+        HoldOutcome outcome = strategy.hold(request(UUID.randomUUID(), EVENT_A, SEAT_1));
+
+        assertThat(outcome).isInstanceOf(HoldOutcome.StrategyChanged.class);
+        assertThat(seat(EVENT_A, SEAT_1)).isEqualTo(SeatRow.FRESH);
+        assertThat(jdbc.sql("SELECT count(*) FROM holds").query(Long.class).single()).isZero();
+        assertThat(used(EVENT_A)).isNull();
+    }
+
+    /**
+     * Why the re-check runs after a seat lock: a strategy switch holds every seat lock of the event while
+     * it changes {@code events.strategy}. Here another session plays the switch: it locks SEAT_1, the hold
+     * queues behind it, the "switch" changes the strategy and commits, and the hold, once it gets the
+     * lock, must see the new strategy and write nothing.
+     */
+    @Test
+    void aHoldThatWaitedForASeatLockSeesTheSwitchThatHeldIt() throws Exception {
+        String other = strategy.kind() == StrategyKind.PESSIMISTIC ? "OPTIMISTIC" : "PESSIMISTIC";
+        try (Connection theSwitch = openTransaction()) {
+            exec(theSwitch, "SELECT 1 FROM event_seats WHERE event_id = ? AND seat_id = ? FOR UPDATE", EVENT_A, SEAT_1);
+
+            Future<HoldOutcome> pending = THREADS.submit(
+                    () -> strategy.hold(request(UUID.randomUUID(), EVENT_A, SEAT_1, SEAT_2)));
+            waitUntilOneSessionIsBlockedOnALock();
+
+            exec(theSwitch, "UPDATE events SET strategy = ? WHERE id = ?", other, EVENT_A);
+            theSwitch.commit();
+
+            assertThat(pending.get(10, TimeUnit.SECONDS)).isInstanceOf(HoldOutcome.StrategyChanged.class);
+        }
+        assertThat(seat(EVENT_A, SEAT_1)).isEqualTo(SeatRow.FRESH);
+        assertThat(seat(EVENT_A, SEAT_2)).isEqualTo(SeatRow.FRESH);
+        assertThat(jdbc.sql("SELECT count(*) FROM holds").query(Long.class).single()).isZero();
+        assertThat(used(EVENT_A)).isNull();
+    }
+
     // --- hold -------------------------------------------------------------------------------
 
     @Test

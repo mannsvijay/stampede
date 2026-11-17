@@ -87,17 +87,40 @@ class RedisHoldWriter {
         /** The hold was already over in Redis; its row was written as over (a tombstone). */
         STALE,
         /** Postgres disagreed (a seat sold or held there, or the cap) and won; Redis was repaired. */
-        CONFLICT
+        CONFLICT,
+        /**
+         * The entry's event is no longer REDIS_FIRST (M2.3a, D-023): nothing written. A switch away from
+         * REDIS_FIRST is refused while the event has unapplied entries, so this means a bug or a
+         * hand-edited strategy; it is logged and counted.
+         */
+        NOT_REDIS_FIRST
     }
 
     /** Applies one stream entry. Throws on infrastructure failures; the consumer retries those. */
     Applied apply(StreamEntry entry) {
-        Applied result = switch (entry.type()) {
-            case HELD -> applyHeld(entry.hold());
-            case RELEASED -> applyReleased(entry.hold(), entry.reason());
-        };
+        Applied result;
+        if (!isRedisFirst(entry.hold().eventId())) {
+            log.warn("Inventory stream entry {} {} of hold {}: event {} is no longer REDIS_FIRST; nothing applied",
+                    entry.id(), entry.type(), entry.hold().holdId(), entry.hold().eventId());
+            result = Applied.NOT_REDIS_FIRST;
+        } else {
+            result = switch (entry.type()) {
+                case HELD -> applyHeld(entry.hold());
+                case RELEASED -> applyReleased(entry.hold(), entry.reason());
+            };
+        }
         metrics.applied(entry.type(), result);
         return result;
+    }
+
+    /** The consumer guard's read (M2.3a): one primary-key lookup per entry, no lock. */
+    private boolean isRedisFirst(UUID eventId) {
+        return jdbc.sql("SELECT strategy FROM events WHERE id = :eventId")
+                .param("eventId", eventId)
+                .query(String.class)
+                .optional()
+                .map(StrategyKind.REDIS_FIRST.name()::equals)
+                .orElse(false);
     }
 
     /**
@@ -159,6 +182,9 @@ class RedisHoldWriter {
                 }
                 case ReleaseOutcome.NotExpired notExpired ->
                         throw new IllegalStateException("A " + reason + " close returned NotExpired");
+                // closeAsRedisDecided has no strategy re-check; the consumer guard in apply() is the check here.
+                case ReleaseOutcome.StrategyChanged changed ->
+                        throw new IllegalStateException("A " + reason + " close returned StrategyChanged");
             }
         }
         throw new IllegalStateException("Hold " + hold.holdId() + " kept changing while applying its release");
@@ -201,25 +227,33 @@ class RedisHoldWriter {
      * pinned it has committed (then the row is CONVERTED and nothing happens) or rolled back.
      */
     ReleaseOutcome expire(UUID eventId, UUID holdId) {
-        return closing.closeWith(eventId, holdId, hold -> {
-            // Read the load epoch before asking Redis: if Redis is wiped and reloaded between that read
-            // and the GONE below, "Redis doesn't have it" means nothing (the reload may have restored it).
-            Optional<String> epoch = store.loadEpoch(eventId);
-            if (epoch.isEmpty()) {
-                // Not loaded: Redis having nothing means nothing. The loader decides (D-022).
-                return new HoldClosing.CloseDecision.Keep(new ReleaseOutcome.NotExpired(hold.expiresAt()));
-            }
-            return switch (store.release(eventId, holdId, ReleaseReason.EXPIRED)) {
-                case RedisHoldStore.Release.NotExpired notExpired ->
-                        new HoldClosing.CloseDecision.Keep(new ReleaseOutcome.NotExpired(notExpired.expiresAt()));
-                // A pinned hold whose sale never finished, past its expiry.
-                case RedisHoldStore.Release.Released released ->
-                        new HoldClosing.CloseDecision.Close(ReleaseReason.EXPIRED, false);
-                case RedisHoldStore.Release.Gone gone -> !epoch.equals(store.loadEpoch(eventId))
-                        ? new HoldClosing.CloseDecision.Keep(new ReleaseOutcome.NotExpired(hold.expiresAt()))
-                        : new HoldClosing.CloseDecision.Close(reasonForGoneHold(hold.expiresAt()), false);
-            };
-        });
+        return closing.closeWith(eventId, holdId, this::expireDecision);
+    }
+
+    /**
+     * The decision of {@link #expire}, under the hold row lock. Separate so the strategy can put its
+     * strategy re-check in front of it (M2.3a) before any Lua runs.
+     */
+    HoldClosing.CloseDecision expireDecision(HoldClosing.LockedHold hold) {
+        UUID eventId = hold.eventId();
+        UUID holdId = hold.holdId();
+        // Read the load epoch before asking Redis: if Redis is wiped and reloaded between that read
+        // and the GONE below, "Redis doesn't have it" means nothing (the reload may have restored it).
+        Optional<String> epoch = store.loadEpoch(eventId);
+        if (epoch.isEmpty()) {
+            // Not loaded: Redis having nothing means nothing. The loader decides (D-022).
+            return new HoldClosing.CloseDecision.Keep(new ReleaseOutcome.NotExpired(hold.expiresAt()));
+        }
+        return switch (store.release(eventId, holdId, ReleaseReason.EXPIRED)) {
+            case RedisHoldStore.Release.NotExpired notExpired ->
+                    new HoldClosing.CloseDecision.Keep(new ReleaseOutcome.NotExpired(notExpired.expiresAt()));
+            // A pinned hold whose sale never finished, past its expiry.
+            case RedisHoldStore.Release.Released released ->
+                    new HoldClosing.CloseDecision.Close(ReleaseReason.EXPIRED, false);
+            case RedisHoldStore.Release.Gone gone -> !epoch.equals(store.loadEpoch(eventId))
+                    ? new HoldClosing.CloseDecision.Keep(new ReleaseOutcome.NotExpired(hold.expiresAt()))
+                    : new HoldClosing.CloseDecision.Close(reasonForGoneHold(hold.expiresAt()), false);
+        };
     }
 
     /**

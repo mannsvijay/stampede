@@ -59,12 +59,13 @@ class HoldMetrics {
                 .record(nanos, TimeUnit.NANOSECONDS);
     }
 
-    /** held, unknown_seat, seat_taken, limit_exceeded, contended, or error. */
+    /** held, unknown_seat, seat_taken, limit_exceeded, contended, strategy_changed, or error. */
     static String label(HoldOutcome outcome) {
         return switch (outcome) {
             case null -> "error";
             case HoldOutcome.Held held -> "held";
             case HoldOutcome.Rejected rejected -> rejected.reason().name().toLowerCase(Locale.ROOT);
+            case HoldOutcome.StrategyChanged changed -> "strategy_changed";
         };
     }
 }

@@ -8,7 +8,7 @@
 -- restores a hold into a loaded event: a Postgres ACTIVE hold that Redis lacks may have been released
 -- in Redis with its RELEASED entry not applied yet, and restoring it would bring it back to life.
 --
--- KEYS[1] event meta hash     KEYS[2] event seats set
+-- KEYS[1] event meta hash     KEYS[2] event seats set     KEYS[3] the event's closed gate (M2.3a)
 -- ARGV[1] seat key prefix     ARGV[2] user key prefix     ARGV[3] hold key prefix
 -- ARGV[4] per-user limit
 -- Then four counted lists, each starting with its item count:
@@ -17,7 +17,14 @@
 --   sold members: userId, '<holdId>:<seat count>'             (2 values per item)
 --   holds:        holdId, userId, createdMs, expiresMs, 'seat,seat,...', seat count   (6 per item)
 --
--- Replies: {'ALREADY_LOADED'}      {'LOADED', restoredHolds, skippedHolds, loadedMs}
+-- Replies: {'ALREADY_LOADED'}      {'CLOSED'}      {'LOADED', restoredHolds, skippedHolds, loadedMs}
+
+-- While the gate exists the event is being switched, or is no longer REDIS_FIRST: write nothing. This
+-- is what stops a loader whose Postgres snapshot was taken before a switch from loading the event
+-- back into Redis after it (D-023).
+if redis.call('EXISTS', KEYS[3]) == 1 then
+    return {'CLOSED'}
+end
 
 if redis.call('EXISTS', KEYS[1]) == 1 then
     return {'ALREADY_LOADED'}

@@ -73,6 +73,8 @@ class RedisStreamConsumer {
     private static final Logger log = LoggerFactory.getLogger(RedisStreamConsumer.class);
     private static final int DEAD_LETTER_MAX = 10_000;
     private static final int LAG_SCAN_MAX = 10_000;
+    /** Page size of {@link #hasUnappliedEntries}. */
+    static final int SCAN_PAGE = 1000;
 
     private final StringRedisTemplate redis;
     private final RedisKeys keys;
@@ -252,6 +254,73 @@ class RedisStreamConsumer {
         long age = oldest == null ? 0 : Math.max(0, store.nowMillis() - RecordId.of(oldest).getTimestamp());
         metrics.lag(entries, age);
         return new Lag(entries, age);
+    }
+
+    /**
+     * Whether the stream still has an entry of this event that the group hasn't acknowledged: pending
+     * (delivered but not acknowledged) or not delivered yet. With no group yet, every entry counts.
+     * Reads all of them in pages of {@value #SCAN_PAGE}, with no cap: it is for the strategy switch
+     * (M2.3a, D-023), which refuses to switch away from REDIS_FIRST while this is true, not a hot path.
+     */
+    boolean hasUnappliedEntries(UUID eventId) {
+        if (!Boolean.TRUE.equals(redis.hasKey(keys.stream()))) {
+            return false;
+        }
+        String event = eventId.toString();
+        XInfoGroup group = group();
+        if (group == null) {
+            return anyEntryOfEventAfter("0-0", event);
+        }
+        // Pending entries, page by page in id order. XPENDING gives ids only, so each one is read.
+        String after = "0-0";
+        while (true) {
+            String from = after;
+            PendingMessages page = stream().pending(keys.stream(), RedisKeys.GROUP,
+                    Range.rightUnbounded(Range.Bound.inclusive(from)), SCAN_PAGE);
+            List<PendingMessage> fresh = page.stream().filter(m -> !m.getIdAsString().equals(from)).toList();
+            for (PendingMessage message : fresh) {
+                List<MapRecord<String, Object, Object>> found = stream().range(keys.stream(),
+                        Range.closed(message.getIdAsString(), message.getIdAsString()));
+                if (found != null && !found.isEmpty() && isOfEvent(found.get(0), event)) {
+                    return true;
+                }
+            }
+            if (fresh.isEmpty() || page.size() < SCAN_PAGE) {
+                break;
+            }
+            after = fresh.get(fresh.size() - 1).getIdAsString();
+        }
+        // Entries no consumer has been handed yet.
+        return anyEntryOfEventAfter(group.lastDeliveredId(), event);
+    }
+
+    /** Whether an entry after {@code afterId} (exclusive) belongs to the event; pages of {@value #SCAN_PAGE}. */
+    private boolean anyEntryOfEventAfter(String afterId, String event) {
+        String after = afterId;
+        while (true) {
+            String from = after;
+            List<MapRecord<String, Object, Object>> page = stream().range(keys.stream(),
+                    Range.rightUnbounded(Range.Bound.inclusive(from)), Limit.limit().count(SCAN_PAGE));
+            if (page == null) {
+                return false;
+            }
+            List<MapRecord<String, Object, Object>> fresh = page.stream()
+                    .filter(record -> !record.getId().getValue().equals(from))
+                    .toList();
+            for (MapRecord<String, Object, Object> record : fresh) {
+                if (isOfEvent(record, event)) {
+                    return true;
+                }
+            }
+            if (fresh.isEmpty() || page.size() < SCAN_PAGE) {
+                return false;
+            }
+            after = fresh.get(fresh.size() - 1).getId().getValue();
+        }
+    }
+
+    private static boolean isOfEvent(MapRecord<String, Object, Object> record, String event) {
+        return event.equals(String.valueOf(record.getValue().get("event")));
     }
 
     /** Recognises the failures worth waiting out: something is unreachable or slow, not wrong. */

@@ -75,6 +75,46 @@ class RedisFirstInventoryStrategyTest extends InventoryStrategyContractTest {
         TestRedis.deleteKeys(redis, REDIS_PREFIX);
     }
 
+    /** A switch away from REDIS_FIRST closes the event's gate in Redis before it changes Postgres (D-023). */
+    @Override
+    protected void switchUnderneath(UUID eventId) {
+        store.close(eventId);
+        super.switchUnderneath(eventId);
+    }
+
+    // --- the gate and the loader (M2.3a, D-023) ----------------------------------------------------
+
+    @Test
+    void holdOnAnEventNoLongerRedisFirstAndNotLoadedIsStrategyChanged() {
+        // No gate: an event that is simply not REDIS_FIRST (and not in Redis). hold.lua says NOT_LOADED,
+        // the loader refuses the event, and the strategy answers StrategyChanged instead of failing.
+        jdbc.sql("UPDATE events SET strategy = 'PESSIMISTIC' WHERE id = ?").param(EVENT_A).update();
+        assertThat(store.isLoaded(EVENT_A)).isFalse();
+
+        HoldOutcome outcome = strategy.hold(request(UUID.randomUUID(), EVENT_A, SEAT_1));
+
+        assertThat(outcome).isInstanceOf(HoldOutcome.StrategyChanged.class);
+        assertThat(store.isLoaded(EVENT_A)).as("the loader loaded nothing").isFalse();
+        assertThat(jdbc.sql("SELECT count(*) FROM holds").query(Long.class).single()).isZero();
+    }
+
+    @Test
+    void aLoaderWhoseSnapshotPredatesTheGateLoadsNothing() {
+        // The snapshot sees REDIS_FIRST; a switch closes the gate before load.lua runs. Without the gate
+        // check in load.lua the event would be loaded back into Redis after the switch.
+        assertThat(store.isLoaded(EVENT_A)).isFalse();
+        loader.inSnapshot(() -> store.close(EVENT_A));
+        try {
+            assertThat(loader.ensureLoaded(EVENT_A)).isFalse();
+        } finally {
+            loader.inSnapshot(() -> { });
+        }
+        assertThat(store.isLoaded(EVENT_A)).isFalse();
+
+        store.reopen(EVENT_A);
+        assertThat(loader.ensureLoaded(EVENT_A)).as("loads once the gate is gone").isTrue();
+    }
+
     @Test
     void kindIsRedisFirst() {
         assertThat(strategy.kind()).isEqualTo(StrategyKind.REDIS_FIRST);

@@ -619,7 +619,9 @@ Write these yourself, in your own words. Each one is an interview answer you've 
   - **Lock order, for every code path:** (1) the hold row, when the path starts from an existing hold
     (release, expiry, sell); (2) the event seats, in Postgres `seat_id` order, taken by one
     `SELECT … ORDER BY seat_id FOR UPDATE`; (3) the user's allowance row (M1.4). Creating a hold never
-    waits on an existing hold row. The sweeper releases one hold per transaction.
+    waits on an existing hold row. The sweeper releases one hold per transaction. (M2.3a, D-023: the
+    strategy switch takes the event row `FOR NO KEY UPDATE` and then every seat of the event in this
+    order; no other path locks event rows.)
   - Seat UPDATEs add `AND version = :oldVersion`; zero rows updated under the lock is a bug and
     throws. (Measured: with `FOR UPDATE` removed, this check alone turned every double-hold in the race
     tests into a rollback; with both removed, two buyers were told `Held` for the same seat.)
@@ -716,7 +718,10 @@ Write these yourself, in your own words. Each one is an interview answer you've 
 - **Known limits (correctness review, accepted for now):** the sale-window and strategy read is
   unlocked, so a hold can commit just after an admin pauses the event, and once M2.3 lets an event
   change strategy, two requests could briefly use different strategies (re-check inside the
-  strategy transaction then, e.g. in the upsert's SELECT on events). `takenAgoMs` for a SOLD seat
+  strategy transaction then, e.g. in the upsert's SELECT on events). **M2.3a (D-023):** every strategy
+  now re-checks strategy and sale window inside its transaction after its first seat lock
+  (`StrategyChanged`). That makes the strategy switch airtight; the pause race is only narrowed until
+  the M5.5 pause locks the seats too. `takenAgoMs` for a SOLD seat
   is the order's creation time, not the moment it was sold. The `limit` in LIMIT_EXCEEDED comes from
   the unlocked pre-read. I8 treats `used > per_user_limit` as drift, which is wrong if an admin ever
   lowers a limit below existing holds. The in-flight retry (second POST waiting on the first's seat
@@ -1212,6 +1217,7 @@ Write these yourself, in your own words. Each one is an interview answer you've 
     | `p:ev:<event>:seat:<seat>` | string | `H:<holdId>:<createdMs>` while held; `S:<orderId>:<soldMs>` once sold (M2.2c) | with the hold; never when sold |
     | `p:ev:<event>:hold:<hold>` | hash | `user`, `seats`, `n`, `createdMs`, `expiresMs` | with its seats |
     | `p:ev:<event>:user:<user>` | sorted set | member `<holdId>:<seat count>`, score = expiry in ms | with its last member |
+    | `p:ev:<event>:closed` | string | the gate (M2.3a, D-023): while it exists `hold.lua` answers CLOSED and `load.lua` writes nothing | never; deleted when the event switches to REDIS_FIRST |
     | `p:inv:stream` | stream | HELD / RELEASED entries (no SOLD entry: see M2.2c-1) | trimmed after ack (M2.2b) |
 
   - **`hold.lua` checks everything before it writes anything**, in this order: event loaded
@@ -1576,6 +1582,7 @@ Write these yourself, in your own words. Each one is an interview answer you've 
     probe by `RedisHoldStateReaderTest`, which the client timeout can't affect. Cost: a client stall of
     2-10 s in tests no longer fails a round (note on M2.5: report the slowest `hold()` per round). The
     1000-round proof also runs on a Linux runner via the manual workflow `concurrency-proof.yml`.
+    First run (#1, 2026-11-18, user): 1000 rounds, all four groups green in 25m 52s, no Redis timeout.
 - **Why:**
   - Redis runs commands on one thread and a whole script as one command, so nothing can happen
     between a script's checks and its writes: that is the entire locking story of this strategy.
@@ -1670,3 +1677,107 @@ Write these yourself, in your own words. Each one is an interview answer you've 
   the catch-up before checkout dominates); buyers report holds that vanished without a Redis crash;
   or the seat map's staleness shows up as repeated SEAT_TAKEN on seats that look free (then read
   Redis for REDIS_FIRST events).
+
+### D-023 Strategy switch per event: only while nothing is live (DRAFT)
+- **Date:** 2026-11-18
+- **Context:** M2.3 makes an event's inventory strategy selectable by an admin (PRD OP2,
+  `POST /admin/events/{id}/strategy`), for benchmarking. Release, sell and the expiry sweeper pick the
+  strategy from the event's *current* `events.strategy`, not from whichever strategy created a hold, so
+  after a switch the new strategy acts on every existing hold. That is safe only if, at the moment of the
+  switch, nothing is live that the new strategy can't see: a REDIS_FIRST hold only Redis has, an
+  unapplied stream entry, or a hold that a request in flight commits just after the switch (the strategy
+  and the sale window are read unlocked before the strategy runs: D-016's known limit). Also, `load.lua`
+  writes nothing into an event whose meta exists, so Redis keys left from an earlier REDIS_FIRST period
+  would be kept as if they were current.
+- **Options considered:**
+  - When a switch is allowed: (A) only while the event takes no holds and nothing is live, otherwise
+    409; (B) the same window, with live holds carried over (Postgres to Redis by the loader; Redis to
+    Postgres by a drain that persists every Redis hold and closes what Redis no longer has); (C) any
+    time, the switch itself pausing and draining for a few milliseconds.
+  - Redis keys after switching away from REDIS_FIRST: (a) delete at once; (b) keep them, inert;
+    (c) let them expire after a TTL.
+- **Decision:** A and a (decided by the user, 2026-11-18). Switching is a non-production benchmarking
+  feature done between runs on a reset event, and B's live drain-and-carry adds exactly the kind of
+  Redis/Postgres race surface that M2.2 showed is costly.
+  - **Allowed when** the event is not ENDED, takes no holds (before its drop, or DRAFT, PAUSED or
+    SOLD_OUT: the same rule as `HoldService`), has no ACTIVE hold in Postgres and, when switching away
+    from REDIS_FIRST, no hold hash in Redis and no unapplied stream entry of the event (pending or not yet
+    delivered). Otherwise **409 `STRATEGY_SWITCH_REFUSED`** with `reason` (ON_SALE, EVENT_ENDED,
+    LIVE_HOLDS, LIVE_REDIS_HOLDS, UNAPPLIED_STREAM_ENTRIES, SWITCH_IN_PROGRESS) and the unchanged
+    `strategy`. The same strategy again is 200 with `changed: false` and no audit row.
+  - **Protocol** (`inventory.strategy.StrategySwitcher`, behind `inventory.api.StrategySwitch`):
+    1. A **per-event advisory lock** (`pg_try_advisory_xact_lock(hashtextextended(...))` on a key derived
+       from the event id) on a connection of its own, held for the whole switch; busy = SWITCH_IN_PROGRESS.
+    2. From REDIS_FIRST: set the **closed gate** `p:ev:<event>:closed`. `hold.lua` checks it first
+       (CLOSED) and `load.lua` writes nothing while it exists. Redis runs one command at a time, so every
+       hold either ran before the gate (its hash and entry exist, and step 4 sees them) or is refused.
+    3. One transaction: the event row `FOR NO KEY UPDATE`, then **every seat of the event** `ORDER BY
+       seat_id FOR UPDATE` (D-015's order).
+    4. The checks above, under those locks. To REDIS_FIRST: delete the event's leftover keys (all but
+       the gate). `UPDATE events`, then the audit row through the caller's `AuditWriter`, then commit.
+    5. After the commit: from REDIS_FIRST, delete every key of the event except the gate; to REDIS_FIRST,
+       remove the gate and load the event. A failure here is logged, not thrown (the switch stands), and
+       repeating the request finishes it. A refusal or failure before the commit removes the gate again.
+  - **In-transaction re-check** in every strategy (`StrategyGuard`): the outcome `StrategyChanged` for
+    hold, release and sell, with nothing written:
+    - Pessimistic hold: after its seat locks, `strategy = own AND on sale`. Optimistic hold: after its
+      seat UPDATEs (which lock the rows), the same check, then a rollback. Release and sell (all three
+      strategies): the strategy, once the hold row is locked and before anything is written (for
+      Redis-first, before any Lua runs). Redis-first hold: the gate (CLOSED), or the loader refusing an
+      event that isn't REDIS_FIRST in its snapshot.
+    - `HoldService` re-reads the event and retries once on the current strategy. Twice in a row is
+      SALE_NOT_OPEN for a hold (a switch needs the event off sale) and an IllegalStateException for an
+      existing hold (a switch needs no ACTIVE hold). The sweeper skips the hold until its next tick.
+  - **Consumer guard:** an entry whose event is no longer REDIS_FIRST is acknowledged with nothing
+    written (WARN, `stampede.inventory.redis.applied{result=not_redis_first}`). After a switch there are
+    none (step 4 refuses while entries are unapplied); the guard covers a hand-edited strategy.
+  - **Audit:** control owns `audit_log` (D-007), inventory owns `events`. Inventory calls the caller's
+    `AuditWriter` inside the switch's transaction, so the row (actor = the admin's user id, action
+    `event.strategy_changed`, entity `event:<id>`, before/after `{"strategy": ...}`) commits or rolls back
+    with the switch. Inventory never depends on control.
+  - **Endpoint:** `control.admin.AdminEventController`, ADMIN only through SecurityConfig's existing
+    `/admin/**` rule (401 / 403 before the controller runs). The request is `{"strategy": ...}` with an
+    enum (`inventory.api.EventStrategy`, kept equal to `StrategyKind` by a test).
+- **Why:**
+  - Option A needs no hold to move between strategies, so nothing has to be carried, drained or
+    reconciled during a switch. The price is that a switch needs the event off sale and every hold
+    ended, which is how a benchmark run is set up anyway.
+  - The seat locks make the switch and a hold in flight take turns. A Postgres hold holding a seat lock
+    makes the switch wait and is then counted as live (409); one that comes later waits for the switch
+    and fails its re-check. The re-check is one unlocked primary-key read inside the strategy's
+    transaction, so D-015's lock order is unchanged. The switch adds "event row before seats", and no
+    other path locks event rows.
+  - **`FOR NO KEY UPDATE`, not `FOR UPDATE`:** inserting a hold row checks its foreign key with a
+    `FOR KEY SHARE` lock on the event row, which `FOR UPDATE` blocks. A hold holding a seat lock and
+    inserting its row would wait for the switch while the switch waits for its seat: a deadlock (tested
+    in `StrategySwitcherTest`). `NO KEY UPDATE` is what an UPDATE of a non-key column takes anyway, and
+    it doesn't conflict with `KEY SHARE`.
+  - The gate is kept after switching away (the only key not deleted), because a loader whose Postgres
+    snapshot was taken just before the switch would otherwise load the event back into Redis afterwards.
+    This is a small departure from decision 2a ("delete the keys at once"), accepted by the user on
+    2026-11-18: one inert key per event that has left REDIS_FIRST, deleted when it switches back.
+  - The advisory lock lives on its own connection inside a transaction, so it ends with that transaction
+    (or the connection) and can't outlive the switch on a pooled connection.
+- **Possible future upgrade: option B** (live holds carried over). The same locks, gate and re-check
+  apply. It adds, when switching away from REDIS_FIRST, a drain under the gate (R1's roll-forward without
+  the minimum age for every Redis hold, R2's close for every Postgres ACTIVE hold Redis no longer has)
+  and, when switching to it, an eager load that restores the ACTIVE holds. The hold rows would need
+  locking too (between a release's or sale's hold-row lock and its seat locks). Only worth it if
+  benchmarks ever need to switch during a sale.
+- **Known limits:**
+  - **D-016's pause race is narrowed, not closed, for a pause on its own.** The re-check reads the
+    window after the strategy's first seat lock, but a pause that commits between that read and the
+    hold's commit still lets the hold through. The switch is airtight because it also takes every seat
+    lock and counts holds under them. The M5.5 pause endpoint must do the same (lock the event's seats,
+    and for REDIS_FIRST close a gate) to close the race. Redis-first holds have no sale-window check in
+    Redis at all; only the gate stops them.
+  - Each Postgres-strategy hold, release and sell pays one more primary-key read (the re-check), and
+    each consumer entry one (the guard). Measured in M2.5 like everything else.
+  - A switch locks every seat of the event for one transaction (milliseconds on 2,000 seats). It is
+    only allowed off sale, so no buyer waits on it.
+  - If the process dies between the commit and step 5, the event's Redis state is incomplete until the
+    request is repeated. To REDIS_FIRST, the gate stays closed and every hold gets StrategyChanged, then
+    SALE_NOT_OPEN; the same request removes the gate.
+- **How I'd know it was wrong:** a benchmark needs to switch during a sale (then B); the re-check shows
+  up in the M2.5 latency numbers; `not_redis_first` is ever counted at runtime; an invariant (I10 in
+  particular) fires right after a switch; or 40P01 deadlocks appear in a run that switches strategies.

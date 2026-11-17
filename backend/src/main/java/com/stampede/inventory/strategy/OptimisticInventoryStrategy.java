@@ -52,15 +52,17 @@ class OptimisticInventoryStrategy implements InventoryStrategy {
     private final HoldMetrics metrics;
     private final OptimisticRetryProperties retry;
     private final TransactionTemplate transactions;
+    private final StrategyGuard guard;
 
     OptimisticInventoryStrategy(JdbcClient jdbc, SeatRows seats, HoldClosing closing, HoldMetrics metrics,
-            OptimisticRetryProperties retry, PlatformTransactionManager transactionManager) {
+            OptimisticRetryProperties retry, PlatformTransactionManager transactionManager, StrategyGuard guard) {
         this.jdbc = jdbc;
         this.seats = seats;
         this.closing = closing;
         this.metrics = metrics;
         this.retry = retry;
         this.transactions = new TransactionTemplate(transactionManager);
+        this.guard = guard;
     }
 
     @Override
@@ -155,6 +157,15 @@ class OptimisticInventoryStrategy implements InventoryStrategy {
             }
         }
 
+        // Step O5b (M2.3a, D-023): this try now holds its seats' row locks (taken by the UPDATEs), so
+        // re-check the event's strategy and sale window, which the caller read unlocked. A strategy
+        // switch locks every seat of the event: if it got there first, the UPDATEs above waited for its
+        // commit and this read sees it. Undo the writes and answer; no retry, the strategy is not ours.
+        if (!guard.takesHolds(request.eventId(), kind())) {
+            transaction.setRollbackOnly();
+            return new HoldOutcome.StrategyChanged();
+        }
+
         // Step O6: the per-user cap, after the seats (the allowance row is last in the lock order,
         // D-015). Over the limit: undo the hold row and seat writes, and answer LIMIT_EXCEEDED.
         if (!seats.addToAllowance(request)) {
@@ -165,14 +176,16 @@ class OptimisticInventoryStrategy implements InventoryStrategy {
         return new Held(request.holdId(), request.seatIds(), expiresAt);
     }
 
+    /** Re-checks the strategy once the hold row is locked (M2.3a), then decides by the database clock. */
     @Override
     public ReleaseOutcome release(UUID eventId, UUID holdId, ReleaseReason reason) {
-        return closing.release(eventId, holdId, reason);
+        return closing.closeWith(eventId, holdId, guard.release(kind(), HoldClosing.byDatabaseClock(reason)));
     }
 
+    /** Re-checks the strategy once the hold row is locked (M2.3a), then decides by the database clock. */
     @Override
     public SellOutcome sell(UUID eventId, UUID holdId, UUID orderId) {
-        return closing.sell(eventId, holdId, orderId);
+        return closing.sellWith(eventId, holdId, orderId, guard.sell(kind(), HoldClosing::sellableByDatabaseClock));
     }
 
     /**

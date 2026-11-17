@@ -1279,3 +1279,49 @@ Redis command median 34.9-39.1 ms -> 1.0-1.1 ms (max 48.9 -> 1.2 ms); PING p99 d
 - A client stall of 2-10 s in tests no longer fails a round (accepted cost; M2.5 note).
 - The redis-races timing in CLAUDE.md (~40+ min) is from the 36m 42s run before the checker thread, not
   re-measured.
+
+## 2026-11-18 - M2.3a strategy switch per event (session end)
+
+**Task**: M2.3a (D-023), the first half of M2.3. Decisions (user): 1A, a switch only while the event takes
+no holds and nothing is live, otherwise 409 with the reason (B recorded as a possible upgrade); 2a, the
+event's Redis keys deleted after switching away from REDIS_FIRST, and leftovers cleared before switching to it.
+
+**Changed**
+- `POST /admin/events/{id}/strategy` (`control.admin.AdminEventController`, ADMIN via the existing
+  `/admin/**` rule): 200 `{eventId, strategy, previous, changed}`; 400, 404; 409 `STRATEGY_SWITCH_REFUSED`
+  with `reason` (ON_SALE, EVENT_ENDED, LIVE_HOLDS, LIVE_REDIS_HOLDS, UNAPPLIED_STREAM_ENTRIES,
+  SWITCH_IN_PROGRESS). One audit_log row per switch (`control.admin.AuditLog`), written in the switch's
+  transaction through `inventory.api.StrategySwitch.AuditWriter`.
+- `inventory.strategy.StrategySwitcher`: per-event advisory lock on its own connection; Redis closed gate
+  (`p:ev:<event>:closed`) when switching away from REDIS_FIRST; event row `FOR NO KEY UPDATE`, then every
+  seat `ORDER BY seat_id FOR UPDATE`; checks; leftover keys deleted before switching to REDIS_FIRST; after
+  the commit, keys deleted (gate kept) or gate removed and the event loaded.
+- `StrategyGuard`: in-transaction re-check in all three strategies, and the new outcome `StrategyChanged`
+  for hold, release and sell. `HoldService` retries once. `hold.lua`/`load.lua` check the gate; the loader
+  refuses non-REDIS_FIRST events; the consumer guard (`Applied.NOT_REDIS_FIRST`).
+- Tests: `StrategySwitcherTest` (14), `AdminStrategyApiTest` (9), `EventStrategyNamesTest`, contract tests
+  +3 per strategy, +2 per Postgres strategy, +2 Redis-first, `OpenApiSpecTest` (path list, admin
+  responses). Contract fixture: events now use the strategy under test.
+- Docs: D-023 (with the closed gate outliving a switch away, accepted); notes on D-015, D-016, D-022; PRD
+  10 (endpoint, error code); `docs/openapi.json` and `frontend/src/api/schema.d.ts` regenerated; PLAN.md
+  (M2.3 split, M2.3a done, M2.3b, M5.5 pause note, M2.2d open problem resolved).
+- Found while designing: `FOR UPDATE` on the event row would deadlock with a hold inserting its row (the
+  foreign key check takes `FOR KEY SHARE`); `FOR NO KEY UPDATE` instead, with a test.
+
+**Verified**
+- Claude (--rerun): switcher and the three strategies' contract tests, 157 tests, BUILD SUCCESSFUL in 4m 3s;
+  `AdminStrategyApiTest` 9 + `StrategySwitcherTest` 14 + `EventStrategyNamesTest` 1, BUILD SUCCESSFUL in
+  1m 21s; frontend `check:api` and `typecheck` clean. The targeted run was stopped by Claude Code for low
+  memory before writing results.
+- User (2026-11-18; Claude reran nothing at session end): full suite BUILD SUCCESSFUL in 24m 9s.
+  Concurrency proof workflow run #1 (1000 rounds, all four groups) green in 25m 52s, closing the M2.2d
+  open problem about the laptop Redis timeouts.
+
+**Next**: M2.3b (harness parameterised over all three strategies; `-Dstampede.harness.strategies` for
+the workflow's jobs).
+
+**Open problems**
+- D-016's pause race is only narrowed: the M5.5 pause must lock the event's seats and close the Redis
+  gate (noted on M5.5). Redis-first holds have no sale-window check in Redis.
+- The re-check and the consumer guard each add one primary-key read; M2.5 measures them.
+- D-023 is a draft for you to rewrite in your own words.

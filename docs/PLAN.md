@@ -602,6 +602,10 @@ end against the compose stack, and every concurrency harness scenario passed 100
         (16-18 checks per round in the two 100-round runs), so it adds load of its own. Whether that contributed is unknown. Next
         step if it recurs: rerun the 1000 rounds on an idle machine, and on a timeout capture Redis
         SLOWLOG/LATENCY and the client's connection state at that moment.
+        **Resolved 2026-11-18** (next item): tests use a 10 s Redis command timeout (production stays 2 s),
+        and the 1000-round proof runs on a Linux runner. First run of `concurrency-proof.yml` (#1, 1000
+        rounds, all four groups including redis-races) passed in 25m 52s with no Redis timeout. The laptop
+        stalls remain unexplained, but they no longer decide whether the proof passes.
   - [x] Test Redis timeout and the 1000-round proof on CI (2026-11-17, small task before M2.3; D-022
         "Test Redis timeout"). For the open problem above. Approved: `spring.data.redis.timeout=10s` in
         the test properties only (production stays 2 s; consumer block stays under the 1.9 s guard);
@@ -610,9 +614,48 @@ end against the compose stack, and every concurrency harness scenario passed 100
         redis-races; concurrency reports uploaded as artifacts). CLAUDE.md harness line updated.
         Done 2026-11-17. Claude: `RedisTimeoutSettingsTest` 3 tests, 0 failures, BUILD SUCCESSFUL in 59s;
         actionlint on `ci.yml` and `concurrency-proof.yml`: 0 errors. Verified by the user: full suite
-        BUILD SUCCESSFUL in 22m 23s. Not yet run: the workflow itself (needs a push, then "Run workflow");
-        its first 1000-round result, especially redis-races, closes the M2.2d open problem.
+        BUILD SUCCESSFUL in 22m 23s.
+        Workflow verified by the user (2026-11-18): Concurrency proof run #1, 1000 rounds, all four groups
+        (pessimistic, optimistic, redis-first, redis-races) green, 25m 52s. This closes the M2.2d open
+        problem about the laptop timeouts.
 - [ ] M2.3 Strategy selectable per event (admin endpoint); concurrency test parameterised over all three
+      Split (approved 2026-11-18) into M2.3a (switch, re-check, endpoint, audit) and M2.3b (harness).
+      Decisions (user, 2026-11-18; D-023): 1A, a switch only while the event takes no holds and nothing
+      is live in Postgres or Redis, otherwise 409 with the reason (B, live holds carried over, recorded
+      in D-023 as a possible upgrade); 2a, the event's Redis keys deleted right after switching away from
+      REDIS_FIRST, and switching to REDIS_FIRST always clears leftovers first. Kept from the proposed
+      protocol: per-event advisory lock (409 on a concurrent switch), the in-transaction re-check of
+      strategy and sale window in every strategy (StrategyChanged), the Redis closed gate, the consumer
+      guard, the audit row in the same commit through an AuditWriter callback.
+  - [x] M2.3a Strategy switch (D-023): `POST /admin/events/{id}/strategy` (ADMIN, `control.admin`),
+        `inventory.api.StrategySwitch` implemented by `StrategySwitcher` (advisory lock, gate, event row
+        `FOR NO KEY UPDATE` + every seat `FOR UPDATE`, checks, audit, after-commit Redis clean-up);
+        `StrategyGuard` re-check in all three strategies (hold after the first seat lock; release and sell
+        after the hold-row lock, before any Lua); `HoldOutcome`/`ReleaseOutcome`/`SellOutcome.StrategyChanged`
+        with one retry in `HoldService`; `p:ev:<event>:closed` checked by `hold.lua` and `load.lua`; the
+        loader refuses non-REDIS_FIRST events; the consumer guard (`Applied.NOT_REDIS_FIRST`); new error
+        code `STRATEGY_SWITCH_REFUSED` (PRD 10, openapi.json, frontend client regenerated).
+        Tests: `StrategySwitcherTest` (14: all six directions in one cycle with strict invariants and I10,
+        every refusal, stale meta, concurrent switch, the FOR NO KEY UPDATE deadlock case, consumer
+        guard); contract tests +3 per strategy (hold, release incl. EXPIRED, sell after a switch), +2 per
+        Postgres strategy (sale window; a hold that waited on a seat lock sees the switch), +2 Redis-first
+        (loader refuses a non-REDIS_FIRST event; a loader snapshot older than the gate loads nothing);
+        `AdminStrategyApiTest` (9: 401, 403, 200 with the exact audit row, unchanged, 400, 404, 409 on sale
+        and live holds, audit failure rolls the switch back); `EventStrategyNamesTest`;
+        `OpenApiSpecTest` (path list, admin responses). Fixture change: the contract tests' events now use
+        the strategy under test (the re-check refuses an event that isn't the strategy's own).
+        Note for M2.5: the re-check adds one primary-key read per Postgres-strategy hold, release and sell,
+        and the consumer guard one per entry; measure them with the rest.
+        Done 2026-11-18. Claude (focused runs, --rerun): the switcher and the three strategies' contract
+        tests, 157 tests, BUILD SUCCESSFUL in 4m 3s; `AdminStrategyApiTest` 9, `StrategySwitcherTest` 14,
+        `EventStrategyNamesTest` 1, BUILD SUCCESSFUL in 1m 21s; frontend `check:api` and `typecheck` clean.
+        The targeted run (CLAUDE.md rule) was stopped by Claude Code for low memory before it wrote
+        results. Verified by the user (2026-11-18): full suite BUILD SUCCESSFUL in 24m 9s, covering the
+        targeted set. Accepted by the user: the closed gate outlives a switch away from REDIS_FIRST (D-023).
+        No new dependency. API change: the new endpoint and error code (openapi.json, frontend client).
+  - [ ] M2.3b Harness parameterised over all three strategies (one class per harness, `@ParameterizedTest`
+        over the strategy, one context with the Redis beans; `-Dstampede.harness.strategies` so
+        concurrency-proof.yml keeps a job per strategy).
       Note (from M1.7, D-019): if an admin endpoint ever changes `per_user_limit`, it must refuse
       (409) a limit below any user's current `used`, checked under the allowance row locks; I8
       treats `used > limit` as a violation.
@@ -705,6 +748,10 @@ end against the compose stack, and every concurrency harness scenario passed 100
 - [ ] M5.3 Seat map v2: pan/zoom, semantic zoom, "Taken N ms ago", keyboard navigation
 - [ ] M5.4 Hold timer bar + tab-title countdown; waiting room screen (simple version first)
 - [ ] M5.5 Control room: queue depth, admission rate, holds/s, p95, errors, invariant lights, pause
+      Note (from M2.3a, D-023): the pause must take every seat lock of the event (event row
+      `FOR NO KEY UPDATE`, then seats `ORDER BY seat_id FOR UPDATE`, as the strategy switch does) and, for
+      a REDIS_FIRST event, close its Redis gate; only then is D-016's pause race closed. The strategies'
+      in-transaction re-check alone narrows it but doesn't close it.
       Note (from M1.7, D-019): the invariant lights read `InvariantChecker` (graced) or the gauge
       `stampede.invariants.violations{rule}` from `InvariantMonitor`. `/actuator/metrics` isn't
       exposed yet; expose it ADMIN-only or add an admin endpoint.

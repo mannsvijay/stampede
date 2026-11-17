@@ -42,4 +42,12 @@ public sealed interface HoldOutcome {
             this(reason, seatIds, null);
         }
     }
+
+    /**
+     * Nothing changed: inside its own transaction (or, for Redis-first, in Redis) the strategy found that
+     * the event no longer takes holds through it. Its strategy was switched, or its sale window closed,
+     * after the caller read them (M2.3a, D-023). The caller reads the event again and decides.
+     */
+    record StrategyChanged() implements HoldOutcome {
+    }
 }

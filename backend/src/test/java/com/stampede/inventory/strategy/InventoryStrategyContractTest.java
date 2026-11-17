@@ -155,12 +155,17 @@ abstract class InventoryStrategyContractTest {
         insertEvent(EVENT_B, TIER_B, SEAT_B);
     }
 
+    /**
+     * The event uses the strategy under test: every strategy re-checks {@code events.strategy} inside its
+     * transaction and refuses an event that isn't its own (M2.3a, D-023), as production never calls it
+     * for one.
+     */
     protected void insertEvent(UUID event, UUID tier, UUID... seats) {
         jdbc.sql("""
                 INSERT INTO events (id, venue_id, title, starts_at, drop_at, status, per_user_limit, strategy)
                 VALUES (?, ?, 'Test event', now() + interval '30 days', now() - interval '1 hour',
-                        'LIVE', 4, 'PESSIMISTIC')
-                """).params(event, VENUE).update();
+                        'LIVE', 4, ?)
+                """).params(event, VENUE, strategyUnderTest().kind().name()).update();
         jdbc.sql("INSERT INTO price_tiers (id, event_id, name, price_paise) VALUES (?, ?, 'GOLD', 150000)")
                 .params(tier, event).update();
         for (UUID seat : seats) {
@@ -297,6 +302,66 @@ abstract class InventoryStrategyContractTest {
         UUID winner = winners.get(0).holdId();
         assertThat(seat(EVENT_A, SEAT_1)).isEqualTo(new SeatRow(SeatStatus.HELD, winner, null, 1));
         assertThat(jdbc.sql("SELECT count(*) FROM holds").query(Long.class).single()).isEqualTo(1);
+    }
+
+    // --- the in-transaction strategy re-check (M2.3a, D-023) --------------------------------------
+
+    @Test
+    void holdOnAnEventSwitchedToAnotherStrategyChangesNothing() {
+        switchUnderneath(EVENT_A);
+
+        HoldOutcome outcome = strategy.hold(request(UUID.randomUUID(), EVENT_A, SEAT_1, SEAT_2));
+
+        assertThat(outcome).isInstanceOf(HoldOutcome.StrategyChanged.class);
+        assertThat(seat(EVENT_A, SEAT_1)).isEqualTo(SeatRow.FRESH);
+        assertThat(seat(EVENT_A, SEAT_2)).isEqualTo(SeatRow.FRESH);
+        assertThat(jdbc.sql("SELECT count(*) FROM holds").query(Long.class).single()).isZero();
+        assertThat(used(EVENT_A)).as("no allowance written").isNull();
+    }
+
+    @Test
+    void releaseOfAHoldWhoseEventSwitchedChangesNothing() {
+        UUID holdId = UUID.randomUUID();
+        assertThat(strategy.hold(request(holdId, EVENT_A, SEAT_1))).isInstanceOf(Held.class);
+        switchUnderneath(EVENT_A);
+
+        assertThat(strategy.release(EVENT_A, holdId, ReleaseReason.RELEASED))
+                .isInstanceOf(ReleaseOutcome.StrategyChanged.class);
+        assertThat(strategy.release(EVENT_A, holdId, ReleaseReason.SAGA_FAILED))
+                .isInstanceOf(ReleaseOutcome.StrategyChanged.class);
+        assertThat(strategy.release(EVENT_A, holdId, ReleaseReason.EXPIRED))
+                .as("the sweeper's release is re-checked too")
+                .isInstanceOf(ReleaseOutcome.StrategyChanged.class);
+
+        assertThat(hold(holdId).orElseThrow().status()).isEqualTo("ACTIVE");
+        assertThat(seat(EVENT_A, SEAT_1)).isEqualTo(new SeatRow(SeatStatus.HELD, holdId, null, 1));
+        assertThat(used(EVENT_A)).isEqualTo(1);
+    }
+
+    @Test
+    @ExpectInvariantViolations(rules = {"O7"},
+            reason = "The refused sale leaves the bare PENDING order this strategy unit test inserted; step 4 is booking's and never runs")
+    void sellOfAHoldWhoseEventSwitchedChangesNothing() {
+        UUID holdId = UUID.randomUUID();
+        assertThat(strategy.hold(request(holdId, EVENT_A, SEAT_1, SEAT_2))).isInstanceOf(Held.class);
+        UUID orderId = pendingOrder(holdId, EVENT_A);
+        switchUnderneath(EVENT_A);
+
+        assertThat(strategy.sell(EVENT_A, holdId, orderId)).isInstanceOf(SellOutcome.StrategyChanged.class);
+
+        assertThat(hold(holdId).orElseThrow().status()).isEqualTo("ACTIVE");
+        assertThat(seat(EVENT_A, SEAT_1)).isEqualTo(new SeatRow(SeatStatus.HELD, holdId, null, 1));
+        assertThat(seat(EVENT_A, SEAT_2)).isEqualTo(new SeatRow(SeatStatus.HELD, holdId, null, 1));
+    }
+
+    /**
+     * Puts the event in the state a strategy switch leaves it in, behind the strategy's back: another
+     * strategy in {@code events.strategy}. Redis-first overrides it to also close the event's gate in
+     * Redis, which is how its hold path learns about a switch (it has no Postgres transaction).
+     */
+    protected void switchUnderneath(UUID eventId) {
+        String other = strategyUnderTest().kind() == StrategyKind.PESSIMISTIC ? "OPTIMISTIC" : "PESSIMISTIC";
+        jdbc.sql("UPDATE events SET strategy = ? WHERE id = ?").params(other, eventId).update();
     }
 
     // --- helpers ---------------------------------------------------------------------------------

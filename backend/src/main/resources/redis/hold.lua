@@ -5,13 +5,13 @@
 -- so every check comes before the first write.
 --
 -- KEYS[1] event meta hash     KEYS[2] event seats set     KEYS[3] the user's holds (sorted set)
--- KEYS[4] the hold hash       KEYS[5] the inventory stream
+-- KEYS[4] the hold hash       KEYS[5] the inventory stream      KEYS[6] the event's closed gate
 -- ARGV[1] seat key prefix (seat key = prefix .. seatId)
 -- ARGV[2] holdId   ARGV[3] userId   ARGV[4] eventId   ARGV[5] hold duration in ms
 -- ARGV[6..] seat ids
 --
 -- Replies (arrays of strings):
---   {'HELD', expiresMs, createdMs}      {'NOT_LOADED'}      {'DUPLICATE_HOLD'}
+--   {'HELD', expiresMs, createdMs}      {'NOT_LOADED'}      {'DUPLICATE_HOLD'}      {'CLOSED'}
 --   {'UNKNOWN_SEAT', seatId...}         {'SEAT_TAKEN', takenAgoMs, seatId...}      {'LIMIT_EXCEEDED', limit}
 
 local seatPrefix = ARGV[1]
@@ -19,6 +19,13 @@ local holdId = ARGV[2]
 local userId = ARGV[3]
 local eventId = ARGV[4]
 local holdForMs = tonumber(ARGV[5])
+
+-- 0. The event's strategy is being switched, or it no longer is REDIS_FIRST (M2.3a, D-023). Checked
+--    first: a hold that runs after the switch set this gate is refused, and one that ran before it has
+--    already written its hash and stream entry, which the switch then sees.
+if redis.call('EXISTS', KEYS[6]) == 1 then
+    return {'CLOSED'}
+end
 
 -- 1. The event must have been loaded from Postgres (its seat list and per-user limit).
 local limit = tonumber(redis.call('HGET', KEYS[1], 'limit'))

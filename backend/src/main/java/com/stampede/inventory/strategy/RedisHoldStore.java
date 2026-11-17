@@ -93,7 +93,8 @@ class RedisHoldStore {
 
     /**
      * Like {@link #hold}, but empty when the event is not loaded into Redis ({@code NOT_LOADED}), so the
-     * strategy can load it and try again (M2.2c).
+     * strategy can load it and try again (M2.2c). {@link HoldOutcome.StrategyChanged} when the event's
+     * closed gate is set ({@code CLOSED}: its strategy is being switched, or is no longer REDIS_FIRST).
      *
      * @throws IllegalStateException if the hold id is already live
      */
@@ -104,7 +105,8 @@ class RedisHoldStore {
                 keys.seats(eventId),
                 keys.user(eventId, request.userId()),
                 keys.hold(eventId, request.holdId()),
-                keys.stream());
+                keys.stream(),
+                keys.closed(eventId));
         List<String> args = new ArrayList<>();
         args.add(keys.seatPrefix(eventId));
         args.add(request.holdId().toString());
@@ -123,6 +125,7 @@ class RedisHoldStore {
             case "LIMIT_EXCEEDED" -> Optional.of(
                     new HoldOutcome.Rejected(HoldRejection.LIMIT_EXCEEDED, request.seatIds()));
             case "NOT_LOADED" -> Optional.empty();
+            case "CLOSED" -> Optional.of(new HoldOutcome.StrategyChanged());
             case "DUPLICATE_HOLD" -> throw new IllegalStateException("Hold id " + request.holdId()
                     + " is already live in Redis; every attempt needs a new id (D-015)");
             default -> throw new IllegalStateException("Unexpected reply from hold.lua: " + reply);
@@ -266,6 +269,10 @@ class RedisHoldStore {
         /** The event was loaded already (meta exists); nothing was written. */
         record AlreadyLoaded() implements Load {
         }
+
+        /** The event's closed gate is set (M2.3a): nothing was written. */
+        record Closed() implements Load {
+        }
     }
 
     /**
@@ -304,10 +311,12 @@ class RedisHoldStore {
             args.add(Integer.toString(hold.seatIds().size()));
         }
 
-        List<String> reply = run(loadScript, List.of(keys.meta(eventId), keys.seats(eventId)), args);
+        List<String> reply = run(loadScript, List.of(keys.meta(eventId), keys.seats(eventId), keys.closed(eventId)),
+                args);
         return switch (reply.get(0)) {
             case "LOADED" -> new Load.Loaded(Integer.parseInt(reply.get(1)), Integer.parseInt(reply.get(2)));
             case "ALREADY_LOADED" -> new Load.AlreadyLoaded();
+            case "CLOSED" -> new Load.Closed();
             default -> throw new IllegalStateException("Unexpected reply from load.lua: " + reply);
         };
     }
@@ -347,6 +356,58 @@ class RedisHoldStore {
             cursor.forEachRemaining(key -> ids.add(UUID.fromString(key.substring(prefix.length()))));
         }
         return ids;
+    }
+
+    /**
+     * Sets the event's closed gate (M2.3a, D-023): from now on {@code hold.lua} answers CLOSED and
+     * {@code load.lua} writes nothing. Redis runs one command at a time, so every hold.lua either ran
+     * before this (its hash and stream entry exist) or is refused after it.
+     */
+    void close(UUID eventId) {
+        redis.opsForValue().set(keys.closed(eventId), "1");
+    }
+
+    /** Removes the event's closed gate: holds and loads work again. */
+    void reopen(UUID eventId) {
+        redis.delete(keys.closed(eventId));
+    }
+
+    /** Whether the event's closed gate is set. */
+    boolean isClosed(UUID eventId) {
+        return Boolean.TRUE.equals(redis.hasKey(keys.closed(eventId)));
+    }
+
+    /**
+     * Deletes every key of the event except its closed gate: meta, seat set, seat keys, holds, users
+     * (M2.3a, decision 2a). SCAN in pages, DEL per page, so Redis is never blocked for long. The stream
+     * is shared by all events and is left alone. Returns how many keys were deleted.
+     */
+    long deleteEventKeys(UUID eventId) {
+        String closed = keys.closed(eventId);
+        long deleted = 0;
+        List<String> page = new ArrayList<>();
+        try (Cursor<String> cursor = redis.scan(ScanOptions.scanOptions()
+                .match(keys.eventPrefix(eventId) + "*").count(1000).build())) {
+            while (cursor.hasNext()) {
+                String key = cursor.next();
+                if (!key.equals(closed)) {
+                    page.add(key);
+                }
+                if (page.size() == 500) {
+                    deleted += deleteAll(page);
+                }
+            }
+        }
+        return deleted + deleteAll(page);
+    }
+
+    private long deleteAll(List<String> page) {
+        if (page.isEmpty()) {
+            return 0;
+        }
+        Long count = redis.delete(List.copyOf(page));
+        page.clear();
+        return count == null ? 0 : count;
     }
 
     /** The raw value of a seat key ({@code H:...} or {@code S:...}), or null if the seat is free. */

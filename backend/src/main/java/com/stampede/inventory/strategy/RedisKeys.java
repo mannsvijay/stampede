@@ -13,6 +13,8 @@ import java.util.UUID;
  *                                    expiry while a sale pins it), S:{orderId}:{soldMs} once sold (never)
  * p:ev:{event}:hold:{hold}   hash    user, seats, n, createdMs, expiresMs (expires with its seats)
  * p:ev:{event}:user:{user}   zset    member {holdId}:{seat count}, score = expiry in ms
+ * p:ev:{event}:closed        string  exists while the event's strategy is being switched, and after a
+ *                                    switch away from REDIS_FIRST: hold.lua and load.lua refuse (M2.3a)
  * p:inv:stream               stream  HELD / RELEASED entries for the Postgres consumer (M2.2b)
  * p:inv:dead                 stream  entries the consumer gave up on (dead letters, M2.2b)
  * </pre>
@@ -40,6 +42,16 @@ final class RedisKeys {
 
     String seats(UUID eventId) {
         return event(eventId) + "seats";
+    }
+
+    /**
+     * The event's gate (M2.3a, D-023). While it exists, {@code hold.lua} answers CLOSED and
+     * {@code load.lua} writes nothing. Set when a switch away from REDIS_FIRST starts; kept after the
+     * switch (when every other key of the event is deleted) so a loader whose Postgres snapshot predates
+     * the switch can't load the event back; deleted when the event switches to REDIS_FIRST again.
+     */
+    String closed(UUID eventId) {
+        return event(eventId) + "closed";
     }
 
     /** A seat's key is this followed by the seat id. */

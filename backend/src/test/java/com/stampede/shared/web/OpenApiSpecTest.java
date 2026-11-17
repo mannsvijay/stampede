@@ -77,7 +77,7 @@ class OpenApiSpecTest {
     }
 
     @Test
-    void specCoversTheAuthEventHoldOrderAndTicketEndpointsOnly() {
+    void specCoversTheAuthEventHoldOrderTicketAndAdminEndpointsOnly() {
         List<String> paths = fieldNames(generated.path("paths"));
 
         assertThat(paths).containsExactlyInAnyOrder(
@@ -85,7 +85,19 @@ class OpenApiSpecTest {
                 "/events", "/events/{id}", "/events/{id}/layout", "/events/{id}/seatmap",
                 "/events/{id}/holds", "/holds/{id}",
                 "/orders", "/orders/{id}",
-                "/me/tickets", "/tickets/keys");
+                "/me/tickets", "/tickets/keys",
+                "/admin/events/{id}/strategy");
+    }
+
+    @Test
+    void theStrategySwitchDocumentsAdminOnlyAndTheRefusal() {
+        JsonNode operation = generated.path("paths").path("/admin/events/{id}/strategy").path("post");
+        assertThat(operation.path("operationId").asText()).isEqualTo("switchStrategy");
+        assertThat(fieldNames(operation.path("responses")))
+                .containsExactlyInAnyOrder("200", "400", "401", "403", "404", "409", "500");
+        assertThat(operation.path("responses").path("403").path("description").asText()).isEqualTo("FORBIDDEN");
+        assertThat(operation.path("responses").path("409").path("description").asText())
+                .isEqualTo("STRATEGY_SWITCH_REFUSED");
     }
 
     @Test

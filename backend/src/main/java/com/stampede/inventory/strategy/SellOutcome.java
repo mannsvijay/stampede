@@ -28,4 +28,11 @@ public sealed interface SellOutcome {
     /** No hold with this id for this event. */
     record NotFound() implements SellOutcome {
     }
+
+    /**
+     * The event's strategy is no longer this one (switched after the caller read it, M2.3a, D-023);
+     * nothing changed. The caller reads the event again and uses its current strategy.
+     */
+    record StrategyChanged() implements SellOutcome {
+    }
 }

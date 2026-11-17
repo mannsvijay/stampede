@@ -424,7 +424,7 @@ The OpenAPI spec is the source of truth, and the TypeScript client is generated 
 | `POST /payments/webhook` | Provider callbacks | HMAC-verified, deduplicated |
 | `GET /me/tickets`, `POST /tickets/{id}/transfer` | Wallet, transfer | |
 | `POST /checkins` | Gate scan sync | Idempotent |
-| `POST /admin/events/{id}/admission-rate`, `/pause`, `/strategy`, `/chaos` | Operator controls | Admin role only |
+| `POST /admin/events/{id}/admission-rate`, `/pause`, `/strategy`, `/chaos` | Operator controls | Admin role only. `/strategy` (M2.3a, D-023): body `{strategy}`; only while the event takes no holds and nothing is live; one audit_log row per switch |
 | `WS /ws/events/{id}/seats?sections=…` | Live seat map | `snapshot`, `diff`, `resync-required` messages |
 
 **Errors** follow RFC 7807 (`application/problem+json`) with stable codes: `SEAT_TAKEN` (including `takenAgoMs`), `SEAT_CONTENDED`, `HOLD_EXPIRED`, `LIMIT_EXCEEDED`, `NOT_ADMITTED`, `RATE_LIMITED`, `IDEMPOTENCY_CONFLICT`.
@@ -466,6 +466,12 @@ Hold contention (added in M2.1, D-021):
 | Code | Status | When |
 |---|---|---|
 | `SEAT_CONTENDED` | 409 | `POST /events/{id}/holds` on an optimistic-strategy event: every try lost a race on a seat that was still free when last read, so nothing was held; `seatIds` (the seat the last try lost on), header `Retry-After: 1`. A seat that is actually HELD or SOLD is `SEAT_TAKEN` instead |
+
+Operator controls (added in M2.3a, D-023):
+
+| Code | Status | When |
+|---|---|---|
+| `STRATEGY_SWITCH_REFUSED` | 409 | `POST /admin/events/{id}/strategy` while the event is on sale or ended, has live holds (Postgres, or Redis for a REDIS_FIRST event), has unapplied stream entries, or another switch of it is running; `reason` (`ON_SALE`, `EVENT_ENDED`, `LIVE_HOLDS`, `LIVE_REDIS_HOLDS`, `UNAPPLIED_STREAM_ENTRIES`, `SWITCH_IN_PROGRESS`) and the unchanged `strategy`. Nothing changes |
 
 **Security runs before routing (401 before 404/405).** The security filter checks a request before
 Spring looks for a matching route, and every route that isn't explicitly public requires a token. So

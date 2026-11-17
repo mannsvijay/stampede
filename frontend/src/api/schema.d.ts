@@ -1,6 +1,22 @@
 // Generated from docs/openapi.json by `npm run gen:api` (openapi-typescript). Do not edit.
 
 export interface paths {
+    "/admin/events/{id}/strategy": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["switchStrategy"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/auth/login": {
         parameters: {
             query?: never;
@@ -417,7 +433,7 @@ export interface components {
              * @description Stable error code (PRD section 10). Branch on this, never on title or detail.
              * @enum {string}
              */
-            code: "VALIDATION_FAILED" | "UNAUTHENTICATED" | "INVALID_CREDENTIALS" | "INVALID_REFRESH_TOKEN" | "FORBIDDEN" | "EMAIL_TAKEN" | "EVENT_NOT_FOUND" | "NOT_FOUND" | "METHOD_NOT_ALLOWED" | "UNSUPPORTED_MEDIA_TYPE" | "SEAT_TAKEN" | "SEAT_CONTENDED" | "LIMIT_EXCEEDED" | "SALE_NOT_OPEN" | "HOLD_NOT_FOUND" | "HOLD_CONVERTED" | "HOLD_EXPIRED" | "PAYMENT_FAILED" | "ORDER_NOT_FOUND" | "REQUEST_FAILED" | "INTERNAL_ERROR";
+            code: "VALIDATION_FAILED" | "UNAUTHENTICATED" | "INVALID_CREDENTIALS" | "INVALID_REFRESH_TOKEN" | "FORBIDDEN" | "EMAIL_TAKEN" | "EVENT_NOT_FOUND" | "NOT_FOUND" | "METHOD_NOT_ALLOWED" | "UNSUPPORTED_MEDIA_TYPE" | "SEAT_TAKEN" | "SEAT_CONTENDED" | "LIMIT_EXCEEDED" | "SALE_NOT_OPEN" | "HOLD_NOT_FOUND" | "HOLD_CONVERTED" | "HOLD_EXPIRED" | "PAYMENT_FAILED" | "ORDER_NOT_FOUND" | "STRATEGY_SWITCH_REFUSED" | "REQUEST_FAILED" | "INTERNAL_ERROR";
             /** @description Human-readable; may change. */
             detail?: string;
             /** @description INTERNAL_ERROR only: the id the server logged the error under. */
@@ -465,6 +481,19 @@ export interface components {
              * @description Number of seats, equal to the length of the layout's seat list
              */
             seatCount: number;
+        };
+        SwitchStrategyRequest: {
+            /** @enum {string} */
+            strategy: "PESSIMISTIC" | "OPTIMISTIC" | "REDIS_FIRST";
+        };
+        SwitchStrategyResponse: {
+            changed: boolean;
+            /** Format: uuid */
+            eventId: string;
+            /** @enum {string} */
+            previous: "PESSIMISTIC" | "OPTIMISTIC" | "REDIS_FIRST";
+            /** @enum {string} */
+            strategy: "PESSIMISTIC" | "OPTIMISTIC" | "REDIS_FIRST";
         };
         TicketResponse: {
             /** Format: uuid */
@@ -536,6 +565,86 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    switchStrategy: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SwitchStrategyRequest"];
+            };
+        };
+        responses: {
+            /** @description Switched, or the event already used this strategy */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SwitchStrategyResponse"];
+                };
+            };
+            /** @description VALIDATION_FAILED */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description UNAUTHENTICATED */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description FORBIDDEN */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description EVENT_NOT_FOUND */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description STRATEGY_SWITCH_REFUSED */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description INTERNAL_ERROR */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
     login: {
         parameters: {
             query?: never;

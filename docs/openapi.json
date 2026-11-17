@@ -10,6 +10,103 @@
     "description" : "Same origin as the frontend"
   } ],
   "paths" : {
+    "/admin/events/{id}/strategy" : {
+      "post" : {
+        "operationId" : "switchStrategy",
+        "parameters" : [ {
+          "in" : "path",
+          "name" : "id",
+          "required" : true,
+          "schema" : {
+            "type" : "string",
+            "format" : "uuid"
+          }
+        } ],
+        "requestBody" : {
+          "content" : {
+            "application/json" : {
+              "schema" : {
+                "$ref" : "#/components/schemas/SwitchStrategyRequest"
+              }
+            }
+          },
+          "required" : true
+        },
+        "responses" : {
+          "200" : {
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/SwitchStrategyResponse"
+                }
+              }
+            },
+            "description" : "Switched, or the event already used this strategy"
+          },
+          "400" : {
+            "content" : {
+              "application/problem+json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description" : "VALIDATION_FAILED"
+          },
+          "401" : {
+            "content" : {
+              "application/problem+json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description" : "UNAUTHENTICATED"
+          },
+          "403" : {
+            "content" : {
+              "application/problem+json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description" : "FORBIDDEN"
+          },
+          "404" : {
+            "content" : {
+              "application/problem+json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description" : "EVENT_NOT_FOUND"
+          },
+          "409" : {
+            "content" : {
+              "application/problem+json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description" : "STRATEGY_SWITCH_REFUSED"
+          },
+          "500" : {
+            "content" : {
+              "application/problem+json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description" : "INTERNAL_ERROR"
+          }
+        },
+        "tags" : [ "admin" ]
+      }
+    },
     "/auth/login" : {
       "post" : {
         "operationId" : "login",
@@ -1285,7 +1382,7 @@
           "code" : {
             "type" : "string",
             "description" : "Stable error code (PRD section 10). Branch on this, never on title or detail.",
-            "enum" : [ "VALIDATION_FAILED", "UNAUTHENTICATED", "INVALID_CREDENTIALS", "INVALID_REFRESH_TOKEN", "FORBIDDEN", "EMAIL_TAKEN", "EVENT_NOT_FOUND", "NOT_FOUND", "METHOD_NOT_ALLOWED", "UNSUPPORTED_MEDIA_TYPE", "SEAT_TAKEN", "SEAT_CONTENDED", "LIMIT_EXCEEDED", "SALE_NOT_OPEN", "HOLD_NOT_FOUND", "HOLD_CONVERTED", "HOLD_EXPIRED", "PAYMENT_FAILED", "ORDER_NOT_FOUND", "REQUEST_FAILED", "INTERNAL_ERROR" ]
+            "enum" : [ "VALIDATION_FAILED", "UNAUTHENTICATED", "INVALID_CREDENTIALS", "INVALID_REFRESH_TOKEN", "FORBIDDEN", "EMAIL_TAKEN", "EVENT_NOT_FOUND", "NOT_FOUND", "METHOD_NOT_ALLOWED", "UNSUPPORTED_MEDIA_TYPE", "SEAT_TAKEN", "SEAT_CONTENDED", "LIMIT_EXCEEDED", "SALE_NOT_OPEN", "HOLD_NOT_FOUND", "HOLD_CONVERTED", "HOLD_EXPIRED", "PAYMENT_FAILED", "ORDER_NOT_FOUND", "STRATEGY_SWITCH_REFUSED", "REQUEST_FAILED", "INTERNAL_ERROR" ]
           },
           "detail" : {
             "type" : "string",
@@ -1378,6 +1475,37 @@
           }
         },
         "required" : [ "asOf", "available", "eventId", "seatCount" ]
+      },
+      "SwitchStrategyRequest" : {
+        "type" : "object",
+        "properties" : {
+          "strategy" : {
+            "type" : "string",
+            "enum" : [ "PESSIMISTIC", "OPTIMISTIC", "REDIS_FIRST" ]
+          }
+        },
+        "required" : [ "strategy" ]
+      },
+      "SwitchStrategyResponse" : {
+        "type" : "object",
+        "properties" : {
+          "changed" : {
+            "type" : "boolean"
+          },
+          "eventId" : {
+            "type" : "string",
+            "format" : "uuid"
+          },
+          "previous" : {
+            "type" : "string",
+            "enum" : [ "PESSIMISTIC", "OPTIMISTIC", "REDIS_FIRST" ]
+          },
+          "strategy" : {
+            "type" : "string",
+            "enum" : [ "PESSIMISTIC", "OPTIMISTIC", "REDIS_FIRST" ]
+          }
+        },
+        "required" : [ "changed", "eventId", "previous", "strategy" ]
       },
       "TicketResponse" : {
         "type" : "object",

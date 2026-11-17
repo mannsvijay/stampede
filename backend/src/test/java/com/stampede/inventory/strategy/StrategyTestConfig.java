@@ -12,7 +12,7 @@ import org.springframework.context.annotation.Import;
  * registry the tests can read counters from.
  */
 @TestConfiguration(proxyBeanMethods = false)
-@Import({SeatRows.class, HoldClosing.class, HoldMetrics.class, PessimisticInventoryStrategy.class,
+@Import({SeatRows.class, HoldClosing.class, HoldMetrics.class, StrategyGuard.class, PessimisticInventoryStrategy.class,
         OptimisticInventoryStrategy.class, InventoryStrategyConfig.class})
 class StrategyTestConfig {
 
