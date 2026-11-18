@@ -92,16 +92,17 @@ Ryuk removes them when the JVM exits). Each Spring test context gets its own dat
 Postgres, so no test class sees another's data. The hold sweeper and invariant monitor schedules are
 off in tests (`src/test/resources/config/application.properties`).
 
-The concurrency harness (`PessimisticConcurrencyTest`, `OptimisticConcurrencyTest`, and the cap-only
-`PessimisticHoldCapConcurrencyTest`, `OptimisticHoldCapConcurrencyTest`) runs 100 rounds per
-scenario by default, as CI does. The full proof (the M1 exit criterion) is 1000 rounds, about 40
-minutes locally for both strategies (measured: pessimistic 22m 47s, optimistic 18m 11s); reports land
-in `backend\build\reports\concurrency\`. PowerShell needs the
-`-D` arguments quoted:
+The concurrency harness is two classes, `StrategyConcurrencyTest` (four scenarios) and the cap-only
+`HoldCapConcurrencyTest` (two), each run once per strategy (tests show as `singleSeat[PESSIMISTIC]`).
+`-Dstampede.harness.strategies=PESSIMISTIC,OPTIMISTIC,REDIS_FIRST` picks the strategies (default: all
+three; an unknown name fails the run). It runs 100 rounds per scenario by default, as CI does. The full
+proof is 1000 rounds: run the manual workflow `concurrency-proof.yml` (one job per strategy), or locally
+one strategy at a time (measured: pessimistic ~23 min, optimistic ~18, redis-first ~26). Reports land in
+`backend\build\reports\concurrency\<STRATEGY>-<scenario>.txt`. PowerShell needs the `-D` arguments quoted:
 ```powershell
-.\gradlew.bat test --rerun --tests "*ConcurrencyTest" "-Dstampede.harness.rounds=1000"
-# replay one round from a report's seed:
-.\gradlew.bat test --rerun --tests "PessimisticConcurrencyTest" "-Dstampede.harness.seed=<seed>" "-Dstampede.harness.rounds=1"
+.\gradlew.bat test --rerun --tests "StrategyConcurrencyTest" --tests "HoldCapConcurrencyTest" "-Dstampede.harness.strategies=PESSIMISTIC" "-Dstampede.harness.rounds=1000"
+# replay one round from a report's seed (the report names the strategy and scenario):
+.\gradlew.bat test --rerun --tests "StrategyConcurrencyTest.singleSeat" "-Dstampede.harness.strategies=PESSIMISTIC" "-Dstampede.harness.seed=<seed>" "-Dstampede.harness.rounds=1"
 ```
 
 Run the app (http://localhost:8080). Profiles are comma-separated:

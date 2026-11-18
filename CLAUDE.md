@@ -19,13 +19,16 @@ Git Bash forms, run from the repo root. PowerShell forms for me: docs/DEVELOPING
   Reset data: `docker compose down -v` deletes the volumes. Ask me first, then `up -d` and seed again.
 - Backend tests: `cd backend && ./gradlew test --rerun`
 - One test class: `cd backend && ./gradlew test --rerun --tests "ClassName"`
-- Concurrency harness: 100 rounds per scenario by default (as CI). Full proof (1000 rounds): run the
+- Concurrency harness: `StrategyConcurrencyTest` and `HoldCapConcurrencyTest`, each parameterised over
+  the three strategies (tests show as `singleSeat[PESSIMISTIC]`); `-Dstampede.harness.strategies=PESSIMISTIC,...`
+  picks some (default all). 100 rounds per scenario by default (as CI). Full proof (1000 rounds): run the
   manual GitHub workflow `.github/workflows/concurrency-proof.yml` (Actions tab, "Run workflow"; four
-  parallel jobs: pessimistic, optimistic, redis-first = `*{,HoldCap}ConcurrencyTest` per strategy;
+  parallel jobs: pessimistic, optimistic, redis-first = both harness classes filtered to that strategy;
   redis-races = `RedisSaleRace`, `RedisPersistence`, `RedisHoldStore` `ConcurrencyTest`; reports as
-  artifacts). Locally, one group at a time, e.g.
-  `cd backend && ./gradlew test --rerun --tests "Pessimistic*ConcurrencyTest" -Dstampede.harness.rounds=1000`
-  (laptop: pessimistic ~23 min, optimistic ~18, redis-first ~26, redis-races ~40+). Replay a round: add `-Dstampede.harness.seed=<seed> -Dstampede.harness.rounds=1`.
+  artifacts, `<STRATEGY>-<scenario>.txt`). Locally, one group at a time, e.g.
+  `cd backend && ./gradlew test --rerun --tests StrategyConcurrencyTest --tests HoldCapConcurrencyTest -Dstampede.harness.strategies=PESSIMISTIC -Dstampede.harness.rounds=1000`
+  (laptop: pessimistic ~23 min, optimistic ~18, redis-first ~26, redis-races ~40+). Replay a round:
+  `--tests "<Class>.<method>" -Dstampede.harness.strategies=<STRATEGY> -Dstampede.harness.seed=<seed> -Dstampede.harness.rounds=1`.
   Tests use a 10 s Redis command timeout (production 2 s; D-022 "Test Redis timeout").
   Reports: `backend/build/reports/concurrency/`.
 - Run the app: `cd backend && ./gradlew bootRun --args='--spring.profiles.active=seed,demo-reschedule'`

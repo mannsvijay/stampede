@@ -618,8 +618,9 @@ end against the compose stack, and every concurrency harness scenario passed 100
         Workflow verified by the user (2026-11-18): Concurrency proof run #1, 1000 rounds, all four groups
         (pessimistic, optimistic, redis-first, redis-races) green, 25m 52s. This closes the M2.2d open
         problem about the laptop timeouts.
-- [ ] M2.3 Strategy selectable per event (admin endpoint); concurrency test parameterised over all three
+- [x] M2.3 Strategy selectable per event (admin endpoint); concurrency test parameterised over all three
       Split (approved 2026-11-18) into M2.3a (switch, re-check, endpoint, audit) and M2.3b (harness).
+      Done 2026-11-18: both halves done and verified by the user's full suite runs.
       Decisions (user, 2026-11-18; D-023): 1A, a switch only while the event takes no holds and nothing
       is live in Postgres or Redis, otherwise 409 with the reason (B, live holds carried over, recorded
       in D-023 as a possible upgrade); 2a, the event's Redis keys deleted right after switching away from
@@ -653,9 +654,30 @@ end against the compose stack, and every concurrency harness scenario passed 100
         results. Verified by the user (2026-11-18): full suite BUILD SUCCESSFUL in 24m 9s, covering the
         targeted set. Accepted by the user: the closed gate outlives a switch away from REDIS_FIRST (D-023).
         No new dependency. API change: the new endpoint and error code (openapi.json, frontend client).
-  - [ ] M2.3b Harness parameterised over all three strategies (one class per harness, `@ParameterizedTest`
+  - [x] M2.3b Harness parameterised over all three strategies (one class per harness, `@ParameterizedTest`
         over the strategy, one context with the Redis beans; `-Dstampede.harness.strategies` so
         concurrency-proof.yml keeps a job per strategy).
+        Done 2026-11-18 (user approved one context per harness class): `StrategyConcurrencyTest` (4
+        scenarios) and `HoldCapConcurrencyTest` (2), each `@ParameterizedTest` over `StrategyKind`, shown as
+        `singleSeat[PESSIMISTIC]`; own database and key prefix each. `HarnessStrategies` reads
+        `-Dstampede.harness.strategies` (default all, any case, unknown name fails). Removed: the bases
+        `StrategyRaceTest`, `HoldCapRaceTest` and the six per-strategy subclasses. Report names unchanged
+        (`<STRATEGY>-<scenario>.txt`). concurrency-proof.yml: same four jobs, the three strategy jobs filter
+        by strategy. CLAUDE.md and DEVELOPING.md updated. Evidence (1 round): before 18 test runs in 6
+        classes, after 18 in 2 classes, same scenario[STRATEGY] list and same 18 report names; one Spring
+        context per class; `strategies=PESSIMISTIC` gives 6, `strategies=REDIS` fails all 4 methods with
+        "unknown strategy 'REDIS'". actionlint clean. Targeted run (100 rounds): StrategyConcurrencyTest
+        12, HoldCapConcurrencyTest 6, HarnessStrategiesTest 4, ModularityTest 2, BUILD SUCCESSFUL in 7m 23s.
+        Verified by the user (2026-11-18): full suite BUILD SUCCESSFUL in 26m 7s. The 1000-round proof
+        workflow has not run on the new classes yet.
+      Note (found in M2.3b, 2026-11-18; to be fixed as a small follow-up after M2.3b):
+      `TicketIssuingConcurrencyTest.twoOrdersRacingForOneSeatLeaveAllOfOneAndNoneOfTheOther` is flaky.
+      It failed once in `./gradlew test --rerun --tests "*ConcurrencyTest" -Dstampede.harness.rounds=1`
+      ("both outcomes happened": Alice won 0 of 2 rounds) and passed when rerun alone. Likely cause: the
+      test needs both outcomes, and gets Bob's wins by starting Alice 5 ms late in odd rounds, while
+      relying on Alice "nearly always" winning a simultaneous start. Neither is a guarantee under load,
+      and the test reads `stampede.harness.rounds` (default
+      30), so at 1 round it races only twice and one unlucky schedule fails it.
       Note (from M1.7, D-019): if an admin endpoint ever changes `per_user_limit`, it must refuse
       (409) a limit below any user's current `used`, checked under the allowance row locks; I8
       treats `used > limit` as a violation.

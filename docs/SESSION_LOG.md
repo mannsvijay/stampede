@@ -1325,3 +1325,43 @@ the workflow's jobs).
   gate (noted on M5.5). Redis-first holds have no sale-window check in Redis.
 - The re-check and the consumer guard each add one primary-key read; M2.5 measures them.
 - D-023 is a draft for you to rewrite in your own words.
+
+## 2026-11-18 - M2.3b harness parameterised over all three strategies (session end)
+
+**Task**: M2.3b, the second half of M2.3 (M2.3 now done). Approved by the user: one Spring context per
+harness class (two in total), DEVELOPING.md updated too, the TicketIssuingConcurrencyTest flake noted
+for a follow-up.
+
+**Changed**
+- `StrategyConcurrencyTest` (4 scenarios) and `HoldCapConcurrencyTest` (2): concrete classes, each
+  `@ParameterizedTest` + `@MethodSource` over `StrategyKind`, tests named `method[STRATEGY]`. Each has the
+  Redis beans and its own database and key prefix (`strategy_concurrency`, `hold_cap_concurrency`),
+  checked before every test. REDIS_FIRST uses `RedisRoundHooks`, the Postgres strategies none (they never
+  touch Redis, and I10 skips events that aren't REDIS_FIRST). The fixture insert moved into `run()`,
+  because `@BeforeEach` can't see the parameter.
+- Removed: `StrategyRaceTest`, `HoldCapRaceTest` and the six per-strategy subclasses (the split existed
+  only because a subclass's `@DynamicPropertySource` can't override its parent's).
+- `HarnessStrategies` + `HarnessStrategiesTest` (4): `-Dstampede.harness.strategies`, comma-separated,
+  any case; unset or blank = all; an unknown name fails the run.
+- `concurrency-proof.yml`: same four jobs; pessimistic, optimistic and redis-first run both harness
+  classes filtered to their strategy (passed only when the matrix sets one). CLAUDE.md, DEVELOPING.md,
+  PLAN.md (M2.3b and M2.3 ticked, flake note) updated. Report names unchanged.
+
+**Verified**
+- Claude (--rerun, 1 round): before 18 test runs in 6 classes, after 18 in 2 classes, identical
+  scenario[STRATEGY] lists and identical 18 report names; one context per class;
+  `strategies=PESSIMISTIC` gives 6, `strategies=REDIS` fails all 4 methods with the valid names; the
+  documented replay (`StrategyConcurrencyTest.singleSeat`, seed 42) runs 1 test. actionlint clean.
+- Claude, targeted run at 100 rounds (StrategyConcurrencyTest 12, HoldCapConcurrencyTest 6,
+  HarnessStrategiesTest 4, ModularityTest 2): BUILD SUCCESSFUL in 7m 23s.
+- User (2026-11-18; Claude reran nothing at session end): full suite BUILD SUCCESSFUL in 26m 7s.
+
+**Next**: the small follow-up for the TicketIssuingConcurrencyTest flake, then M2.4 (k6 scenarios).
+
+**Open problems**
+- `TicketIssuingConcurrencyTest.twoOrdersRacingForOneSeatLeaveAllOfOneAndNoneOfTheOther` is flaky: it
+  failed once in a 1-round `*ConcurrencyTest` run and passed alone. Likely cause: the 5 ms head start
+  (and Alice "nearly always" winning a simultaneous start) isn't a guarantee under load; at 1 round it
+  races only twice. Noted on M2.3b in PLAN.md.
+- The 1000-round proof workflow hasn't run on the new classes yet.
+- D-023 is still a draft for you to rewrite in your own words.

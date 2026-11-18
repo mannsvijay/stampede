@@ -6,8 +6,12 @@
 # four run in parallel and one failure doesn't stop the others. Every job uploads its concurrency reports
 # (backend/build/reports/concurrency/) and JUnit results as an artifact, pass or fail.
 #
-# Replay a failed round locally with the seed from the report or log:
-#   cd backend && ./gradlew test --rerun --tests "<Class>" -Dstampede.harness.seed=<seed> -Dstampede.harness.rounds=1
+# The harness is two classes, each parameterised over the strategy (M2.3b): StrategyConcurrencyTest and
+# HoldCapConcurrencyTest. -Dstampede.harness.strategies keeps one job per strategy.
+#
+# Replay a failed round locally with the seed from the report or log (for the harness, also the strategy):
+#   cd backend && ./gradlew test --rerun --tests "<Class>.<method>" -Dstampede.harness.strategies=<STRATEGY> \
+#     -Dstampede.harness.seed=<seed> -Dstampede.harness.rounds=1
 #
 # Actions are pinned to the same commit SHAs as ci.yml (see the supply-chain note there).
 name: Concurrency proof
@@ -42,11 +46,15 @@ jobs:
       matrix:
         include:
           - group: pessimistic
-            tests: --tests PessimisticConcurrencyTest --tests PessimisticHoldCapConcurrencyTest
+            tests: --tests StrategyConcurrencyTest --tests HoldCapConcurrencyTest
+            strategies: PESSIMISTIC
           - group: optimistic
-            tests: --tests OptimisticConcurrencyTest --tests OptimisticHoldCapConcurrencyTest
+            tests: --tests StrategyConcurrencyTest --tests HoldCapConcurrencyTest
+            strategies: OPTIMISTIC
           - group: redis-first
-            tests: --tests RedisFirstConcurrencyTest --tests RedisFirstHoldCapConcurrencyTest
+            tests: --tests StrategyConcurrencyTest --tests HoldCapConcurrencyTest
+            strategies: REDIS_FIRST
+          # No strategies: these classes test the Redis-first parts directly and ignore the property.
           - group: redis-races
             tests: >-
               --tests RedisSaleRaceConcurrencyTest
@@ -87,17 +95,23 @@ jobs:
       # The input reaches the shell through env, never ${{ }} inside the script, so it can't inject
       # commands; the check below also refuses anything but a positive whole number.
       # MATRIX_TESTS is a fixed string from this file (class names, no spaces), left unquoted on purpose
-      # so the shell splits it into separate --tests arguments.
+      # so the shell splits it into separate --tests arguments. MATRIX_STRATEGIES is also fixed here
+      # (empty for redis-races); it is passed only when set.
       - name: Concurrency proof (${{ matrix.group }})
         env:
           ROUNDS: ${{ inputs.rounds }}
           MATRIX_TESTS: ${{ matrix.tests }}
+          MATRIX_STRATEGIES: ${{ matrix.strategies }}
         run: |
           case "$ROUNDS" in
             ''|*[!0-9]*|0) echo "::error::rounds must be a positive whole number, was '$ROUNDS'"; exit 1 ;;
           esac
+          strategy_args=()
+          if [ -n "$MATRIX_STRATEGIES" ]; then
+            strategy_args=("-Dstampede.harness.strategies=$MATRIX_STRATEGIES")
+          fi
           # shellcheck disable=SC2086
-          ./gradlew test --rerun $MATRIX_TESTS -Dstampede.harness.rounds="$ROUNDS"
+          ./gradlew test --rerun $MATRIX_TESTS -Dstampede.harness.rounds="$ROUNDS" "${strategy_args[@]}"
 
       - name: Upload concurrency reports
         if: always()
