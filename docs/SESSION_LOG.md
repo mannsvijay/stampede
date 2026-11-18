@@ -1365,3 +1365,42 @@ for a follow-up.
   races only twice. Noted on M2.3b in PLAN.md.
 - The 1000-round proof workflow hasn't run on the new classes yet.
 - D-023 is still a draft for you to rewrite in your own words.
+
+## 2026-11-19 - TicketIssuingConcurrencyTest flake fixed (session end)
+
+**Task**: the small follow-up noted under M2.3b in PLAN.md: make
+`TicketIssuingConcurrencyTest.twoOrdersRacingForOneSeatLeaveAllOfOneAndNoneOfTheOther` deterministic,
+the way the sell-versus-cancel fix did, without weakening any assertion. Test only; committed by the user
+as 0f86537 (with the PLAN.md note).
+
+**Cause**: the test needed both outcomes. It got Bob's wins by starting Alice 5 ms late in odd rounds and
+relied on Alice "nearly always" winning a simultaneous start; neither is a guarantee under load. It reads
+`stampede.harness.rounds`, so at 1 round it raced only twice.
+
+**Changed** (test only)
+- `alicesThenBobsTicketsForOneSeatTakeTurns` and `bobsThenAlicesTicketsForOneSeatTakeTurns`: each outcome
+  in its own test, the order fixed by a new `inTurns` helper in the class. Each asserts the loser's
+  exception and message, the winner's one ticket per seat, the loser's zero tickets (Bob's free seat
+  included), then the invariants after restoring the real tickets.
+- The blocker is the first issuer's own transaction (it inserts and stays open; the second is seen
+  waiting in `pg_locks`; then the first commits). Inventory's `inTurns` uses a separate session on the
+  hold row, whose waiters queue in arrival order; two issuers meet only at `uq_tickets_live_seat`, so
+  both would wait on a separate blocker's transaction and wake together.
+- The barrier race is kept, without the 5 ms sleep and the "both outcomes happened" check: exactly one
+  winner with all its seats, a loser with none, whichever side wins. No assertion weakened; the
+  which-side checks moved into the two deterministic tests.
+
+**Verified**
+- Claude (--rerun; the three tests as a temporary `@RepeatedTest(30)`, then restored to `@Test` and
+  checked identical to the backup): 90/90 at default rounds, BUILD SUCCESSFUL in 4m 24s (in the race
+  Alice won all 30 rounds in 20 of 30 repetitions: the old test's Bob wins depended on the sleep); 90/90
+  with `-Dstampede.harness.rounds=1`, BUILD SUCCESSFUL in 3m 46s (Bob won the race in 2 of 30). Whole
+  class as committed: 6 tests, BUILD SUCCESSFUL in 55s.
+- Full suite not rerun at session end (user's decision: only this test class and PLAN.md changed; CI
+  runs the full suite on push).
+
+**Next**: M2.4 (k6 scenarios).
+
+**Open problems**
+- The 1000-round proof workflow hasn't run on the M2.3b harness classes yet.
+- D-023 is still a draft for you to rewrite in your own words.
