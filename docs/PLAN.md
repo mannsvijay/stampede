@@ -670,14 +670,28 @@ end against the compose stack, and every concurrency harness scenario passed 100
         12, HoldCapConcurrencyTest 6, HarnessStrategiesTest 4, ModularityTest 2, BUILD SUCCESSFUL in 7m 23s.
         Verified by the user (2026-11-18): full suite BUILD SUCCESSFUL in 26m 7s. The 1000-round proof
         workflow has not run on the new classes yet.
-      Note (found in M2.3b, 2026-11-18; to be fixed as a small follow-up after M2.3b):
-      `TicketIssuingConcurrencyTest.twoOrdersRacingForOneSeatLeaveAllOfOneAndNoneOfTheOther` is flaky.
+      Note (found in M2.3b, 2026-11-18; fixed 2026-11-19 as a small follow-up, test only):
+      `TicketIssuingConcurrencyTest.twoOrdersRacingForOneSeatLeaveAllOfOneAndNoneOfTheOther` was flaky.
       It failed once in `./gradlew test --rerun --tests "*ConcurrencyTest" -Dstampede.harness.rounds=1`
-      ("both outcomes happened": Alice won 0 of 2 rounds) and passed when rerun alone. Likely cause: the
-      test needs both outcomes, and gets Bob's wins by starting Alice 5 ms late in odd rounds, while
+      ("both outcomes happened": Alice won 0 of 2 rounds) and passed when rerun alone. Cause: the
+      test needed both outcomes, and got Bob's wins by starting Alice 5 ms late in odd rounds, while
       relying on Alice "nearly always" winning a simultaneous start. Neither is a guarantee under load,
-      and the test reads `stampede.harness.rounds` (default
-      30), so at 1 round it races only twice and one unlucky schedule fails it.
+      and the test reads `stampede.harness.rounds` (default 30), so at 1 round it raced only twice.
+      Fix: each outcome is its own deterministic test, `alicesThenBobsTicketsForOneSeatTakeTurns` and
+      `bobsThenAlicesTicketsForOneSeatTakeTurns`, with the class's own `inTurns` helper (the
+      sell-versus-cancel pattern). The first issuer's transaction is the blocker: it inserts and stays
+      open, the second is seen waiting in `pg_locks`, then the first commits. A separate blocker that
+      rolls back, as in inventory's `inTurns`, doesn't fix the order here: the issuers meet only at
+      `uq_tickets_live_seat`, so both would wait on the blocker's transaction and wake together. Each
+      test asserts the loser's exception and message, the winner's one ticket per seat, the loser's zero
+      tickets (Bob's free seat included) and the invariants. The barrier race is kept, without the 5 ms
+      sleep and the "both outcomes happened" assertion: it asserts exactly one winner with all its seats
+      and a loser with none, whichever side wins. No assertion weakened; the which-side checks moved
+      into the two deterministic tests. Verified (Claude, --rerun, the three tests as a temporary
+      `@RepeatedTest(30)`, restored to `@Test` and checked identical to the backup): 90/90 at default
+      rounds (in the race Alice won all 30 rounds in 20 of the 30 repetitions, so the old test's
+      Bob wins depended on the sleep), 90/90 with `-Dstampede.harness.rounds=1` (Bob won the race in 2
+      of 30). Whole class, as committed: 6 tests, BUILD SUCCESSFUL in 55s.
       Note (from M1.7, D-019): if an admin endpoint ever changes `per_user_limit`, it must refuse
       (409) a limit below any user's current `used`, checked under the allowance row locks; I8
       treats `used > limit` as a violation.

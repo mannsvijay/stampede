@@ -32,6 +32,9 @@ import org.springframework.transaction.support.TransactionTemplate;
  *   <li>{@link #aSecondIssuerWaitsForTheFirstAndThenAddsNothing} proves the waiting happens:
  *       deterministic, with the first transaction held open and the second seen blocked in
  *       {@code pg_locks}.</li>
+ *   <li>Two orders for one seat: {@link #alicesThenBobsTicketsForOneSeatTakeTurns} and
+ *       {@link #bobsThenAlicesTicketsForOneSeatTakeTurns} fix which order issues first (inTurns), so each
+ *       outcome is checked deterministically.</li>
  *   <li>The racing tests release all threads together with a barrier, for
  *       {@code -Dstampede.harness.rounds} rounds (default 30), like the inventory harness. There is no
  *       randomness in them, so there is no seed to replay.</li>
@@ -120,29 +123,68 @@ class TicketIssuingConcurrencyTest extends CheckoutTestSupport {
         assertInvariants();
     }
 
+    // Two orders' tickets for one seat. Unreachable through checkout (uq_order_items_active_seat stops a
+    // second order for a seat), but it is TicketIssuer's own guarantee: called directly, a cross-order
+    // conflict is all or nothing. Bob's real order is seat 5; his command also claims Alice's seat 0 and
+    // the free seat 6. Each outcome has its own test with the order fixed (inTurns); the race below
+    // checks only that exactly one side wins, whichever it is.
+
     @Test
-    void twoOrdersRacingForOneSeatLeaveAllOfOneAndNoneOfTheOther() throws Exception {
-        // Unreachable through checkout (uq_order_items_active_seat stops a second order for a seat),
-        // but it is TicketIssuer's own guarantee: called directly, a cross-order conflict is all or
-        // nothing. Bob's real order is seat 5; his command also claims Alice's seat 0 and the free seat 6.
+    void alicesThenBobsTicketsForOneSeatTakeTurns() throws Exception {
         UUID seat = orderSeats.get(0);
         UUID free = seats.get(6);
-        UUID bobOrder = orderId(postOrder(bob, hold(bob, seats.get(5))));
+        UUID bobOrder = bobsOrder();
+        forgetTickets(orderId);
+        forgetTickets(bobOrder);
+
+        Throwable bobsFailure = inTurns(command(orderId, aliceId, List.of(seat)),
+                command(bobOrder, bobId, List.of(seat, free)));
+
+        assertThat(bobsFailure).as("Bob waited, then saw Alice's ticket")
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("already have a live ticket from another order");
+        assertOneTicketPerSeat(orderId, List.of(seat), 0);
+        assertThat(ticketsOfOrder(bobOrder)).as("loser wrote nothing, not even the free seat").isZero();
+        restoreRealTicketsAndCheck(bobOrder);
+    }
+
+    @Test
+    void bobsThenAlicesTicketsForOneSeatTakeTurns() throws Exception {
+        UUID seat = orderSeats.get(0);
+        UUID free = seats.get(6);
+        UUID bobOrder = bobsOrder();
+        forgetTickets(orderId);
+        forgetTickets(bobOrder);
+
+        Throwable alicesFailure = inTurns(command(bobOrder, bobId, List.of(seat, free)),
+                command(orderId, aliceId, List.of(seat)));
+
+        assertThat(alicesFailure).as("Alice waited, then saw Bob's ticket")
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("already have a live ticket from another order");
+        assertOneTicketPerSeat(bobOrder, List.of(seat, free), 0);
+        assertThat(ticketsOfOrder(orderId)).as("loser wrote nothing").isZero();
+        restoreRealTicketsAndCheck(bobOrder);
+    }
+
+    /**
+     * Both released together for {@code -Dstampede.harness.rounds} rounds: whichever wins, it has all its
+     * seats and the loser has none. Which side wins is up to the scheduler, so nothing here asserts it;
+     * the two tests above cover each outcome deterministically.
+     */
+    @Test
+    void twoOrdersRacingForOneSeatLeaveAllOfOneAndNoneOfTheOther() throws Exception {
+        UUID seat = orderSeats.get(0);
+        UUID free = seats.get(6);
+        UUID bobOrder = bobsOrder();
         IssueTickets alices = command(orderId, aliceId, List.of(seat));
         IssueTickets bobs = command(bobOrder, bobId, List.of(seat, free));
         int aliceWins = 0;
-        // Alice's command is one seat to Bob's two, so released together she nearly always wins.
-        // In odd rounds Alice starts 5 ms late, so both outcomes (and both losers) get exercised.
-        int rounds = Math.max(2, ROUNDS);
-        for (int round = 0; round < rounds; round++) {
+        for (int round = 0; round < ROUNDS; round++) {
             forgetTickets(orderId);
             forgetTickets(bobOrder);
-            boolean aliceLate = round % 2 == 1;
 
             List<Boolean> succeeded = race(2, i -> {
-                if (i == 0 && aliceLate) {
-                    Thread.sleep(5);
-                }
                 try {
                     issuer.issueForOrder(i == 0 ? alices : bobs);
                     return true;
@@ -162,16 +204,8 @@ class TicketIssuingConcurrencyTest extends CheckoutTestSupport {
                 assertThat(ticketsOfOrder(orderId)).as("round %d: loser wrote nothing", round).isZero();
             }
         }
-        System.out.printf("two-order race: alice won %d of %d rounds%n", aliceWins, rounds);
-        assertThat(aliceWins).as("both outcomes happened").isBetween(1, rounds - 1);
-        // Bob's command was not a real sale: give both real orders their real tickets back and check.
-        forgetTickets(orderId);
-        forgetTickets(bobOrder);
-        issuer.issueForOrder(command(orderId, aliceId, orderSeats));
-        issuer.issueForOrder(command(bobOrder, bobId, List.of(seats.get(5))));
-        recordTicketsIssued(orderId);
-        recordTicketsIssued(bobOrder);
-        assertInvariants();
+        System.out.printf("two-order race: alice won %d of %d rounds%n", aliceWins, ROUNDS);
+        restoreRealTicketsAndCheck(bobOrder);
     }
 
     @Test
@@ -189,6 +223,66 @@ class TicketIssuingConcurrencyTest extends CheckoutTestSupport {
     }
 
     // --- helpers ---------------------------------------------------------------------------------
+
+    /** Bob's real order, through checkout: seat 5, tickets issued. */
+    private UUID bobsOrder() {
+        return orderId(postOrder(bob, hold(bob, seats.get(5))));
+    }
+
+    /**
+     * The commands above were not real sales: give both real orders their real tickets back and check
+     * the invariants.
+     */
+    private void restoreRealTicketsAndCheck(UUID bobOrder) {
+        forgetTickets(orderId);
+        forgetTickets(bobOrder);
+        issuer.issueForOrder(command(orderId, aliceId, orderSeats));
+        issuer.issueForOrder(command(bobOrder, bobId, List.of(seats.get(5))));
+        recordTicketsIssued(orderId);
+        recordTicketsIssued(bobOrder);
+        assertInvariants();
+    }
+
+    /**
+     * Issues {@code first}, then {@code second}, overlapping but in a fixed order, and returns what
+     * {@code second} threw (null if nothing). Like inventory's {@code inTurns}, a transaction held open
+     * fixes the order, but here it is {@code first}'s own: inventory's waiters queue on a row lock and
+     * are served in arrival order, whereas two issuers meet only at {@code uq_tickets_live_seat} and
+     * would both wait on a separate blocker's transaction and wake together. So {@code first} inserts its
+     * tickets and keeps its transaction open; {@code second} starts and is seen waiting for a lock (on
+     * {@code first}'s uncommitted index entry for the shared seat); then {@code first} commits, and
+     * {@code second} finds the seat taken.
+     */
+    private Throwable inTurns(IssueTickets first, IssueTickets second) throws Exception {
+        CountDownLatch firstInserted = new CountDownLatch(1);
+        CountDownLatch releaseFirst = new CountDownLatch(1);
+        Future<?> firstCall = POOL.submit(() -> new TransactionTemplate(transactions).executeWithoutResult(status -> {
+            issuer.issueForOrder(first);
+            firstInserted.countDown();
+            await(releaseFirst);
+        }));
+        try {
+            if (!firstInserted.await(10, TimeUnit.SECONDS)) {
+                firstCall.get(10, TimeUnit.SECONDS);  // rethrows the first call's failure, if that's why
+                throw new AssertionError("The first issuer never inserted its tickets");
+            }
+            Future<?> secondCall = POOL.submit(() -> issuer.issueForOrder(second));
+
+            waitUntilABackendWaitsForALock();
+            assertThat(secondCall.isDone()).as("second issuer finished while the first was still open").isFalse();
+
+            releaseFirst.countDown();
+            firstCall.get(10, TimeUnit.SECONDS);
+            try {
+                secondCall.get(10, TimeUnit.SECONDS);
+                return null;
+            } catch (ExecutionException e) {
+                return e.getCause();
+            }
+        } finally {
+            releaseFirst.countDown();
+        }
+    }
 
     /** As if step 5 had never succeeded: no tickets, saga back at SEATS_SOLD. */
     private void forgetTickets(UUID order) {
