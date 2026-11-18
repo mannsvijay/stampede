@@ -28,6 +28,10 @@ test-results/
 # Logs
 *.log
 
+# k6 load-test runs (scripts/k6.sh, M2.4a): raw output and the load-test admin's local password.
+# Curated results are committed under benchmarks/results/ (M2.5).
+benchmarks/runs/
+
 # OS junk
 .DS_Store
 Thumbs.db

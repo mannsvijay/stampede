@@ -36,6 +36,20 @@ public final class RedisFirstTestAccess {
         TestRedis.deleteKeys(context.getBean(StringRedisTemplate.class), store(context).keys().all() + "ev:" + eventId);
     }
 
+    /**
+     * Applies every entry of the inventory stream to Postgres, as the consumer thread (off in tests)
+     * would: new entries, then anything left pending, until a round handles none. Entries of events that
+     * no longer exist or aren't REDIS_FIRST are acknowledged with nothing written (the consumer guard).
+     */
+    public static void drainStream(ApplicationContext context) {
+        RedisStreamConsumer consumer = context.getBean(RedisStreamConsumer.class);
+        consumer.ensureGroup();
+        int handled;
+        do {
+            handled = consumer.pollOnce("test-drain") + consumer.reclaimOnce("test-drain");
+        } while (handled > 0);
+    }
+
     private static RedisHoldStore store(ApplicationContext context) {
         return context.getBean(RedisHoldStore.class);
     }

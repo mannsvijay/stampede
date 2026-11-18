@@ -1781,3 +1781,74 @@ Write these yourself, in your own words. Each one is an interview answer you've 
 - **How I'd know it was wrong:** a benchmark needs to switch during a sale (then B); the re-check shows
   up in the M2.5 latency numbers; `not_redis_first` is ever counted at runtime; an invariant (I10 in
   particular) fires right after a switch; or 40P01 deadlocks appear in a run that switches strategies.
+
+### D-024 Load tests: k6 in Docker, a fresh event per run, an on-demand strict verdict (DRAFT)
+- **Date:** 2026-11-19
+- **Context:** M2.4 adds k6 load scenarios (PRD 12) and `scripts/k6.sh`. Open questions: which k6, how test
+  users get tokens without bcrypt (cost 12) dominating the numbers (M0.5 note), how each run starts from
+  a known state and gets the strategy under test (the M2.3a switch needs the event off sale and no live
+  hold), how a run is judged correct, and what is gated. Split into M2.4a (k6.sh, events, users, the
+  verdict endpoint, smoke, seat-collision) and M2.4b (mixed-realistic, the repeat procedure, docs).
+- **Options considered** (decided by the user, 2026-11-19; the letters are the plan's):
+  - D1 k6 image: `grafana/k6:2.3.0` (current major) or `1.8.2` (the 1.x maintenance line).
+  - D2 users: setup() registers and logs in each run; users inserted by SQL; k6 signs its own JWTs; a
+    test-only endpoint that mints tokens.
+  - D3 state between runs: a fresh warm-up and benchmark event per run (by SQL from the demo event),
+    switched through the M2.3a endpoint; the same without the endpoint; reset the demo event in place;
+    `docker compose down -v` per run.
+  - D4 verdict: grep the monitor's log; `GET /admin/invariants`; SQL rules in the script.
+  - D5 thresholds: correctness only (latency reported); latency gated too.
+  - D6 pool exhaustion: measure (pg_stat_activity); expose Hikari metrics; add `lock_timeout` now.
+  - D7 PowerShell: run k6.sh through Git Bash; a k6.ps1 twin.
+- **Decision:** D1 `1.8.2`, D2 setup() logins, D3 fresh events + the switch endpoint, D4 the endpoint,
+  D5 correctness only, D6 measure only, D7 Git Bash.
+  - **k6** `grafana/k6:1.8.2@sha256:00fdcebafbc86cb0137d429529b1caa401a02e09025f02fc74866fa6e2b004d8`
+    (pushed 2026-10-24), run on the compose network against `http://backend:8080`: no Docker Desktop
+    port forwarding between k6 and the backend. `--target host` uses `host.docker.internal:8080` (bootRun).
+  - **Events:** `scripts/k6/sql/bench-events.sql` inserts a warm-up event (on sale, the strategy under
+    test) and a benchmark event (PESSIMISTIC, drop `--lead` seconds away, default 180), copying the demo
+    event's venue, tiers and seats; only inserts, every seat AVAILABLE. setup() switches the benchmark
+    event through `POST /admin/events/{id}/strategy` (it has never had a hold, so the switch is always
+    allowed; to REDIS_FIRST it is also loaded into Redis). After the run (and before the next) every
+    `k6 ...` event is set ENDED by SQL, so the invariant monitor stops checking it; events have no
+    lifecycle code yet, so this is a plain status write, limited to titles starting with "k6 ".
+  - **Admin:** `k6-admin@load.test`, registered through the API, given the ADMIN role in SQL (as the API
+    tests do; the API can't make an admin). Its password is random, generated once by k6.sh into
+    `benchmarks/runs/.k6-admin-password` (gitignored). k6.sh never reads `.env`: SQL runs inside the
+    postgres container with that container's credentials.
+  - **Users:** `k6-user-NNNNN@load.test`, one non-secret password; setup() registers (EMAIL_TAKEN is fine)
+    and logs in all of them in parallel batches of 20, before the warm-up. One buyer per user, because
+    the per-user cap counts sold seats for good.
+  - **Verdict** (`GET /admin/invariants?eventId=&grace=`, ADMIN; `control.invariants.OnDemandInvariantCheck`):
+    for a REDIS_FIRST event it first asks whether the stream still has unapplied entries of the event
+    (`inventory.api.RedisStreamBacklog`, implemented by `RedisStreamConsumer`, the same exact check the
+    switch uses), then runs the checker, and returns both. teardown() asks for each of the run's events
+    until `unappliedStreamEntries` is false (at most 120 s), then counts that answer's violations.
+    **Grace PT0S (strict)**, as in the test suite: k6 has had every response before teardown, checkout is
+    synchronous (payment and tickets inside `POST /orders`), so no order is legitimately half done, and
+    with the stream drained Redis and Postgres must agree exactly. Without `grace` the endpoint uses the
+    monitor's grace (PT30S), so an operator looking during a live sale doesn't see in-flight checkouts.
+  - **Gates** (k6 thresholds): no unexpected answer (5xx, timeouts, codes a scenario can't legitimately
+    get), seats held and sold at most the hot block, zero violations, a conclusive verdict; k6.sh adds
+    "the database has exactly the SOLD seats k6 counted". Latency, throughput and conflict rate are
+    reported, not gated.
+  - **Measured alongside:** `pg_stat_activity` once a second (the app's connections: active, waiting on a
+    lock), `docker stats` about every 2 s (k6's own CPU included). Everything lands in
+    `benchmarks/runs/<UTC time>-<scenario>-<strategy>/` with a `run.json` (commit, images, Docker CPUs and
+    memory, parameters, verdict).
+- **Why:**
+  - Fresh events make every run start from the same state without rewriting state that only the
+    strategies and the saga should write, and the old events stay for post-mortems.
+  - Logging in through the API keeps the real token path; its cost is paid before anything is measured.
+  - The verdict is the same checker, strict, that every test runs, so a load run is judged by the same
+    rules; asking for the stream lag first is what lets I10 be strict for REDIS_FIRST.
+  - Latency on one laptop varies with the machine; gating on it would make runs red for reasons that
+    aren't the code's. M2.5/M2.6 judge the numbers across repeated runs.
+- **Consequences:** the API gains an admin endpoint (openapi.json, frontend client). Every run leaves two
+  ENDED events and ~4,000 event seats behind; `docker compose down -v` clears them (ask first). While a
+  run is going, its two events are listed by `GET /events` (the board shows upcoming events that are
+  neither DRAFT nor ENDED); once ended they disappear from it.
+- **How I'd know it was wrong:** the verdict is inconclusive (stream lag never reaches zero) or reports
+  violations that turn out to be timing, not bugs; setup's logins push the drop past the lead often;
+  k6's own CPU is saturated in docker_stats.csv (then the numbers measure k6); runs on the same commit
+  differ by more than the strategies do.

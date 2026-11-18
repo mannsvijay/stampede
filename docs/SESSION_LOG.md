@@ -1404,3 +1404,55 @@ relied on Alice "nearly always" winning a simultaneous start; neither is a guara
 **Open problems**
 - The 1000-round proof workflow hasn't run on the M2.3b harness classes yet.
 - D-023 is still a draft for you to rewrite in your own words.
+
+## 2026-11-19 - M2.4a k6 harness, seat-collision, GET /admin/invariants (session end)
+
+**Task**: M2.4a, the first half of M2.4 (split approved 2026-11-19; M2.4b: mixed-realistic, the repeat
+procedure, the DEVELOPING.md section). Decisions (user; D-024): D1 `grafana/k6:1.8.2` by digest, D2 setup()
+registers and logs in users each run, D3 a fresh warm-up and benchmark event per run switched through the
+M2.3a endpoint, D4 `GET /admin/invariants`, D5 gate correctness only, D6 measure pool exhaustion only,
+D7 PowerShell through Git Bash. Asked by the user: the verdict waits for the event's stream lag to be zero,
+then checks; the grace chosen and why.
+
+**Changed**
+- `GET /admin/invariants?eventId=&grace=` (ADMIN; `control.admin.AdminInvariantsController`,
+  `control.invariants.OnDemandInvariantCheck`): for a REDIS_FIRST event it reads
+  `inventory.api.RedisStreamBacklog` (new, implemented by `RedisStreamConsumer`: the switch's exact
+  unapplied-entries check) before running the checker; returns `unappliedStreamEntries`, grace, rules and
+  violations. Default grace = the monitor's (PT30S); the k6 verdict passes PT0S.
+- `scripts/k6.sh`: per run, ends earlier `k6 ...` events, creates a warm-up and a benchmark event by SQL
+  from the demo event, registers `k6-admin@load.test` and grants ADMIN in SQL (random local password in
+  `benchmarks/runs/.k6-admin-password`), runs pinned k6 on the compose network, samples
+  `pg_stat_activity` (1 s) and `docker stats` (~2 s), checks SOLD seats in the database against k6's
+  count, writes `benchmarks/runs/<UTC>-<scenario>-<strategy>/` with `run.json`. Never reads `.env`.
+- Scenarios `smoke` and `seat-collision` (warm-up, the herd waits for the drop by the server's clock,
+  up to 5 tries per buyer, winners buy at once); shared `scripts/k6/lib/` (users, seat map bitset, switch,
+  strict verdict in teardown, summary with `result.env`).
+- Tests: `AdminInvariantsApiTest` (9), `OpenApiSpecTest` (path list, the new operation),
+  `RedisFirstTestAccess.drainStream`. docs/openapi.json and the frontend client regenerated.
+- Docs: D-024 (draft), PLAN.md (M2.4 split, M2.4a done, findings), `.gitignore` (`benchmarks/runs/`).
+
+**Verified**
+- Claude (--rerun): targeted set, 24 classes, 362 tests, 0 failures, BUILD SUCCESSFUL in 20m 52s;
+  `check:api` and `typecheck` clean; shellcheck clean.
+- Claude, stack runs (compose, 8 Docker CPUs): `smoke` PESSIMISTIC PASS (16 requests, 0 violations,
+  database count equal). `seat-collision`, 200 buyers for 100 seats: OPTIMISTIC PASS, REDIS_FIRST PASS,
+  PESSIMISTIC FAIL on one 500 (deadlock below); all three held and sold exactly 100 seats, strict
+  verdict 0 violations, database count equal to k6's.
+- User (2026-11-19; Claude reran nothing at session end): full suite BUILD SUCCESSFUL in 45m 31s.
+  Concurrency proof workflow run #2 (1000 rounds, the M2.3b parameterised harness): all four groups
+  green in 25m 36s, closing the M2.3b open problem.
+
+**Next**: decide the deadlock fix (below), then M2.4b.
+
+**Open problems**
+- **40P01 deadlock between a pessimistic hold and ticket issuing** (found by seat-collision; noted in
+  PLAN.md under M2.4a, not fixed). `tickets`' foreign key to `event_seats` takes `FOR KEY SHARE` on each
+  seat, which conflicts with the hold's `FOR UPDATE`; `TicketIssuer` inserts in Java UUID order, holds lock
+  in Postgres order (D-015). Options: sort the issuer's seats in Postgres order, or `FOR NO KEY UPDATE`
+  in the pessimistic strategy. Until fixed, PESSIMISTIC seat-collision runs can fail on a 500.
+- Pessimistic pool exhaustion confirmed (10 of 10 active, up to 8 waiting on a lock at 200 buyers);
+  the `lock_timeout` decision is open (M1.2 note).
+- The layout is 374,473 bytes raw (D-020 estimated ~240 KB). Under REDIS_FIRST 114 of 200 buyers gave
+  up: the seat map reads Postgres, which trails Redis.
+- D-023 and D-024 are drafts for you to rewrite in your own words.

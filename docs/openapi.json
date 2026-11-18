@@ -107,6 +107,93 @@
         "tags" : [ "admin" ]
       }
     },
+    "/admin/invariants" : {
+      "get" : {
+        "description" : "Runs every invariant rule for the event and returns the violations (none = all hold). For a REDIS_FIRST event, the result is only conclusive when unappliedStreamEntries is false.",
+        "operationId" : "checkInvariants",
+        "parameters" : [ {
+          "in" : "query",
+          "name" : "eventId",
+          "required" : true,
+          "schema" : {
+            "type" : "string",
+            "format" : "uuid"
+          }
+        }, {
+          "description" : "ISO-8601 duration, e.g. PT0S (strict) or PT30S. In-between checkout states of orders younger than this are excused. Default: the invariant monitor's grace.",
+          "in" : "query",
+          "name" : "grace",
+          "required" : false,
+          "schema" : {
+            "type" : "string"
+          }
+        } ],
+        "responses" : {
+          "200" : {
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/InvariantsResponse"
+                }
+              }
+            },
+            "description" : "Checked; violations is empty when every rule holds"
+          },
+          "400" : {
+            "content" : {
+              "application/problem+json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description" : "VALIDATION_FAILED"
+          },
+          "401" : {
+            "content" : {
+              "application/problem+json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description" : "UNAUTHENTICATED"
+          },
+          "403" : {
+            "content" : {
+              "application/problem+json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description" : "FORBIDDEN"
+          },
+          "404" : {
+            "content" : {
+              "application/problem+json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description" : "EVENT_NOT_FOUND"
+          },
+          "500" : {
+            "content" : {
+              "application/problem+json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description" : "INTERNAL_ERROR"
+          }
+        },
+        "summary" : "Check one event's invariants now",
+        "tags" : [ "admin" ]
+      }
+    },
     "/auth/login" : {
       "post" : {
         "operationId" : "login",
@@ -1121,6 +1208,42 @@
         },
         "required" : [ "seatIds" ]
       },
+      "InvariantsResponse" : {
+        "type" : "object",
+        "properties" : {
+          "checkedAt" : {
+            "type" : "string",
+            "format" : "date-time"
+          },
+          "eventId" : {
+            "type" : "string",
+            "format" : "uuid"
+          },
+          "grace" : {
+            "type" : "string"
+          },
+          "rules" : {
+            "type" : "array",
+            "items" : {
+              "type" : "string"
+            }
+          },
+          "strategy" : {
+            "type" : "string",
+            "enum" : [ "PESSIMISTIC", "OPTIMISTIC", "REDIS_FIRST" ]
+          },
+          "unappliedStreamEntries" : {
+            "type" : "boolean"
+          },
+          "violations" : {
+            "type" : "array",
+            "items" : {
+              "$ref" : "#/components/schemas/ViolationResponse"
+            }
+          }
+        },
+        "required" : [ "checkedAt", "eventId", "grace", "rules", "strategy", "unappliedStreamEntries", "violations" ]
+      },
       "Jwk" : {
         "type" : "object",
         "properties" : {
@@ -1638,6 +1761,21 @@
           }
         },
         "required" : [ "id", "name" ]
+      },
+      "ViolationResponse" : {
+        "type" : "object",
+        "properties" : {
+          "detail" : {
+            "type" : "string"
+          },
+          "name" : {
+            "type" : "string"
+          },
+          "rule" : {
+            "type" : "string"
+          }
+        },
+        "required" : [ "detail", "name", "rule" ]
       }
     }
   }

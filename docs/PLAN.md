@@ -668,8 +668,9 @@ end against the compose stack, and every concurrency harness scenario passed 100
         context per class; `strategies=PESSIMISTIC` gives 6, `strategies=REDIS` fails all 4 methods with
         "unknown strategy 'REDIS'". actionlint clean. Targeted run (100 rounds): StrategyConcurrencyTest
         12, HoldCapConcurrencyTest 6, HarnessStrategiesTest 4, ModularityTest 2, BUILD SUCCESSFUL in 7m 23s.
-        Verified by the user (2026-11-18): full suite BUILD SUCCESSFUL in 26m 7s. The 1000-round proof
-        workflow has not run on the new classes yet.
+        Verified by the user (2026-11-18): full suite BUILD SUCCESSFUL in 26m 7s. Concurrency proof
+        workflow run #2 (user, 2026-11-19; 1000 rounds, the parameterised harness): all four groups
+        (pessimistic, optimistic, redis-first, redis-races) green in 25m 36s.
       Note (found in M2.3b, 2026-11-18; fixed 2026-11-19 as a small follow-up, test only):
       `TicketIssuingConcurrencyTest.twoOrdersRacingForOneSeatLeaveAllOfOneAndNoneOfTheOther` was flaky.
       It failed once in `./gradlew test --rerun --tests "*ConcurrencyTest" -Dstampede.harness.rounds=1`
@@ -702,6 +703,53 @@ end against the compose stack, and every concurrency harness scenario passed 100
       16). Full suite 2026-11-13 (user): BUILD SUCCESSFUL in 13m 53s (was 15m 20s), no shutdown
       errors. `spring.test.context.cache.maxSize=8` not needed: memory held for the full run.
 - [ ] M2.4 k6 scenarios: seat-collision, mixed-realistic; `scripts/k6.sh` runs k6 in Docker
+      Split (approved 2026-11-19) into M2.4a and M2.4b. Decisions (user, 2026-11-19; D-024): k6
+      `grafana/k6:1.8.2` pinned by digest; users registered and logged in by k6 `setup()` each run; a
+      fresh warm-up and benchmark event per run, created by SQL from the demo event and switched through
+      the M2.3a endpoint before its drop; the post-run verdict from a new `GET /admin/invariants`
+      (after the event's stream lag is zero); thresholds gate correctness only, latency is reported;
+      pool exhaustion measured, not fixed; PowerShell runs `k6.sh` through Git Bash.
+  - [x] M2.4a `scripts/k6.sh` (k6 in Docker on the compose network, samplers, run folder), the event SQL,
+        users and tokens, `GET /admin/invariants` with its tests, the `smoke` and `seat-collision`
+        scenarios.
+        Done 2026-11-19 (D-024). `GET /admin/invariants?eventId=&grace=` (ADMIN; `control.admin.
+        AdminInvariantsController`, `control.invariants.OnDemandInvariantCheck`): for a REDIS_FIRST event it
+        reads `inventory.api.RedisStreamBacklog` (new; implemented by `RedisStreamConsumer`) before running
+        the checker; default grace = the monitor's. k6 side: `scripts/k6.sh`, `scripts/k6/{smoke,
+        seat-collision,prepare-admin}.js`, `scripts/k6/lib/*.js`, `scripts/k6/sql/*.sql`; runs land in
+        `benchmarks/runs/` (gitignored). Verdict grace PT0S after the stream lag is zero (D-024).
+        Tests: `AdminInvariantsApiTest` (9: 401, 403, clean event, default grace, a planted I8 reported,
+        REDIS_FIRST lag true then false after the drain, 400 x2, 404); `OpenApiSpecTest` (path list, the new
+        operation). docs/openapi.json and frontend/src/api/schema.d.ts regenerated (check:api, typecheck clean).
+        Claude (--rerun): targeted set (CLAUDE.md rule: the new test, one class per full context, the
+        control.invariants tests, every slice importing `RedisStreamConsumer` or the strategy beans,
+        ModularityTest): 24 classes, 362 tests, 0 failures, BUILD SUCCESSFUL in 20m 52s. shellcheck clean
+        (pinned actionlint image). Stack runs (compose, 8 Docker CPUs): `smoke` PESSIMISTIC PASS (16
+        requests, verdict 0 violations); `seat-collision`, 200 buyers for 100 seats, 15 s warm-up:
+        OPTIMISTIC PASS, REDIS_FIRST PASS, PESSIMISTIC FAIL on one 500 (the deadlock below); in all three
+        100 seats held and sold, database count equal to k6's, strict verdict 0 violations.
+        API change: the new endpoint (openapi.json, frontend client). New image: grafana/k6:1.8.2 (digest
+        in k6.sh). No new dependency. Verified by the user (2026-11-19): full suite BUILD SUCCESSFUL in
+        45m 31s.
+      Found by M2.4a (2026-11-19), not fixed (outside the task; needs its own plan and concurrency test):
+      **a 40P01 deadlock between a pessimistic hold and ticket issuing.** seat-collision PESSIMISTIC got one
+      500 (`PessimisticLockingFailureException`, deadlock detected; Postgres log: two holds' `SELECT ...
+      ORDER BY seat_id FOR UPDATE` and one `INSERT INTO tickets`). `tickets` has a foreign key to
+      `event_seats (event_id, seat_id)`, so each ticket insert takes `FOR KEY SHARE` on its seat row, which
+      conflicts with the hold's `FOR UPDATE`. `TicketIssuer` inserts in Java UUID order
+      (`Comparator.comparing(seatId)`, signed), the holds lock in Postgres byte order (D-015 notes the two
+      differ), so the two can wait on each other in a cycle. Seats and orders stayed correct (the
+      deadlocked hold rolled back; verdict clean). Options to decide: sort the issuer's seats in Postgres
+      order; or lock seats `FOR NO KEY UPDATE` in the pessimistic strategy (it doesn't conflict with
+      `KEY SHARE`, the reason D-023 uses it on the event row). Neither the harness (strategies alone) nor
+      `TicketIssuingConcurrencyTest` (issuers alone) races a hold against ticket issuing on the same seats.
+      Note (M2.4a measurements, for the M1.2 pool note and M2.4b/M2.5): pessimistic seat-collision with
+      200 buyers had all 10 pooled connections active and up to 8 waiting on a lock (pool exhausted);
+      optimistic at most 4 active, 0 waiting; Redis-first 4 active, 1 waiting. The layout of the 2,014-seat
+      demo venue is 374,473 bytes raw (D-020 estimated ~240 KB), 295 ms in smoke. Under REDIS_FIRST, 114 of
+      200 buyers gave up after 5 tries (91 % conflicts): the seat map reads Postgres, which trails Redis
+      by the consumer lag, so buyers keep picking seats Redis has already given away.
+  - [ ] M2.4b `mixed-realistic`, the repeat procedure, the DEVELOPING.md load-test section.
       Note (from M1.8a, D-020): measure GET /events/{id}/layout (size raw and gzipped, latency) and
       GET /events/{id}/seatmap under polling load; the layout size (~240 KB raw) is only an estimate.
       If it matters, add gzip/ETag or a compact encoding.

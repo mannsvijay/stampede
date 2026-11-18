@@ -17,6 +17,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/admin/invariants": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Check one event's invariants now
+         * @description Runs every invariant rule for the event and returns the violations (none = all hold). For a REDIS_FIRST event, the result is only conclusive when unappliedStreamEntries is false.
+         */
+        get: operations["checkInvariants"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/auth/login": {
         parameters: {
             query?: never;
@@ -314,6 +334,18 @@ export interface components {
         HoldSeatsRequest: {
             seatIds: string[];
         };
+        InvariantsResponse: {
+            /** Format: date-time */
+            checkedAt: string;
+            /** Format: uuid */
+            eventId: string;
+            grace: string;
+            rules: string[];
+            /** @enum {string} */
+            strategy: "PESSIMISTIC" | "OPTIMISTIC" | "REDIS_FIRST";
+            unappliedStreamEntries: boolean;
+            violations: components["schemas"]["ViolationResponse"][];
+        };
         Jwk: {
             /** @example EdDSA */
             alg: string;
@@ -556,6 +588,11 @@ export interface components {
             id: string;
             name: string;
         };
+        ViolationResponse: {
+            detail: string;
+            name: string;
+            rule: string;
+        };
     };
     responses: never;
     parameters: never;
@@ -627,6 +664,75 @@ export interface operations {
             };
             /** @description STRATEGY_SWITCH_REFUSED */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description INTERNAL_ERROR */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    checkInvariants: {
+        parameters: {
+            query: {
+                eventId: string;
+                /** @description ISO-8601 duration, e.g. PT0S (strict) or PT30S. In-between checkout states of orders younger than this are excused. Default: the invariant monitor's grace. */
+                grace?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Checked; violations is empty when every rule holds */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InvariantsResponse"];
+                };
+            };
+            /** @description VALIDATION_FAILED */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description UNAUTHENTICATED */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description FORBIDDEN */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description EVENT_NOT_FOUND */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

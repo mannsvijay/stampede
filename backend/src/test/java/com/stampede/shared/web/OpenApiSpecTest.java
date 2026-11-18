@@ -7,6 +7,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.stream.StreamSupport;
@@ -86,7 +87,20 @@ class OpenApiSpecTest {
                 "/events/{id}/holds", "/holds/{id}",
                 "/orders", "/orders/{id}",
                 "/me/tickets", "/tickets/keys",
-                "/admin/events/{id}/strategy");
+                "/admin/events/{id}/strategy", "/admin/invariants");
+    }
+
+    @Test
+    void theInvariantCheckDocumentsAdminOnlyAndItsQueryParameters() {
+        JsonNode operation = generated.path("paths").path("/admin/invariants").path("get");
+        assertThat(operation.path("operationId").asText()).isEqualTo("checkInvariants");
+        assertThat(fieldNames(operation.path("responses")))
+                .containsExactlyInAnyOrder("200", "400", "401", "403", "404", "500");
+        assertThat(operation.path("responses").path("403").path("description").asText()).isEqualTo("FORBIDDEN");
+        List<String> parameters = new ArrayList<>();
+        operation.path("parameters").forEach(p -> parameters.add(p.path("name").asText()
+                + (p.path("required").asBoolean() ? "(required)" : "")));
+        assertThat(parameters).containsExactlyInAnyOrder("eventId(required)", "grace");
     }
 
     @Test

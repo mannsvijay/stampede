@@ -1,5 +1,6 @@
 package com.stampede.inventory.strategy;
 
+import com.stampede.inventory.api.RedisStreamBacklog;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.nio.charset.StandardCharsets;
@@ -68,7 +69,7 @@ import org.springframework.stereotype.Component;
  * or a test).
  */
 @Component
-class RedisStreamConsumer {
+class RedisStreamConsumer implements RedisStreamBacklog {
 
     private static final Logger log = LoggerFactory.getLogger(RedisStreamConsumer.class);
     private static final int DEAD_LETTER_MAX = 10_000;
@@ -260,9 +261,12 @@ class RedisStreamConsumer {
      * Whether the stream still has an entry of this event that the group hasn't acknowledged: pending
      * (delivered but not acknowledged) or not delivered yet. With no group yet, every entry counts.
      * Reads all of them in pages of {@value #SCAN_PAGE}, with no cap: it is for the strategy switch
-     * (M2.3a, D-023), which refuses to switch away from REDIS_FIRST while this is true, not a hot path.
+     * (M2.3a, D-023), which refuses to switch away from REDIS_FIRST while this is true, and for the
+     * on-demand invariant check (M2.4a, D-024), which reports it; not a hot path. Uses only the shared
+     * template connection, so any thread may call it.
      */
-    boolean hasUnappliedEntries(UUID eventId) {
+    @Override
+    public boolean hasUnappliedEntries(UUID eventId) {
         if (!Boolean.TRUE.equals(redis.hasKey(keys.stream()))) {
             return false;
         }
