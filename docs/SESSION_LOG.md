@@ -1456,3 +1456,46 @@ then checks; the grace chosen and why.
 - The layout is 374,473 bytes raw (D-020 estimated ~240 KB). Under REDIS_FIRST 114 of 200 buyers gave
   up: the seat map reads Postgres, which trails Redis.
 - D-023 and D-024 are drafts for you to rewrite in your own words.
+
+## 2026-11-19 — M2.4a-fix The 40P01 deadlock between a pessimistic hold and ticket issuing
+**Changed**
+- Seat locks `FOR UPDATE` → `FOR NO KEY UPDATE` in every path: `PessimisticInventoryStrategy` (hold),
+  `HoldClosing.lockSeatsOfHold` (release and sell, all three strategies), `RedisHoldWriter.insertActive`,
+  `StrategySwitcher`. Seat writes change only non-key columns, so seat writers still exclude each other;
+  the `FOR KEY SHARE` of an `order_items` or `tickets` foreign-key check no longer waits for them.
+  The hold row keeps `FOR UPDATE` (reviewed: no cycle).
+- `shared.ordering.PostgresUuidOrder` (new named interface, D-009 amendment): UUIDs in Postgres's
+  unsigned byte order. `TicketIssuer` sorts its seats with it instead of `UUID.compareTo` (second
+  safeguard). Ticketing declares `"shared :: ordering"`.
+- Tests, written first and shown failing on the old code (10 of 11; the optimistic hold test passed as
+  the control): `aHoldAndTicketIssuingOnTheSameSeatsDoNotDeadlock` (40P01 before),
+  `anOrderCreationDoesNotWaitForAHoldAttemptOnItsSeats`, `{hold,release,sell}DoesNotWaitForAForeignKeyCheckOnItsSeats`
+  (both Postgres strategies), `persistingAHoldDoesNotWaitForAForeignKeyCheckOnItsSeats`,
+  `theSwitchDoesNotWaitForAForeignKeyCheckOnASeat`, `theIssuerTakesItsSeatsInPostgresOrder`
+  ("could not obtain lock" before), `PostgresUuidOrderTest` (3). Test helpers
+  `foreignKeyCheckOn` / `finishesWithoutWaitingForALock`. ModularityTest's named-interface list gains
+  `ordering`.
+- Finding: `order_items` had no deadlock (its inserts were already in Postgres order through
+  `HoldService.seats`), only a wait behind hold attempts, now gone.
+- Docs: D-015 (lock-mode rule and reasoning, `order_items` and hold-row review), D-009 amendment,
+  D-023 step 3, D-018 issue order, PLAN.md (M2.4a-fix ticked, M2.4a note points to it).
+
+**Verified**
+- Claude (--rerun, scope set by the user): the 11 new tests on the old code, 10 failing as above; after
+  the fix 8 classes (the three strategy contract runners, RedisHoldWriterTest, StrategySwitcherTest,
+  TicketIssuingConcurrencyTest, PostgresUuidOrderTest, ModularityTest), 197 tests, 0 failures after the
+  ModularityTest update.
+- Claude, stack runs on the rebuilt image: `seat-collision` PESSIMISTIC, 200 buyers for 100 seats,
+  15 s warm-up, twice: both PASS (0 unexpected responses, 100 sold, database check ok, strict verdict
+  0 violations), no deadlock in the Postgres or backend logs.
+- User (2026-11-19; Claude reran nothing at session end): full suite BUILD SUCCESSFUL in 22m 1s.
+
+**Next**: M2.4b (`mixed-realistic`, the repeat procedure, the DEVELOPING.md load-test section).
+
+**Open problems**
+- The 1000-round concurrency-proof workflow hasn't run on this change (the lock mode touches every
+  strategy's seat locks).
+- Pessimistic pool exhaustion is still open (the `lock_timeout` decision, M2.4b). Pool samples were
+  lower in the two runs (max 3/1 and 8/3 active/waiting vs 10/8), but a ~3 s burst sampled at 1 s is
+  not a measurement.
+- D-015's new lock-mode text and the D-009 amendment are drafts for you to rewrite in your own words.

@@ -52,7 +52,8 @@ class ModularityTest {
         assertThat(namedInterfaces).containsEntry("ticketing", Set.of("api", "events"));
         assertThat(namedInterfaces).containsEntry("realtime", Set.of());
         assertThat(namedInterfaces).containsEntry("control", Set.of());
-        assertThat(namedInterfaces).containsEntry("shared", Set.of("security", "error"));
+        // ordering: PostgresUuidOrder (D-009 amendment, M2.4a fix).
+        assertThat(namedInterfaces).containsEntry("shared", Set.of("security", "error", "ordering"));
     }
 
     private static Set<String> namedInterfaceNames(ApplicationModule module) {

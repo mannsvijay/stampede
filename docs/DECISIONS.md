@@ -257,6 +257,12 @@ Write these yourself, in your own words. Each one is an interview answer you've 
   each interface works. I chose explicit names because they are easy to search for and match how
   D-007 is written. `@ApplicationModule(type = OPEN)` also worked, but exposes every type in shared,
   which would let it quietly become a junk drawer.
+- **Amendment (2026-11-19, decided by the user): a third named interface, `shared.ordering`**, with one
+  helper, `PostgresUuidOrder` (UUIDs in Postgres's unsigned byte order, D-015). Only ticketing uses it
+  today and only ticketing declares `"shared :: ordering"`, which bends the "every module needs it"
+  rule. It is there because the lock order is a rule for every module that touches rows in a
+  lock-relevant order (D-015), and one documented, tested comparator beats each module writing its own
+  `Long.compareUnsigned` pair. A module that needs it adds the dependency explicitly.
 - **How I'd know it was wrong:** shared starts collecting module-specific types (anything only one or
   two modules use belongs in that module's api), or a change to shared keeps forcing changes in many
   modules at once.
@@ -622,6 +628,14 @@ Write these yourself, in your own words. Each one is an interview answer you've 
     waits on an existing hold row. The sweeper releases one hold per transaction. (M2.3a, D-023: the
     strategy switch takes the event row `FOR NO KEY UPDATE` and then every seat of the event in this
     order; no other path locks event rows.)
+  - **Lock mode (2026-11-19, after M2.4a's 40P01 deadlock): a row that a path locks only to change
+    non-key columns is locked `FOR NO KEY UPDATE`, not `FOR UPDATE`.** That covers every seat lock (the
+    pessimistic hold, release and sell in `HoldClosing`, the Redis-first writer, the strategy switch),
+    the event row in the switch (D-023) and the order row in `TicketStep` (D-018). `FOR UPDATE` is only
+    for a path that deletes the row or changes a column of a unique index (its "key"); no seat path does.
+    The hold row (`HoldClosing.lockHold`) keeps `FOR UPDATE` (reviewed below; changing it would be safe
+    but isn't needed). Java code that touches several rows in a lock-relevant order sorts with
+    `shared.ordering.PostgresUuidOrder` (D-009 amendment), never `UUID.compareTo`; `TicketIssuer` does.
   - Seat UPDATEs add `AND version = :oldVersion`; zero rows updated under the lock is a bug and
     throws. (Measured: with `FOR UPDATE` removed, this check alone turned every double-hold in the race
     tests into a rollback; with both removed, two buyers were told `Held` for the same seat.)
@@ -640,7 +654,36 @@ Write these yourself, in your own words. Each one is an interview answer you've 
     Mixing a Java order in one path with `ORDER BY` in another is two orders, which can deadlock.
   - Locking several holds in one sweeper transaction would take seat locks hold by hold, not in one
     global seat order.
-- **How I'd know it was wrong:** M1.3 or the k6 runs log deadlocks (`40P01`); or holds expire at
+  - **Why the lock mode matters (found by M2.4a).** Postgres has four row-lock strengths. A foreign-key
+    check on insert takes the weakest, `FOR KEY SHARE`, on the parent row: it only stops that row from
+    being deleted or its key from changing. `FOR UPDATE` conflicts with it; `FOR NO KEY UPDATE` doesn't,
+    and it is the lock a plain UPDATE of non-key columns takes anyway. `order_items` and `tickets` have
+    foreign keys to `event_seats (event_id, seat_id)`, the table's only unique key, and seat writes
+    change only `status`, `hold_id`, `order_id` and `version`. So `NO KEY UPDATE` gives up nothing: seat
+    writers still exclude each other exactly as before (the version check and all-or-nothing holds are
+    unchanged), and inserts that only check a seat exists never wait for them.
+  - **The deadlock it fixes.** M2.4a's PESSIMISTIC seat-collision got one 500 (`40P01`): `TicketIssuer`
+    inserted tickets in Java's signed UUID order, taking `KEY SHARE` per seat, while holds for the same
+    (sold) seats locked them `FOR UPDATE` in Postgres order. Each waited for a seat the other had.
+    `PessimisticInventoryStrategyTest.aHoldAndTicketIssuingOnTheSameSeatsDoNotDeadlock` reproduces it
+    step by step (it failed with "deadlock detected" before the fix) and keeps the issuer in the old
+    Java order, so it proves the lock mode alone breaks the cycle. The issuer's Postgres order is the
+    second safeguard, tested by `TicketIssuingConcurrencyTest.theIssuerTakesItsSeatsInPostgresOrder`.
+    The switch, the Redis-first writer, release and sell had the same `FOR UPDATE` and each has a test
+    that a held `FOR KEY SHARE` no longer makes it wait.
+  - **The other table with a foreign key to `event_seats` is `order_items`** (besides `tickets`). Its inserts
+    (`OrderWriter.createPending`) already went in Postgres order (`HoldService.seats` sorts with
+    `ORDER BY es.seat_id`), so they could wait for a hold attempt on the order's seats but not deadlock
+    with it; with `NO KEY UPDATE` they don't wait (`anOrderCreationDoesNotWaitForAHoldAttemptOnItsSeats`).
+    After the change a `KEY SHARE` on a seat waits only for a delete or a key change, which no runtime
+    path does; the seat paths never touch `order_items` or `tickets`, and two order creations or two
+    issuers wait on each other's unique-index entries in the same Postgres order. No cycle is left.
+  - **The hold row**, reviewed for the same pattern: `orders.hold_id` checks it with `KEY SHARE` while
+    release and sell lock it `FOR UPDATE`. Order creation takes that `KEY SHARE` before its item inserts,
+    and release and sell hold nothing before the hold row, so both sides go hold row first, then seats:
+    one order, no cycle. Kept as is.
+- **How I'd know it was wrong:** M1.3 or the k6 runs log deadlocks (`40P01`; M2.4a did once, fixed by
+  the lock mode above); or holds expire at
   visibly different times on different instances; or the optimistic strategy needs a third
   rejection the interface can't express (I'd add `CONTENDED` then); or under a drop, buyers queueing
   on one hot seat's lock use up the connection pool and stall other events (then add a bounded
@@ -899,7 +942,8 @@ Write these yourself, in your own words. Each one is an interview answer you've 
     the answer is still **201**, and an error is logged; nothing is released or refunded. A retried
     `POST /orders` for the same hold (hold CONVERTED) re-runs issuing before answering 200.
   - **Idempotent by the database:** each insert is `ON CONFLICT (event_id, seat_id) WHERE status <>
-    'REVOKED' DO NOTHING` on `uq_tickets_live_seat`, in one transaction with seats in id order;
+    'REVOKED' DO NOTHING` on `uq_tickets_live_seat`, in one transaction with seats in Postgres id order
+    (`shared.ordering.PostgresUuidOrder`; Java's signed `UUID` order until the M2.4a fix, D-015);
     afterwards every seat's live ticket must belong to this order, or the whole issue rolls back
     and throws.
   - **Holder = user id only.** No personal data in a readable QR code.
@@ -1712,7 +1756,8 @@ Write these yourself, in your own words. Each one is an interview answer you've 
        (CLOSED) and `load.lua` writes nothing while it exists. Redis runs one command at a time, so every
        hold either ran before the gate (its hash and entry exist, and step 4 sees them) or is refused.
     3. One transaction: the event row `FOR NO KEY UPDATE`, then **every seat of the event** `ORDER BY
-       seat_id FOR UPDATE` (D-015's order).
+       seat_id FOR NO KEY UPDATE` (D-015's order and lock mode; `FOR UPDATE` until the M2.4a fix, which
+       made the switch wait for order and ticket inserts checking a seat).
     4. The checks above, under those locks. To REDIS_FIRST: delete the event's leftover keys (all but
        the gate). `UPDATE events`, then the audit row through the caller's `AuditWriter`, then commit.
     5. After the commit: from REDIS_FIRST, delete every key of the event except the gate; to REDIS_FIRST,

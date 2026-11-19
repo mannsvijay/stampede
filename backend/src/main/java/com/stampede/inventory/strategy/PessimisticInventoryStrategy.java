@@ -15,8 +15,14 @@ import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
 /**
- * Strategy A (PRD 6.2): {@code SELECT ... FOR UPDATE} on the requested event_seats rows, locked in
- * Postgres {@code seat_id} order, inside one transaction (D-015).
+ * Strategy A (PRD 6.2): {@code SELECT ... FOR NO KEY UPDATE} on the requested event_seats rows, locked
+ * in Postgres {@code seat_id} order, inside one transaction (D-015).
+ * <p>
+ * Why {@code NO KEY UPDATE} and not {@code FOR UPDATE} (D-015 lock modes): we only ever change non-key
+ * columns of a seat (status, hold_id, order_id, version), and that is the lock our own UPDATE takes
+ * anyway. It still makes every other seat writer wait, but not the {@code FOR KEY SHARE} lock that an
+ * {@code order_items} or {@code tickets} insert takes to check its foreign key to the seat. With
+ * {@code FOR UPDATE} those inserts waited for holds, and ticket issuing deadlocked with them (M2.4a).
  * <p>
  * The pattern: lock, decide with {@link EventSeat}, and only then write. Whether a seat may move is
  * decided by the state machine, never by SQL (D-004); the locks only guarantee that nothing changes
@@ -66,7 +72,7 @@ class PessimisticInventoryStrategy implements InventoryStrategy {
     }
 
     private HoldOutcome lockAndHold(HoldRequest request) {
-        // Step 2: lock the requested seats. ORDER BY seat_id runs before FOR UPDATE takes the locks,
+        // Step 2: lock the requested seats. ORDER BY seat_id runs before the locking clause takes the locks,
         // so every transaction locks seats in the same (Postgres) order and two requests for
         // overlapping seats can't wait for each other in a circle (deadlock). If another transaction
         // holds a lock, we wait here; once it commits, Postgres gives us the row's new version.
@@ -144,7 +150,7 @@ class PessimisticInventoryStrategy implements InventoryStrategy {
                         FROM event_seats
                         WHERE event_id = :eventId AND seat_id IN (:seatIds)
                         ORDER BY seat_id
-                        FOR UPDATE
+                        FOR NO KEY UPDATE
                         """)
                 .param("eventId", eventId)
                 .param("seatIds", seatIds)

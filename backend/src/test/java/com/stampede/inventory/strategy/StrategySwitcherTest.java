@@ -18,7 +18,6 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
-import javax.sql.DataSource;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -45,9 +44,6 @@ class StrategySwitcherTest extends RedisPersistenceTestSupport {
 
     @Autowired
     RedisFirstInventoryStrategy redisFirst;
-
-    @Autowired
-    DataSource dataSource;
 
     /** Every audit call the switcher made, as "from->to". */
     private final List<String> audited = new ArrayList<>();
@@ -302,6 +298,25 @@ class StrategySwitcherTest extends RedisPersistenceTestSupport {
         }
         assertThat(strategyInPostgres()).isEqualTo("PESSIMISTIC");
         assertThat(audited).isEmpty();
+    }
+
+    /**
+     * The switch locks every seat of the event to take turns with holds (D-023), not with order creation
+     * or ticket issuing: their foreign-key checks take {@code FOR KEY SHARE} on seats, which the switch's
+     * {@code FOR NO KEY UPDATE} doesn't conflict with (D-015). With {@code FOR UPDATE} it waited for them,
+     * and a ticket insert going in another seat order could deadlock with it (M2.4a).
+     */
+    @Test
+    void theSwitchDoesNotWaitForAForeignKeyCheckOnASeat() throws Exception {
+        setStrategy(StrategyKind.PESSIMISTIC);
+        offSale();
+        try (Connection checkout = foreignKeyCheckOn(SEATS.get(0))) {
+            SwitchResult result = finishesWithoutWaitingForALock(threads.submit(() -> switchTo(StrategyKind.OPTIMISTIC)));
+
+            assertThat(result).isEqualTo(new SwitchResult.Switched(EventStrategy.PESSIMISTIC, EventStrategy.OPTIMISTIC));
+            checkout.rollback();
+        }
+        assertThat(strategyInPostgres()).isEqualTo("OPTIMISTIC");
     }
 
     // --- helpers -----------------------------------------------------------------------------------

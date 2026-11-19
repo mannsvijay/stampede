@@ -482,6 +482,32 @@ class RedisHoldWriterTest extends RedisPersistenceTestSupport {
         assertThat(violations()).isEmpty();
     }
 
+    /**
+     * Persisting a HELD locks its seats (D-015 order) while an order creation or ticket insert may be
+     * checking a foreign key on one of them with {@code FOR KEY SHARE}. The writer's
+     * {@code FOR NO KEY UPDATE} doesn't conflict with it; {@code FOR UPDATE} waited (M2.4a fix).
+     */
+    @Test
+    void persistingAHoldDoesNotWaitForAForeignKeyCheckOnItsSeats() throws Exception {
+        load();
+        UUID holdId = hold(USER, FIVE_MINUTES, SEATS.get(0), SEATS.get(1));
+        StreamEntry.HoldFacts facts = StreamEntry.HoldFacts.of(EVENT, store.liveHold(EVENT, holdId).orElseThrow());
+        java.util.concurrent.ExecutorService pool = java.util.concurrent.Executors.newSingleThreadExecutor();
+        try (java.sql.Connection checkout = foreignKeyCheckOn(SEATS.get(1))) {
+            assertThat(finishesWithoutWaitingForALock(pool.submit(() -> writer.applyHeld(facts))))
+                    .isEqualTo(Applied.APPLIED);
+            checkout.rollback();
+        } finally {
+            pool.shutdownNow();
+        }
+        drain();   // its HELD entry, already persisted
+
+        assertThat(holdStatus(holdId)).isEqualTo("ACTIVE");
+        assertThat(seat(SEATS.get(0)).holdId()).isEqualTo(holdId);
+        assertThat(seat(SEATS.get(1)).holdId()).isEqualTo(holdId);
+        assertThat(violations()).isEmpty();
+    }
+
     /** Persists a live Redis hold as ACTIVE the way the consumer would, without the writer (no hooks). */
     private void persistActiveDirectly(UUID holdId) {
         RedisHoldStore.LiveHold live = store.liveHold(EVENT, holdId).orElseThrow();

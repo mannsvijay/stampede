@@ -10,6 +10,7 @@
         allowedDependencies = {
                 "shared :: security",
                 "shared :: error",
+                "shared :: ordering",
                 "identity :: api"
         })
 package com.stampede.ticketing;

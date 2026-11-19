@@ -731,7 +731,7 @@ end against the compose stack, and every concurrency harness scenario passed 100
         API change: the new endpoint (openapi.json, frontend client). New image: grafana/k6:1.8.2 (digest
         in k6.sh). No new dependency. Verified by the user (2026-11-19): full suite BUILD SUCCESSFUL in
         45m 31s.
-      Found by M2.4a (2026-11-19), not fixed (outside the task; needs its own plan and concurrency test):
+      Found by M2.4a (2026-11-19), fixed by M2.4a-fix below:
       **a 40P01 deadlock between a pessimistic hold and ticket issuing.** seat-collision PESSIMISTIC got one
       500 (`PessimisticLockingFailureException`, deadlock detected; Postgres log: two holds' `SELECT ...
       ORDER BY seat_id FOR UPDATE` and one `INSERT INTO tickets`). `tickets` has a foreign key to
@@ -749,6 +749,27 @@ end against the compose stack, and every concurrency harness scenario passed 100
       demo venue is 374,473 bytes raw (D-020 estimated ~240 KB), 295 ms in smoke. Under REDIS_FIRST, 114 of
       200 buyers gave up after 5 tries (91 % conflicts): the seat map reads Postgres, which trails Redis
       by the consumer lag, so buyers keep picking seats Redis has already given away.
+  - [x] M2.4a-fix The 40P01 deadlock found by M2.4a (approved 2026-11-19): seat locks `FOR NO KEY UPDATE`
+        everywhere (pessimistic hold, `HoldClosing` release/sell, `RedisHoldWriter`, `StrategySwitcher`),
+        `TicketIssuer` inserts in Postgres seat order through the new `shared.ordering.PostgresUuidOrder`
+        (D-009 amendment), D-015 lock-mode rule. `order_items` reviewed: no cycle (already Postgres
+        order), but it waited; now it doesn't.
+        Tests (written first; before the fix 10 of the 11 new ones failed, the optimistic hold one passing
+        as the control): `PessimisticInventoryStrategyTest.aHoldAndTicketIssuingOnTheSameSeatsDoNotDeadlock`
+        (failed with 40P01 "deadlock detected") and `anOrderCreationDoesNotWaitForAHoldAttemptOnItsSeats`;
+        `{hold,release,sell}DoesNotWaitForAForeignKeyCheckOnItsSeats` (PostgresLockingContractTest, both
+        Postgres strategies); `RedisHoldWriterTest.persistingAHoldDoesNotWaitForAForeignKeyCheckOnItsSeats`;
+        `StrategySwitcherTest.theSwitchDoesNotWaitForAForeignKeyCheckOnASeat`;
+        `TicketIssuingConcurrencyTest.theIssuerTakesItsSeatsInPostgresOrder` (failed: "could not obtain
+        lock"); `PostgresUuidOrderTest` (3). ModularityTest's named-interface list gains `shared::ordering`.
+        Claude (--rerun, scope set by the user: new and changed classes plus ModularityTest): 8 classes,
+        197 tests, 0 failures after the ModularityTest update. k6 seat-collision PESSIMISTIC, 200 buyers
+        for 100 seats, 15 s warm-up, new image: two runs, both PASS (0 unexpected responses, 100 sold,
+        database check ok, strict verdict 0 violations), no deadlock in the Postgres or backend logs.
+        Pool samples (1 s): run 1 max 3 active / 1 waiting, run 2 max 8 active / 3 waiting (M2.4a: 10 / 8);
+        the burst lasts ~3 s, so these are a few samples each, not a measurement (M2.4b).
+        Verified by the user (2026-11-19): full suite BUILD SUCCESSFUL in 22m 1s; ModularityTest change
+        accepted. The 1000-round concurrency-proof workflow has not been run on this change yet.
   - [ ] M2.4b `mixed-realistic`, the repeat procedure, the DEVELOPING.md load-test section.
       Note (from M1.8a, D-020): measure GET /events/{id}/layout (size raw and gzipped, latency) and
       GET /events/{id}/seatmap under polling load; the layout size (~240 KB raw) is only an estimate.

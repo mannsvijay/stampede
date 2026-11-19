@@ -29,6 +29,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.function.BooleanSupplier;
 import javax.sql.DataSource;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -150,7 +151,7 @@ abstract class InventoryStrategyContractTest {
         }
         // SEAT_2 is inserted first ON PURPOSE: a scan in physical order then meets SEAT_2 before SEAT_1,
         // the opposite of seat_id order. lockOrderIsPostgresSeatIdOrder relies on that to tell
-        // "ORDER BY seat_id FOR UPDATE" apart from "whatever order the scan returns".
+        // "ORDER BY seat_id FOR NO KEY UPDATE" apart from "whatever order the scan returns".
         insertEvent(EVENT_A, TIER_A, SEAT_2, SEAT_1, SEAT_3, SEAT_4);
         insertEvent(EVENT_B, TIER_B, SEAT_B);
     }
@@ -481,6 +482,57 @@ abstract class InventoryStrategyContractTest {
             Thread.sleep(20);
         }
         throw new AssertionError("Expected exactly " + sessions + " session(s) waiting for a lock within 10 s");
+    }
+
+    /** How many sessions of this test's database are waiting for a lock right now. */
+    protected long sessionsWaitingForALock() {
+        return jdbc.sql("SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' "
+                        + "AND datname = current_database()")
+                .query(Long.class).single();
+    }
+
+    /** Polls until {@code condition} holds (at most 10 s). */
+    protected static void waitUntil(BooleanSupplier condition, String what) throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+        while (!condition.getAsBoolean()) {
+            if (System.nanoTime() > deadline) {
+                throw new AssertionError("Timed out after 10 s waiting until " + what);
+            }
+            Thread.sleep(10);
+        }
+    }
+
+    /**
+     * Another session doing what the foreign-key check of an {@code order_items} or {@code tickets}
+     * insert does: {@code FOR KEY SHARE} on the seat row. Returns the open transaction; roll it back.
+     */
+    protected Connection foreignKeyCheckOn(UUID eventId, UUID seatId) throws SQLException {
+        Connection connection = openTransaction();
+        exec(connection, "SELECT 1 FROM event_seats WHERE event_id = ? AND seat_id = ? FOR KEY SHARE", eventId, seatId);
+        return connection;
+    }
+
+    /**
+     * Waits for {@code call} and fails as soon as any session of this database waits for a lock
+     * meanwhile. The test's own sessions only take locks that nothing else holds, so a waiting session
+     * is the call. For locks no path may wait for, like a foreign-key check's {@code FOR KEY SHARE} on a
+     * seat (D-015).
+     */
+    protected <T> T finishesWithoutWaitingForALock(Future<T> call) throws Exception {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+        while (!call.isDone()) {
+            List<String> waiting = jdbc.sql("SELECT query FROM pg_stat_activity WHERE wait_event_type = 'Lock' "
+                            + "AND datname = current_database()")
+                    .query(String.class).list();
+            if (!waiting.isEmpty()) {
+                throw new AssertionError("Expected no session to wait for a lock, but these do: " + waiting);
+            }
+            if (System.nanoTime() > deadline) {
+                throw new AssertionError("The call did not finish within 10 s");
+            }
+            Thread.sleep(10);
+        }
+        return call.get();
     }
 
     record SeatRow(SeatStatus status, UUID holdId, UUID orderId, long version) {

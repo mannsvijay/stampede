@@ -43,7 +43,8 @@ import org.springframework.transaction.support.TransactionTemplate;
  * So a hold that ended in Redis can never become ACTIVE in Postgres again.
  * <p>
  * <b>Lock order (D-015)</b>: an ACTIVE insert takes (1) the new hold row, by inserting it, (2) the
- * seats, {@code ORDER BY seat_id FOR UPDATE}, (3) the allowance row. Closing another hold that blocks
+ * seats, {@code ORDER BY seat_id FOR NO KEY UPDATE} (only non-key columns change; D-015 lock modes),
+ * (3) the allowance row. Closing another hold that blocks
  * it would lock that hold's row after seats, so that happens in its own transaction, before a retry.
  */
 @Component
@@ -296,7 +297,7 @@ class RedisHoldWriter {
                             FROM event_seats
                             WHERE event_id = :eventId AND seat_id IN (:seatIds)
                             ORDER BY seat_id
-                            FOR UPDATE
+                            FOR NO KEY UPDATE
                             """)
                     .param("eventId", hold.eventId())
                     .param("seatIds", hold.seatIds())

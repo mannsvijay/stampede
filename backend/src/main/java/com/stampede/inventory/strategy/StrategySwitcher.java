@@ -31,7 +31,7 @@ import org.springframework.transaction.support.TransactionTemplate;
  *       command at a time, so every {@code hold.lua} either ran before (its hash and stream entry exist,
  *       and step 4 sees them) or answers CLOSED after.</li>
  *   <li><b>One transaction</b>: the event row ({@code FOR NO KEY UPDATE}), then every seat of the event
- *       ({@code ORDER BY seat_id FOR UPDATE}, D-015's order). A hold in flight either committed before
+ *       ({@code ORDER BY seat_id FOR NO KEY UPDATE}, D-015's order and lock mode). A hold in flight either committed before
  *       (step 4 sees it) or waits for these locks and then fails its in-transaction re-check
  *       ({@link StrategyGuard}).</li>
  *   <li><b>Checks</b>, under those locks: not ENDED, not on sale, no ACTIVE hold; from REDIS_FIRST also
@@ -48,7 +48,9 @@ import org.springframework.transaction.support.TransactionTemplate;
  * foreign key to {@code events} with a {@code FOR KEY SHARE} lock on the event row, which
  * {@code FOR UPDATE} blocks. A hold holding a seat lock and inserting its row would wait for the
  * switch, while the switch waits for that seat: a deadlock. {@code NO KEY UPDATE} (what an UPDATE of a
- * non-key column takes anyway) doesn't conflict with {@code KEY SHARE}.
+ * non-key column takes anyway) doesn't conflict with {@code KEY SHARE}. The seats likewise: the switch
+ * must take turns with holds, whose seat locks are {@code NO KEY UPDATE} too and conflict with it, but
+ * not with the {@code KEY SHARE} of an order_items or tickets insert checking its seat (M2.4a).
  * <p>
  * <b>Recovery:</b> if the process dies after the commit, before step 5, repeat the request. From
  * REDIS_FIRST the leftover keys are inert (the gate is set) and the next switch to REDIS_FIRST
@@ -143,7 +145,7 @@ class StrategySwitcher implements StrategySwitch {
                         rs.getString("status"), rs.getBoolean("dropped")))
                 .single();
         // Every seat of the event, in seat_id order like every other path (D-015). Not read, only locked.
-        jdbc.sql("SELECT seat_id FROM event_seats WHERE event_id = :eventId ORDER BY seat_id FOR UPDATE")
+        jdbc.sql("SELECT seat_id FROM event_seats WHERE event_id = :eventId ORDER BY seat_id FOR NO KEY UPDATE")
                 .param("eventId", eventId)
                 .query(UUID.class)
                 .list();

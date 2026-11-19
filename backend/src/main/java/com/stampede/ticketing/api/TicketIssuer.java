@@ -1,5 +1,6 @@
 package com.stampede.ticketing.api;
 
+import com.stampede.shared.ordering.PostgresUuidOrder;
 import com.stampede.ticketing.signing.TicketPayload;
 import com.stampede.ticketing.signing.TicketSigner;
 import java.time.Instant;
@@ -45,9 +46,13 @@ public class TicketIssuer {
     public void issueForOrder(IssueTickets command) {
         // Whole seconds: the payload carries seconds, and the row must hold exactly what was signed.
         Instant issuedAt = Instant.now().truncatedTo(ChronoUnit.SECONDS);
-        // Seat id order, so two concurrent calls wait on the seats' index entries in the same order.
+        // Postgres seat order (D-015), not UUID.compareTo's signed order. Each insert checks its foreign key
+        // to event_seats with FOR KEY SHARE on the seat row, and waits on the unique index entry of a
+        // concurrent issuer; in the order every seat-locking path uses, none of those waits can form a
+        // cycle. (Seat paths lock FOR NO KEY UPDATE, which KEY SHARE doesn't wait for at all; this order
+        // is the second safeguard. M2.4a deadlocked on the Java order.)
         List<IssueTickets.Seat> seats = command.seats().stream()
-                .sorted(Comparator.comparing(IssueTickets.Seat::seatId))
+                .sorted(Comparator.comparing(IssueTickets.Seat::seatId, PostgresUuidOrder.COMPARATOR))
                 .toList();
         for (IssueTickets.Seat seat : seats) {
             TicketPayload payload = new TicketPayload(signer.keyId(), UUID.randomUUID(), command.eventId(),

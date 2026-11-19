@@ -4,6 +4,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.stampede.ticketing.api.IssueTickets;
 import com.stampede.ticketing.api.TicketIssuer;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.SQLException;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -16,6 +19,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import javax.sql.DataSource;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -56,6 +60,9 @@ class TicketIssuingConcurrencyTest extends CheckoutTestSupport {
 
     @Autowired
     PlatformTransactionManager transactions;
+
+    @Autowired
+    DataSource dataSource;
 
     private UUID holdId;
     private UUID orderId;
@@ -103,6 +110,47 @@ class TicketIssuingConcurrencyTest extends CheckoutTestSupport {
 
         assertOneTicketPerSeat(orderId, orderSeats, 0);
         recordTicketsIssued(orderId);
+        assertInvariants();
+    }
+
+    /**
+     * The issuer inserts in Postgres seat order, the order every path that locks seats uses (D-015), not
+     * in Java's {@code UUID.compareTo} order (M2.4a's deadlock). Two seats the two orders disagree on: a
+     * test session locks the Postgres-first one {@code FOR UPDATE}, so the issuer's first foreign-key
+     * check waits there. If it went in Postgres order it hasn't touched the other seat yet, and a probe
+     * can lock that seat with NOWAIT; in Java order it would already hold {@code FOR KEY SHARE} on it and
+     * the probe would fail with "could not obtain lock".
+     */
+    @Test
+    void theIssuerTakesItsSeatsInPostgresOrder() throws Exception {
+        UUID random = UUID.randomUUID();
+        // Sign bit clear: first in Postgres (unsigned bytes) and last in Java (signed longs) of the two.
+        UUID postgresFirst = new UUID(random.getMostSignificantBits() & Long.MAX_VALUE, random.getLeastSignificantBits());
+        UUID postgresLast = new UUID(random.getMostSignificantBits() | Long.MIN_VALUE, random.getLeastSignificantBits());
+        assertThat(postgresLast).as("Java sorts it first").isLessThan(postgresFirst);
+        addSeat(postgresFirst, 101);
+        addSeat(postgresLast, 102);
+        UUID bobOrder = orderId(postOrder(bob, hold(bob, postgresLast, postgresFirst)));
+        forgetTickets(bobOrder);
+
+        try (Connection blocker = dataSource.getConnection(); Connection probe = dataSource.getConnection()) {
+            blocker.setAutoCommit(false);
+            probe.setAutoCommit(false);
+            lockSeat(blocker, postgresFirst, "FOR UPDATE");
+
+            Future<?> issuing = POOL.submit(
+                    () -> issuer.issueForOrder(new IssueTickets(bobOrder, event, bobId, List.of(
+                            new IssueTickets.Seat(postgresLast, "A", "A", 102),
+                            new IssueTickets.Seat(postgresFirst, "A", "A", 101)))));
+            waitUntilABackendWaitsForALock();
+
+            lockSeat(probe, postgresLast, "FOR UPDATE NOWAIT");   // throws if the issuer already has it
+            probe.rollback();
+            blocker.rollback();
+            issuing.get(10, TimeUnit.SECONDS);
+        }
+        assertOneTicketPerSeat(bobOrder, List.of(postgresFirst, postgresLast), 0);
+        recordTicketsIssued(bobOrder);
         assertInvariants();
     }
 
@@ -281,6 +329,25 @@ class TicketIssuingConcurrencyTest extends CheckoutTestSupport {
             }
         } finally {
             releaseFirst.countDown();
+        }
+    }
+
+    /** One more seat in the event, with the tier of the fixture's first seat. */
+    private void addSeat(UUID seat, int number) {
+        jdbc.sql("INSERT INTO seats (id, section_id, row_label, number, x, y) VALUES (?, ?, 'A', ?, 0, 0)")
+                .params(seat, section, number).update();
+        jdbc.sql("""
+                INSERT INTO event_seats (event_id, seat_id, tier_id, status)
+                SELECT event_id, ?, tier_id, 'AVAILABLE' FROM event_seats WHERE event_id = ? AND seat_id = ?
+                """).params(seat, event, seats.get(0)).update();
+    }
+
+    private void lockSeat(Connection connection, UUID seat, String lock) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement(
+                "SELECT 1 FROM event_seats WHERE event_id = ? AND seat_id = ? " + lock)) {
+            statement.setObject(1, event);
+            statement.setObject(2, seat);
+            statement.execute();
         }
     }
 

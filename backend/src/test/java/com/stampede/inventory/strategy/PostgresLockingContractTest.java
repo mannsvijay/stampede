@@ -29,7 +29,7 @@ import org.junit.jupiter.api.Test;
  * in M2.2c, every test moved unchanged.
  * <p>
  * The lock tests hold for both strategies because they observe rows, not SQL: the pessimistic
- * strategy locks seats with {@code SELECT ... FOR UPDATE}, the optimistic one with its version-checked
+ * strategy locks seats with {@code SELECT ... FOR NO KEY UPDATE}, the optimistic one with its version-checked
  * UPDATEs, and both in Postgres {@code seat_id} order.
  */
 abstract class PostgresLockingContractTest extends InventoryStrategyContractTest {
@@ -448,7 +448,7 @@ abstract class PostgresLockingContractTest extends InventoryStrategyContractTest
         // Deterministic version of the race: another transaction locks SEAT_1 first, hold() must
         // WAIT on that lock (proved via pg_stat_activity), and after the other transaction commits
         // the seat as HELD, hold() must reject with SEAT_TAKEN, never throw and never double-hold.
-        // Pessimistic waits in its SELECT ... FOR UPDATE and then reads the committed row. Optimistic
+        // Pessimistic waits in its SELECT ... FOR NO KEY UPDATE and then reads the committed row. Optimistic
         // reads AVAILABLE without waiting, waits in its UPDATE, loses the version check, rolls back
         // and retries; the retry reads HELD (OptimisticInventoryStrategyTest counts the tries).
         UUID otherHold = UUID.randomUUID();
@@ -479,7 +479,7 @@ abstract class PostgresLockingContractTest extends InventoryStrategyContractTest
         // SEAT_1 comes first in Postgres order. We lock SEAT_1 elsewhere, start hold({SEAT_2, SEAT_1})
         // and wait until it blocks. If it locks in seat_id order it is blocked on SEAT_1 and has NOT
         // taken SEAT_2 yet, so a third session can lock SEAT_2 with NOWAIT (fail instead of waiting).
-        // Pessimistic would hold SEAT_2 through its FOR UPDATE, optimistic through its UPDATE of
+        // Pessimistic would hold SEAT_2 through its FOR NO KEY UPDATE, optimistic through its UPDATE of
         // SEAT_2 (an UPDATE locks its row until commit): the probe catches either.
         try (Connection blocker = openTransaction(); Connection probe = openTransaction()) {
             exec(blocker, "SELECT 1 FROM event_seats WHERE event_id = ? AND seat_id = ? FOR UPDATE", EVENT_A, SEAT_1);
@@ -695,6 +695,54 @@ abstract class PostgresLockingContractTest extends InventoryStrategyContractTest
         assertThat(seat(EVENT_A, SEAT_2)).isEqualTo(new SeatRow(SeatStatus.AVAILABLE, null, null, 2));
         assertThat(hold(holdId).orElseThrow().status()).isEqualTo("RELEASED");
         assertThat(used(EVENT_A)).isEqualTo(0);
+    }
+
+    // --- foreign-key checks on seats (D-015 lock modes) --------------------------------------------
+    // order_items and tickets have foreign keys to event_seats. Each insert checks its seat with
+    // FOR KEY SHARE, which only stops the row from being deleted or its key (event_id, seat_id) from
+    // changing. No path does either to a seat, so no path may wait for that lock: each test holds it in
+    // another session and requires the path to finish with no session waiting for a lock. Until the
+    // M2.4a fix the explicit seat locks were FOR UPDATE, which conflicts with KEY SHARE; the optimistic
+    // hold, which locks only through its UPDATEs (FOR NO KEY UPDATE), never waited.
+
+    @Test
+    void holdDoesNotWaitForAForeignKeyCheckOnItsSeats() throws Exception {
+        try (Connection checkout = foreignKeyCheckOn(EVENT_A, SEAT_1)) {
+            HoldOutcome outcome = finishesWithoutWaitingForALock(
+                    THREADS.submit(() -> strategy.hold(request(UUID.randomUUID(), EVENT_A, SEAT_1, SEAT_2))));
+
+            assertThat(outcome).isInstanceOf(Held.class);
+            checkout.rollback();
+        }
+    }
+
+    @Test
+    void releaseDoesNotWaitForAForeignKeyCheckOnItsSeats() throws Exception {
+        UUID holdId = UUID.randomUUID();
+        holdDirectly(holdId, EVENT_A, SEAT_1, SEAT_2);
+        try (Connection checkout = foreignKeyCheckOn(EVENT_A, SEAT_2)) {
+            ReleaseOutcome outcome = finishesWithoutWaitingForALock(
+                    THREADS.submit(() -> strategy.release(EVENT_A, holdId, ReleaseReason.RELEASED)));
+
+            assertThat(outcome).isInstanceOf(Released.class);
+            checkout.rollback();
+        }
+    }
+
+    @Test
+    @ExpectInvariantViolations(rules = {"O1", "O5", "O7"},
+            reason = "Strategy unit test of step 3 only (D-017): the order is a bare PENDING row and step 4 (booking marks it PAID) never runs, so its seats are SOLD to a PENDING order")
+    void sellDoesNotWaitForAForeignKeyCheckOnItsSeats() throws Exception {
+        UUID holdId = UUID.randomUUID();
+        holdDirectly(holdId, EVENT_A, SEAT_1, SEAT_2);
+        UUID orderId = pendingOrder(holdId, EVENT_A);
+        try (Connection checkout = foreignKeyCheckOn(EVENT_A, SEAT_1)) {
+            SellOutcome outcome = finishesWithoutWaitingForALock(
+                    THREADS.submit(() -> strategy.sell(EVENT_A, holdId, orderId)));
+
+            assertThat(outcome).isInstanceOf(SellOutcome.Sold.class);
+            checkout.rollback();
+        }
     }
 
     // --- helpers ---------------------------------------------------------------------------------

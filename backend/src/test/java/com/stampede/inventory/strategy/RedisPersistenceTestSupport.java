@@ -11,6 +11,8 @@ import com.stampede.testsupport.TestRedis;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.nio.charset.StandardCharsets;
 import java.sql.Array;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.time.Duration;
 import java.time.Instant;
@@ -20,7 +22,10 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.IntStream;
+import javax.sql.DataSource;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -119,6 +124,9 @@ abstract class RedisPersistenceTestSupport {
 
     @Autowired
     MeterRegistry meters;
+
+    @Autowired
+    DataSource dataSource;
 
     /** Counter values when the test started: the context (and its meters) is shared by every test. */
     private final java.util.Map<io.micrometer.core.instrument.Meter.Id, Double> counterBaseline = new java.util.HashMap<>();
@@ -365,6 +373,44 @@ abstract class RedisPersistenceTestSupport {
 
     List<Violation> violations() {
         return invariants.check(EVENT, Duration.ZERO);
+    }
+
+    /**
+     * Another session doing what the foreign-key check of an {@code order_items} or {@code tickets}
+     * insert does: {@code FOR KEY SHARE} on the seat row. Returns the open transaction; roll it back.
+     */
+    Connection foreignKeyCheckOn(UUID seatId) throws SQLException {
+        Connection connection = dataSource.getConnection();
+        connection.setAutoCommit(false);
+        try (PreparedStatement statement = connection.prepareStatement(
+                "SELECT 1 FROM event_seats WHERE event_id = ? AND seat_id = ? FOR KEY SHARE")) {
+            statement.setObject(1, EVENT);
+            statement.setObject(2, seatId);
+            statement.execute();
+        }
+        return connection;
+    }
+
+    /**
+     * Waits for {@code call} and fails as soon as any session of this database waits for a lock
+     * meanwhile (nothing runs in the background here, so a waiting session is the call). For locks no
+     * path may wait for, like a foreign-key check's {@code FOR KEY SHARE} on a seat (D-015).
+     */
+    <T> T finishesWithoutWaitingForALock(Future<T> call) throws Exception {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+        while (!call.isDone()) {
+            List<String> waiting = jdbc.sql("SELECT query FROM pg_stat_activity WHERE wait_event_type = 'Lock' "
+                            + "AND datname = current_database()")
+                    .query(String.class).list();
+            if (!waiting.isEmpty()) {
+                throw new AssertionError("Expected no session to wait for a lock, but these do: " + waiting);
+            }
+            if (System.nanoTime() > deadline) {
+                throw new AssertionError("The call did not finish within 10 s");
+            }
+            Thread.sleep(10);
+        }
+        return call.get();
     }
 
     static UUID id(String name) {

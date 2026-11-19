@@ -24,8 +24,9 @@ import org.springframework.transaction.annotation.Transactional;
  * can't be raced, and an optimistic variant would add code without removing any waiting. Moved here
  * unchanged from the pessimistic strategy (M1.2, M1.4, M1.5).
  * <p>
- * Lock order (D-015): the hold row, then its seats in Postgres {@code seat_id} order, then the user's
- * allowance row. Each method is one transaction (REQUIRED, see D-015 on callers).
+ * Lock order (D-015): the hold row ({@code FOR UPDATE}), then its seats in Postgres {@code seat_id} order
+ * ({@code FOR NO KEY UPDATE}), then the user's allowance row. Each method is one transaction (REQUIRED,
+ * see D-015 on callers).
  */
 @Component
 class HoldClosing {
@@ -142,7 +143,7 @@ class HoldClosing {
         CloseDecision.Close close = (CloseDecision.Close) decision;
         ReleaseReason reason = close.reason();
 
-        // Step 9: then its seats, in the same ORDER BY seat_id FOR UPDATE order as every hold path.
+        // Step 9: then its seats, in the same ORDER BY seat_id order as every hold path.
         List<EventSeat> locked = lockSeatsOfHold(eventId, holdId, hold.get().seatIds());
 
         // Step 10: the state machine moves each seat. A rejection here would mean corrupt data, so
@@ -278,6 +279,9 @@ class HoldClosing {
      * Locks the seats an ACTIVE hold owns (step 9 / S2), in seat_id order. event_seats.hold_id is the
      * authoritative owner; holds.seat_ids is a convenience copy. If the two disagree, the data is
      * already wrong (invariant broken): throw and roll back instead of acting on half a hold.
+     * <p>
+     * {@code FOR NO KEY UPDATE}: release and sell change only non-key seat columns, and this mode doesn't
+     * block the {@code FOR KEY SHARE} of an order_items or tickets foreign-key check (D-015 lock modes).
      */
     private List<EventSeat> lockSeatsOfHold(UUID eventId, UUID holdId, List<UUID> listedSeats) {
         List<EventSeat> locked = jdbc.sql("""
@@ -285,7 +289,7 @@ class HoldClosing {
                         FROM event_seats
                         WHERE event_id = :eventId AND hold_id = :holdId
                         ORDER BY seat_id
-                        FOR UPDATE
+                        FOR NO KEY UPDATE
                         """)
                 .param("eventId", eventId)
                 .param("holdId", holdId)
