@@ -39,6 +39,7 @@ class RedisHoldStore {
     private final RedisScript<List> loadScript = script("redis/load.lua");
     private final RedisScript<List> pinScript = script("redis/pin.lua");
     private final RedisScript<List> soldScript = script("redis/sold.lua");
+    private final RedisScript<List> epochScript = script("redis/epoch.lua");
 
     RedisHoldStore(StringRedisTemplate redis, RedisInventoryProperties properties) {
         this.redis = redis;
@@ -413,6 +414,31 @@ class RedisHoldStore {
     /** The raw value of a seat key ({@code H:...} or {@code S:...}), or null if the seat is free. */
     String seatValue(UUID eventId, UUID seatId) {
         return redis.opsForValue().get(keys.seat(eventId, seatId));
+    }
+
+    /**
+     * What {@code epoch.lua} saw at one instant (M2.4a-seatmap): Redis' clock, the event's state
+     * ({@code LOADED}, {@code NOT_LOADED} or {@code CLOSED}) and its load epoch ({@code ""} if none).
+     */
+    record EventEpoch(long nowMillis, String state, String loadedMs) {
+    }
+
+    /** One round trip: Redis' clock, whether the event is loaded or closed, and its load epoch. */
+    EventEpoch eventEpoch(UUID eventId) {
+        List<String> reply = run(epochScript, List.of(keys.meta(eventId), keys.closed(eventId)), List.of());
+        return new EventEpoch(Long.parseLong(reply.get(0)), reply.get(1), reply.get(2));
+    }
+
+    /**
+     * One MGET of these seats' keys, in the given order: each key's value, or null where Redis has no key
+     * (the seat is free there; an expired key reads as missing even before Redis frees its memory).
+     */
+    List<String> seatValues(UUID eventId, List<UUID> seatIds) {
+        List<String> values = redis.opsForValue().multiGet(seatIds.stream().map(seat -> keys.seat(eventId, seat)).toList());
+        if (values == null || values.size() != seatIds.size()) {
+            throw new IllegalStateException("MGET of " + seatIds.size() + " seat keys returned " + values);
+        }
+        return values;
     }
 
     /** Marks a seat sold ({@code S:<orderId>:<soldMs>}, no expiry), whatever the key held before. */

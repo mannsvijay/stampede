@@ -1162,10 +1162,57 @@ Write these yourself, in your own words. Each one is an interview answer you've 
   - No HTTP caching headers on the layout yet; TanStack Query keeps it for the page's lifetime.
   - Two generic-sounding schemas were prefixed (`LayoutRect`, `LayoutPoint`) because OpenAPI
     schema names share one namespace.
+- **Amendment (M2.4a-seatmap, 2026-11-19, decided by the user): REDIS_FIRST events read Redis.**
+  - **Why:** under REDIS_FIRST, Redis decides every hold and Postgres trails it by the stream consumer's
+    lag (D-022). In M2.4a's seat-collision, 114 of 200 buyers gave up after 5 tries on seats the map
+    showed free. The new `k6.sh` stream sampler measured the lag in a drop: up to 60 unapplied entries,
+    the oldest 3.7-5.6 s old.
+  - **Options:** (A) keep Postgres and record it as a characteristic of the strategy; (B) read the seat
+    keys from Redis; (C) a per-event Redis bitmap kept by the Lua scripts (one 252-byte `GET`, but a hold
+    that expires by TTL runs no script, so something else must clear its bit, and every script and repair
+    path must keep the bitmap right). Chosen: **B**, `MGET` in chunks of 256, Postgres fallback plus a
+    metric, `asOf` from Redis' clock, no new response field.
+  - **How:** `SeatMapQueries` still runs its one Postgres statement (existence, strategy, seat order,
+    statuses). For REDIS_FIRST, `inventory.strategy.RedisSeatAvailability` reads `epoch.lua` (Redis
+    `TIME`, loaded or closed, load epoch), the seat keys in `MGET`s of 256 in the layout's order, then
+    `epoch.lua` again. A seat is available when Redis has no key for it and Postgres hasn't SOLD it.
+    Expired holds need nothing: Redis never returns an expired key. A pinned hold (sale in progress)
+    and `S:` sale markers read as taken.
+  - **Postgres answers instead** when the event isn't loaded (every key would be missing, so every seat
+    would look free), its gate is closed (a switch, D-023), its load epoch changed mid-read, or Redis
+    fails. Counter `stampede.inventory.seatmap.reads{source=postgres|redis|fallback, reason=none|
+    not_loaded|closed|reloaded|error}`.
+  - **Still advisory:** the `MGET`s are not one snapshot, so a hold made mid-read can show half its
+    seats. Redis still decides every hold; a wrong bit costs one attempt.
+  - **Measured cost** (2,014 seats): the Postgres statement 1.5-2.5 ms (unchanged, still run). Redis: 10
+    round trips, 2 `EVALSHA` + 8 `MGET`.
+    - redis-benchmark on the dev Redis: `MGET` of 256 held keys 0.39 ms p50 including a 0.13 ms round
+      trip; one `MGET` of all 2,014 keys 1.46 ms (why the chunks).
+    - `RedisSeatAvailabilityTest`, every seat held, `SLOWLOG` logging every command: longest single
+      command median 0.55 ms; Redis time per read 3.4-4.0 ms in total.
+  - **Effect in k6 seat-collision REDIS_FIRST** (200 buyers, 100 seats, 15 s warm-up; two runs before,
+    two after, same stack):
+    - buyers who gave up after 5 tries: 66 and 41 before, **0 and 0** after
+    - buyers who found the block gone: 67 and 98 before, 143 and 148 after
+    - attempts: 665 and 616 before, 361 and 313 after
+    - conflict rate: 89.9 % and 90.1 % before, 84.2 % and 83.4 % after
+    - **but seat-map latency p50 rose from 256-409 ms to 1,463-1,720 ms** (p95 0.8-1.2 s to 2.7-3.0 s),
+      and the last seat went later (2.9-4.0 s after the drop before, 4.7-6.5 s after)
+    - Redis' peak CPU was unchanged (38-50 %). The backend was CPU-bound in every run (about 6 of 8
+      Docker CPUs), so the added time is on the backend side: likely the 10 sequential round trips on
+      Lettuce's one shared connection, and 2,014 keys built and parsed per request. Not profiled.
+  - **Known limits:**
+    - The latency regression above.
+    - Redis is down: each seat map waits for the 2 s command timeout before falling back.
+    - The keys carry no hash tag, so `MGET` across them needs a single Redis node, the same limit as
+      `hold.lua`.
 - **How I'd know it was wrong:** the layout's size or time shows up in the M2.4 load test or the PRD 8
   performance budgets (then gzip/ETag, or a compact array encoding); M4.2 finds bots scraping the
   seat map (then require the admission token for `/seatmap`); M5.1 can't express its diffs against
-  this bit order; or the client's length check ever fires.
+  this bit order; or the client's length check ever fires. For REDIS_FIRST: the seat map's latency
+  under load stays far above Postgres' (then fewer round trips, a short per-event cache of the Redis
+  answer, or option C); `fallback` reads show up outside a restart or a switch; or buyers still give up
+  on seats that look free.
 
 ### D-021 Optimistic inventory strategy: version-checked writes, bounded retries, SEAT_CONTENDED (DRAFT)
 - **Date:** 2026-11-13
@@ -1293,6 +1340,9 @@ Write these yourself, in your own words. Each one is an interview answer you've 
     own prefix with SCAN (`TestRedis.deleteKeys`), never FLUSHDB.
   - **Seat map** keeps reading Postgres (D-020): a new hold can show as free for the consumer lag,
     an expired one as taken for up to one sweeper tick. Redis still decides every hold attempt.
+    **Superseded by M2.4a-seatmap (2026-11-19, D-020 amendment):** for a REDIS_FIRST event the seat
+    map now reads the seat keys from Redis (`RedisSeatAvailability`, `epoch.lua`; Postgres when Redis
+    can't answer), after the "How I'd know" signal below fired in M2.4a.
   - **Durability:** AOF with `appendfsync everysec` and `maxmemory-policy noeviction` (made explicit
     in compose in M2.2b). A crash can lose about the last second of acknowledged holds.
   - M2.2a's `RedisHoldStore` is not itself an `InventoryStrategy`; `RedisFirstInventoryStrategy` (M2.2c-1)
@@ -1720,7 +1770,8 @@ Write these yourself, in your own words. Each one is an interview answer you've 
   benchmark still shows latency spikes every 30 s per REDIS_FIRST event (the monitor's paged read or its re-read, M2.2d); the M2.5 benchmark shows no gain over the Postgres strategies (the consumer or
   the catch-up before checkout dominates); buyers report holds that vanished without a Redis crash;
   or the seat map's staleness shows up as repeated SEAT_TAKEN on seats that look free (then read
-  Redis for REDIS_FIRST events).
+  Redis for REDIS_FIRST events). That last one fired in M2.4a (114 of 200 buyers gave up); fixed by
+  M2.4a-seatmap (D-020 amendment): 0 give-ups after, at the cost of slower seat-map reads under load.
 
 ### D-023 Strategy switch per event: only while nothing is live (DRAFT)
 - **Date:** 2026-11-18

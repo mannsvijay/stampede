@@ -29,7 +29,12 @@ import com.stampede.inventory.seed.SeedFiles;
 import com.stampede.inventory.seed.SeedIds;
 import com.stampede.inventory.seed.SeedLoader;
 import com.stampede.inventory.seed.VenueFile;
+import com.stampede.inventory.strategy.RedisFirstTestAccess;
 import com.stampede.testsupport.ApiTestSupport;
+import com.stampede.testsupport.ExpectInvariantViolations;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
+import org.springframework.context.ApplicationContext;
 
 /**
  * GET /events/{id}/layout and GET /events/{id}/seatmap over HTTP (M1.8, D-020). Every read is sent
@@ -69,6 +74,12 @@ class SeatMapApiTest extends ApiTestSupport {
     @Autowired
     SeedLoader seedLoader;
 
+    @Autowired
+    ApplicationContext context;
+
+    @Autowired
+    MeterRegistry meters;
+
     private String alice;
     private final List<UUID> extraEvents = new ArrayList<>();
     private final List<UUID> extraVenues = new ArrayList<>();
@@ -104,6 +115,10 @@ class SeatMapApiTest extends ApiTestSupport {
     /** Other tests share this database (and GET /events must only list the demo event there). */
     @AfterEach
     void deleteEvent() {
+        // REDIS_FIRST tests: apply their stream entries (the consumer thread is off in tests), then drop
+        // the event's Redis keys, so the next test starts with Redis empty for this event.
+        RedisFirstTestAccess.drainStream(context);
+        RedisFirstTestAccess.deleteEventKeys(context, EVENT);
         jdbc.sql("DELETE FROM tickets WHERE event_id = ?").param(EVENT).update();
         jdbc.sql("DELETE FROM payments WHERE order_id IN (SELECT id FROM orders WHERE event_id = ?)")
                 .param(EVENT).update();
@@ -252,6 +267,96 @@ class SeatMapApiTest extends ApiTestSupport {
                 .containsExactlyElementsOf(availableInDatabase(EVENT));
     }
 
+    // --- REDIS_FIRST: the seat map reads Redis, which decides every hold (M2.4a-seatmap, D-020) ------
+    // Postgres trails Redis by the stream consumer's lag (D-022). The consumer thread is off in tests,
+    // so "Redis has it, Postgres doesn't yet" lasts until a test drains the stream.
+
+    @Test
+    void redisFirstHoldShowsTakenBeforePostgresHasIt() {
+        redisFirst();
+        double redisReads = seatMapReads("redis", "none");
+        holdId(postHold(alice, sorted(1), sorted(3)));
+        assertThat(availableInDatabase(EVENT)).as("Postgres hasn't applied the hold").containsOnly(true);
+
+        assertThat(availableBits()).containsExactly(true, false, true, false, true);
+        assertThat(seatMapReads("redis", "none")).isEqualTo(redisReads + 1);
+        RedisFirstTestAccess.drainStream(context);   // as the consumer would: both stores agree again
+    }
+
+    @Test
+    void redisFirstHoldExpiredByItsTtlShowsFreeWhilePostgresStillHasIt() {
+        redisFirst();
+        UUID hold = holdId(postHold(alice, sorted(2)));
+        RedisFirstTestAccess.drainStream(context);   // Postgres has the hold now
+        RedisFirstTestAccess.expireNow(context, EVENT, hold);
+        assertThat(availableInDatabase(EVENT)).as("the sweeper hasn't closed it in Postgres")
+                .containsExactly(true, true, false, true, true);
+
+        assertThat(availableBits()).containsOnly(true);
+    }
+
+    @Test
+    void redisFirstSoldReleasedAndHeldSeatsShowInTheirLayoutPositions() {
+        redisFirst();
+        UUID bought = holdId(postHold(alice, sorted(0), sorted(4)));
+        Response order = exchange(HttpMethod.POST, "/orders",
+                new HttpEntity<>(Map.of("holdId", bought), jsonHeaders(alice)));
+        assertThat(order.status()).isEqualTo(201);
+        UUID released = holdId(postHold(alice, sorted(2)));
+        assertThat(request(HttpMethod.DELETE, "/holds/" + released, alice).status()).isEqualTo(204);
+        String bob = registerAndLogin(uniqueEmail()).accessToken();
+        holdId(postHold(bob, sorted(3)));   // only in Redis
+
+        assertThat(availableBits()).containsExactly(false, true, true, false, false);
+        RedisFirstTestAccess.drainStream(context);
+    }
+
+    @Test
+    @ExpectInvariantViolations(rules = {"I10"},
+            reason = "The test deletes a sold seat's Redis marker on purpose (a marker Redis lost); I10 exists to report exactly that")
+    void redisFirstNeverShowsASeatPostgresSoldAsFree() {
+        redisFirst();
+        UUID bought = holdId(postHold(alice, sorted(0)));
+        assertThat(exchange(HttpMethod.POST, "/orders",
+                new HttpEntity<>(Map.of("holdId", bought), jsonHeaders(alice))).status()).isEqualTo(201);
+        // Redis lost the sale's marker (it would be restored by the next load or the reconciler).
+        RedisFirstTestAccess.deleteSeatKey(context, EVENT, sorted(0));
+
+        assertThat(availableBits()).containsExactly(false, true, true, true, true);
+    }
+
+    @Test
+    void redisFirstEventNotLoadedInRedisReadsPostgres() {
+        UUID hold = holdId(postHold(alice, sorted(1)));   // a Postgres hold, while PESSIMISTIC
+        redisFirst();                                     // not loaded: Redis has no key of this event
+        double fallbacks = seatMapReads("fallback", "not_loaded");
+
+        assertThat(availableBits()).containsExactly(true, false, true, true, true);
+        assertThat(seatMapReads("fallback", "not_loaded")).isEqualTo(fallbacks + 1);
+        assertThat(hold).isNotNull();
+    }
+
+    @Test
+    void redisFirstEventWithItsGateClosedReadsPostgres() {
+        redisFirst();
+        holdId(postHold(alice, sorted(1)));   // in Redis only
+        RedisFirstTestAccess.close(context, EVENT);
+        double fallbacks = seatMapReads("fallback", "closed");
+
+        assertThat(availableBits()).as("Postgres' answer, the hold not applied yet").containsOnly(true);
+        assertThat(seatMapReads("fallback", "closed")).isEqualTo(fallbacks + 1);
+        RedisFirstTestAccess.drainStream(context);
+    }
+
+    @Test
+    void eventsOfTheOtherStrategiesReadPostgres() {
+        double reads = seatMapReads("postgres", "none");
+
+        availableBits();
+
+        assertThat(seatMapReads("postgres", "none")).isEqualTo(reads + 1);
+    }
+
     @Test
     void eventWithoutSeatsHasAnEmptySeatMapAndLayout() {
         UUID empty = insertEvent(VENUE, "SCHEDULED");
@@ -340,6 +445,17 @@ class SeatMapApiTest extends ApiTestSupport {
                 """).params(id, venue, status).update();
         extraEvents.add(id);
         return id;
+    }
+
+    private void redisFirst() {
+        jdbc.sql("UPDATE events SET strategy = 'REDIS_FIRST' WHERE id = ?").param(EVENT).update();
+    }
+
+    /** {@code stampede.inventory.seatmap.reads} for one source and reason; 0 before the first read. */
+    private double seatMapReads(String source, String reason) {
+        Counter counter = meters.find("stampede.inventory.seatmap.reads").tag("source", source).tag("reason", reason)
+                .counter();
+        return counter == null ? 0 : counter.count();
     }
 
     private static UUID sorted(int position) {

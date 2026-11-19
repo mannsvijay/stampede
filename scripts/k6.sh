@@ -13,8 +13,8 @@
 #   3. runs the scenario in a pinned k6 image, on the compose network (no Docker Desktop port forwarding
 #      between k6 and the backend); setup() switches the benchmark event to --strategy before its drop
 #      and logs the test users in; teardown() gets the strict invariant verdict (GET /admin/invariants)
-#   4. samples pg_stat_activity (the app's connections: active, waiting on a lock) and `docker stats`
-#      while it runs
+#   4. samples pg_stat_activity (the app's connections: active, waiting on a lock), the inventory
+#      stream's backlog (entries Postgres hasn't applied yet, every 0.25 s) and `docker stats` while it runs
 #   5. checks that the database sold exactly the seats k6 counted, ends the run's events, and writes
 #      everything to benchmarks/runs/<UTC time>-<scenario>-<strategy>/ (gitignored)
 # Exit status: 0 only if k6's thresholds passed and the database check agrees.
@@ -142,6 +142,17 @@ docker compose exec -T postgres sh -c '
   done' >> "$OUT/pg_activity.csv" 2>>"$OUT/k6sh.log" &
 PG_SAMPLER=$!
 
+# The inventory stream's backlog every 0.25 s (scripts/k6/redis-stream-sampler.sh, M2.4a-seatmap): how far
+# Postgres trails Redis under REDIS_FIRST. Looped inside the redis container like the Postgres sampler;
+# the same stop file. The backend runs with the default key prefix (stampede) and group (D-022).
+echo "time,pending,undelivered,unapplied,oldest_unapplied_ms" > "$OUT/redis_stream.csv"
+docker compose exec -T redis sh -c 'rm -f /tmp/k6-sampler-stop; cat > /tmp/k6-redis-stream.sh' \
+  < scripts/k6/redis-stream-sampler.sh
+# The path stays inside the sh -c string: Git Bash would rewrite a bare /tmp/... argument.
+docker compose exec -T redis sh -c 'sh /tmp/k6-redis-stream.sh stampede:inv:stream inventory-persister' \
+  >> "$OUT/redis_stream.csv" 2>>"$OUT/k6sh.log" &
+REDIS_SAMPLER=$!
+
 # docker stats for every container (k6's own CPU included: a saturated k6 measures itself).
 # One --no-stream sample takes about 2 s on Docker Desktop, so this is roughly every 2 s.
 echo "time,container,cpu_percent,memory" > "$OUT/docker_stats.csv"
@@ -156,7 +167,8 @@ STATS_SAMPLER=$!
 stop_samplers() {
   touch "$OUT/.stop"
   docker compose exec -T postgres sh -c 'touch /tmp/k6-sampler-stop' >/dev/null 2>&1 || true
-  wait "$PG_SAMPLER" "$STATS_SAMPLER" 2>/dev/null || true
+  docker compose exec -T redis sh -c 'touch /tmp/k6-sampler-stop' >/dev/null 2>&1 || true
+  wait "$PG_SAMPLER" "$REDIS_SAMPLER" "$STATS_SAMPLER" 2>/dev/null || true
   rm -f "$OUT/.stop"
 }
 trap stop_samplers EXIT

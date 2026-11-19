@@ -69,7 +69,7 @@ import org.springframework.transaction.annotation.Transactional;
 // meterRegistry bean would break its context.
 @Import({StrategyTestConfig.class, RedisHoldStore.class, RedisStreamMetrics.class, RedisHoldWriter.class,
         RedisEventLoader.class, RedisStreamConsumer.class, RedisReconciler.class, InvariantChecker.class, RedisHoldStateReader.class,
-        RedisCatchUp.class, RedisFirstInventoryStrategy.class, StrategySwitcher.class})
+        RedisCatchUp.class, RedisFirstInventoryStrategy.class, StrategySwitcher.class, RedisSeatAvailability.class})
 @Transactional(propagation = Propagation.NOT_SUPPORTED)
 abstract class RedisPersistenceTestSupport {
 

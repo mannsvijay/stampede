@@ -748,7 +748,8 @@ end against the compose stack, and every concurrency harness scenario passed 100
       optimistic at most 4 active, 0 waiting; Redis-first 4 active, 1 waiting. The layout of the 2,014-seat
       demo venue is 374,473 bytes raw (D-020 estimated ~240 KB), 295 ms in smoke. Under REDIS_FIRST, 114 of
       200 buyers gave up after 5 tries (91 % conflicts): the seat map reads Postgres, which trails Redis
-      by the consumer lag, so buyers keep picking seats Redis has already given away.
+      by the consumer lag, so buyers keep picking seats Redis has already given away. (Fixed by
+      M2.4a-seatmap below.)
   - [x] M2.4a-fix The 40P01 deadlock found by M2.4a (approved 2026-11-19): seat locks `FOR NO KEY UPDATE`
         everywhere (pessimistic hold, `HoldClosing` release/sell, `RedisHoldWriter`, `StrategySwitcher`),
         `TicketIssuer` inserts in Postgres seat order through the new `shared.ordering.PostgresUuidOrder`
@@ -770,6 +771,28 @@ end against the compose stack, and every concurrency harness scenario passed 100
         the burst lasts ~3 s, so these are a few samples each, not a measurement (M2.4b).
         Verified by the user (2026-11-19): full suite BUILD SUCCESSFUL in 22m 1s; ModularityTest change
         accepted. The 1000-round concurrency-proof workflow has not been run on this change yet.
+  - [ ] M2.4a-seatmap The seat map of a REDIS_FIRST event reads Redis (approved 2026-11-19; D-020
+        amendment, D-022). Decisions (user): option B, `MGET` in chunks of 256, Postgres fallback plus the
+        metric `stampede.inventory.seatmap.reads`, `asOf` from Redis' clock, no response field; `k6.sh` samples
+        the stream backlog (`scripts/k6/redis-stream-sampler.sh`, `redis_stream.csv`, every 0.25 s) and the
+        seat-collision summary reports seat-map latency.
+        Code: `inventory.strategy.RedisSeatAvailability` (public, module-internal), `redis/epoch.lua`,
+        `RedisHoldStore.eventEpoch`/`seatValues`, `SeatMapQueries` (strategy and seat id in its statement).
+        Tests: `SeatMapApiTest` +7 (shown on the old code: the three stale-map tests failed on their bits, the
+        three fallback/postgres tests only on the missing metric, the sold-seat guard only on its planted I10,
+        now declared with `@ExpectInvariantViolations`); `RedisSeatAvailabilityTest` (9, incl. the cost test);
+        `RedisFirstTestAccess.expireNow`/`close`/`deleteSeatKey`.
+        Claude (--rerun, scope set by the user): SeatMapApiTest, RedisSeatAvailabilityTest, ModularityTest:
+        27 tests, 0 failures. shellcheck clean.
+        k6 seat-collision, 200 buyers for 100 seats, 15 s warm-up. Before (image `73d07ab1`), REDIS_FIRST
+        twice: gave up 66 / 41, found the block gone 67 / 98, 665 / 616 attempts, conflicts 89.9 / 90.1 %,
+        seat map p50 409 / 256 ms. After (image `9f5e9f65`), REDIS_FIRST twice: gave up 0 / 0, found the
+        block gone 143 / 148, 361 / 313 attempts, conflicts 84.2 / 83.4 %, but seat map p50 1,720 / 1,463 ms
+        and the last seat 6.5 / 4.7 s after the drop (before 4.0 / 2.9 s). Stream backlog in every
+        REDIS_FIRST run: up to 50-60 entries, oldest 3.7-5.6 s. PESSIMISTIC after: PASS, 0 gave up, seat map
+        p50 385 ms (its path is unchanged). All five runs: 100 sold, database check ok, 0 violations.
+        Open: the seat-map latency regression (backend-side, not profiled; Redis CPU unchanged); the
+        consumer lag itself (seconds under a drop) is untouched by this task.
   - [ ] M2.4b `mixed-realistic`, the repeat procedure, the DEVELOPING.md load-test section.
       Note (from M1.8a, D-020): measure GET /events/{id}/layout (size raw and gzipped, latency) and
       GET /events/{id}/seatmap under polling load; the layout size (~240 KB raw) is only an estimate.

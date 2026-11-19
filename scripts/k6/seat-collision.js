@@ -32,6 +32,8 @@ const holdDurationWon = new Trend('hold_duration_won', true);
 const holdDurationLost = new Trend('hold_duration_lost', true);
 const holdAnswers = Object.fromEntries(HOLD_CODES.map((c) => [c, new Counter(`hold_${c}`)]));
 const orderDuration = new Trend('order_duration', true);
+/** GET seatmap during the collision (not the warm-up): the read each attempt starts with (M2.4a-seatmap). */
+const seatmapDuration = new Trend('seatmap_duration', true);
 const seatsHeld = new Counter('seats_held');
 const seatsSold = new Counter('seats_sold');
 const buyersGaveUp = new Counter('buyers_gave_up');
@@ -160,6 +162,7 @@ export function collide(data) {
       unexpected('GET seatmap', mapRes);
       return;
     }
+    seatmapDuration.add(mapRes.timings.duration);
     const free = data.hot.filter((s) => isAvailable(bytes, s.bit));
     if (free.length === 0) {
       buyersFoundBlockGone.add(1);
@@ -216,6 +219,7 @@ export function handleSummary(data) {
     `hold latency, won:  ${latency(data, 'hold_duration_won')}`,
     `hold latency, lost: ${latency(data, 'hold_duration_lost')}`,
     `order latency:      ${latency(data, 'order_duration')}`,
+    `seat-map latency:   ${latency(data, 'seatmap_duration')}`,
     `hold answers: ${answers}`,
     `conflict rate: ${attempts ? ((conflicts / attempts) * 100).toFixed(1) : '-'} % of ${attempts} attempts; `
       + `${holdsPerSecond} holds/s over ${(windowMs / 1000).toFixed(2)} s`,
